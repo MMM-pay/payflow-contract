@@ -13,6 +13,9 @@ pub struct Subscribed {
     pub amount: i128,
     pub period: u64,
     pub next_charge: u64,
+    /// 0 means open-ended. Carried in the event so indexers do not have to
+    /// make a follow-up contract read to learn a mandate's spend cap.
+    pub max_charges: u32,
 }
 
 #[contractevent]

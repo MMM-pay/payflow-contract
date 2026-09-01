@@ -130,6 +130,7 @@ impl Subscription {
             amount: plan.amount,
             period: plan.period,
             next_charge: now,
+            max_charges,
         }
         .publish(&env);
 
