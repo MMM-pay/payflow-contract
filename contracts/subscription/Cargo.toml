@@ -1,0 +1,20 @@
+[package]
+name = "payflow-subscription"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+name = "payflow_subscription"
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+payflow-plan-registry = { path = "../plan-registry" }
+payflow-vault = { path = "../vault" }
