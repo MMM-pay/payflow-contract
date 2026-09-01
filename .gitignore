@@ -4,3 +4,4 @@ target/
 *.wasm
 .DS_Store
 .stellar/
+test_snapshots/
