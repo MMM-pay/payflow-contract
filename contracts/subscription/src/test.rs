@@ -4,8 +4,9 @@ use super::*;
 use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     token::{StellarAssetClient, TokenClient},
+    xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
     Address, Env,
 };
 
@@ -101,6 +102,46 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.charges_made, 0);
     assert_eq!(m.status, MandateStatus::Active);
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
+}
+
+/// Pull a u32 field out of the data map of any emitted contract event.
+fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::U32(v) = entry.val {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn subscribe_event_carries_the_spend_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &3);
+
+    // The cap must be recoverable from the event alone. An indexer that reads
+    // only events must not have to guess it, or it will report a capped
+    // mandate as open-ended.
+    assert_eq!(
+        event_field_u32(&w.env, "max_charges"),
+        Some(3),
+        "Subscribed event must carry max_charges on the wire"
+    );
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 3);
 }
 
 #[test]
