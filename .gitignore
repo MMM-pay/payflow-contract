@@ -1,0 +1,6 @@
+target/
+.env
+.env.local
+*.wasm
+.DS_Store
+.stellar/
