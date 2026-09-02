@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/payflow-protocol/payflow-contract/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/payflow-protocol/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
+  <a href="https://github.com/titilope12/payflow-contract/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/titilope12/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
   </a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.96-orange"/>
   <img alt="soroban-sdk" src="https://img.shields.io/badge/soroban--sdk-26-blue"/>
@@ -139,9 +139,9 @@ Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
 
 | Repo | Role |
 |---|---|
-| [payflow-contract](https://github.com/payflow-protocol/payflow-contract) | Soroban contracts (this repo) |
-| [payflow-backend](https://github.com/payflow-protocol/payflow-backend) | Event indexer + keeper that settles due mandates |
-| [payflow-frontend](https://github.com/payflow-protocol/payflow-frontend) | Merchant dashboard and subscriber portal |
+| [payflow-contract](https://github.com/titilope12/payflow-contract) | Soroban contracts (this repo) |
+| [payflow-backend](https://github.com/titilope12/payflow-backend) | Event indexer + keeper that settles due mandates |
+| [payflow-frontend](https://github.com/titilope12/payflow-frontend) | Merchant dashboard and subscriber portal |
 
 ## Contributing
 
@@ -157,12 +157,12 @@ Unaudited. Testnet only. Do not use with real funds. See [SECURITY.md](SECURITY.
 
 | Name | Role | Contact |
 |---|---|---|
-| _add your name_ | Lead maintainer | _add your Telegram_ |
+| Victor Adeleke | Lead maintainer | [@titilope12](https://github.com/titilope12) |
 
 ## Contributors
 
-<a href="https://github.com/payflow-protocol/payflow-contract/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=payflow-protocol/payflow-contract"/>
+<a href="https://github.com/titilope12/payflow-contract/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=titilope12/payflow-contract"/>
 </a>
 
 ## License
