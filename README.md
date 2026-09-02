@@ -16,6 +16,9 @@
   <img alt="Network" src="https://img.shields.io/badge/network-testnet-yellow"/>
 </p>
 
+> **Live demo:** https://titilope12.github.io/payflow-frontend/ ·
+> **Docs:** https://titilope12.github.io/payflow-docs/
+
 ---
 
 ## The problem
