@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup target add wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-      - uses: stellar/stellar-cli@main
+      - uses: stellar/stellar-cli@v27.0.0
       - run: stellar contract build
       - uses: actions/upload-artifact@v4
         with:
