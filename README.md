@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/titilope12/payflow-contract/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/titilope12/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
+  <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
   </a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.96-orange"/>
   <img alt="soroban-sdk" src="https://img.shields.io/badge/soroban--sdk-26-blue"/>
@@ -16,8 +16,8 @@
   <img alt="Network" src="https://img.shields.io/badge/network-testnet-yellow"/>
 </p>
 
-> **Live demo:** https://titilope12.github.io/payflow-frontend/ ·
-> **Docs:** https://titilope12.github.io/payflow-docs/
+> **Live demo:** https://mmm-pay.github.io/payflow-frontend/ ·
+> **Docs:** https://mmm-pay.github.io/payflow-docs/
 
 ---
 
@@ -142,9 +142,9 @@ Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
 
 | Repo | Role |
 |---|---|
-| [payflow-contract](https://github.com/titilope12/payflow-contract) | Soroban contracts (this repo) |
-| [payflow-backend](https://github.com/titilope12/payflow-backend) | Event indexer + keeper that settles due mandates |
-| [payflow-frontend](https://github.com/titilope12/payflow-frontend) | Merchant dashboard and subscriber portal |
+| [payflow-contract](https://github.com/MMM-pay/payflow-contract) | Soroban contracts (this repo) |
+| [payflow-backend](https://github.com/MMM-pay/payflow-backend) | Event indexer + keeper that settles due mandates |
+| [payflow-frontend](https://github.com/MMM-pay/payflow-frontend) | Merchant dashboard and subscriber portal |
 
 ## Contributing
 
@@ -164,8 +164,8 @@ Unaudited. Testnet only. Do not use with real funds. See [SECURITY.md](SECURITY.
 
 ## Contributors
 
-<a href="https://github.com/titilope12/payflow-contract/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=titilope12/payflow-contract"/>
+<a href="https://github.com/MMM-pay/payflow-contract/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=MMM-pay/payflow-contract"/>
 </a>
 
 ## License
