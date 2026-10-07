@@ -46,6 +46,10 @@ pub struct Mandate {
     pub charges_made: u32,
     /// 0 means open-ended.
     pub max_charges: u32,
+    /// Protocol fee in basis points, frozen at subscribe time. An admin fee
+    /// change therefore cannot alter the economics of a mandate that is
+    /// already open — the same guarantee the plan's price already has.
+    pub fee_bps: u32,
     pub status: MandateStatus,
 }
 

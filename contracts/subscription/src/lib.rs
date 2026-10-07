@@ -9,7 +9,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Cancelled, Charged, MandateCompleted, PauseChanged, Subscribed};
+pub use events::{Cancelled, Charged, FeeChanged, MandateCompleted, PauseChanged, Subscribed};
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
 
@@ -95,6 +95,12 @@ impl Subscription {
             .get(&DataKey::NextMandateId)
             .ok_or(Error::NotInitialized)?;
 
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeBps)
+            .ok_or(Error::NotInitialized)?;
+
         let now = env.ledger().timestamp();
         let mandate = Mandate {
             id,
@@ -108,6 +114,7 @@ impl Subscription {
             last_charge: 0,
             charges_made: 0,
             max_charges,
+            fee_bps,
             status: MandateStatus::Active,
         };
 
@@ -161,12 +168,8 @@ impl Subscription {
             return Err(Error::MaxChargesReached);
         }
 
-        let fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::FeeBps)
-            .ok_or(Error::NotInitialized)?;
-        let fee = mandate.amount * (fee_bps as i128) / BPS_DENOMINATOR;
+        // The mandate's own fee, frozen when the subscriber opened it.
+        let fee = mandate.amount * (mandate.fee_bps as i128) / BPS_DENOMINATOR;
         let merchant_amount = mandate.amount - fee;
 
         let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
@@ -272,6 +275,40 @@ impl Subscription {
             paused,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Change the protocol fee for mandates opened from now on.
+    ///
+    /// Safe to call at any time: every open mandate carries the fee it was
+    /// created with, so this cannot reprice an existing subscriber. The
+    /// `MAX_FEE_BPS` ceiling still applies.
+    pub fn set_fee_bps(env: Env, new_fee_bps: u32) -> Result<(), Error> {
+        let admin: Address = Self::cfg_address(&env, DataKey::Admin)?;
+        admin.require_auth();
+
+        if new_fee_bps > MAX_FEE_BPS {
+            return Err(Error::FeeTooHigh);
+        }
+
+        let old_fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeBps)
+            .ok_or(Error::NotInitialized)?;
+
+        env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+        FeeChanged {
+            admin,
+            old_fee_bps,
+            new_fee_bps,
+        }
+        .publish(&env);
+
         Ok(())
     }
 
