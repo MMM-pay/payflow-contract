@@ -448,3 +448,99 @@ fn unknown_mandate_errors() {
     let w = world();
     assert_eq!(w.sub.try_get_mandate(&999), Err(Ok(Error::MandateNotFound)));
 }
+
+// ---------------------------------------------------------------------------
+// Protocol fee administration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_fee_bps_changes_the_fee_for_new_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+
+    w.sub.set_fee_bps(&0);
+    assert_eq!(w.sub.fee_bps(), 0);
+
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&id);
+
+    // Zero fee: the merchant receives the whole charge.
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
+}
+
+#[test]
+fn an_admin_fee_change_cannot_reprice_an_open_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // Subscriber opens at 1%.
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    assert_eq!(w.sub.get_mandate(&id).fee_bps, FEE_BPS);
+
+    // Admin raises the fee to the 10% ceiling afterwards.
+    w.sub.set_fee_bps(&MAX_FEE_BPS);
+    assert_eq!(w.sub.fee_bps(), MAX_FEE_BPS);
+
+    w.sub.charge(&id);
+
+    // The mandate still settles at the 1% it was opened with.
+    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    assert_eq!(w.token_client.balance(&w.fee_to), expected_fee);
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE - expected_fee);
+    assert_eq!(w.sub.get_mandate(&id).fee_bps, FEE_BPS);
+}
+
+#[test]
+fn mandates_opened_before_and_after_a_fee_change_keep_their_own_fees() {
+    let w = world();
+    let plan_id = w.plan();
+    let before = w.subscriber(100_000);
+    let old_id = w.sub.subscribe(&before, &plan_id, &0);
+
+    w.sub.set_fee_bps(&0);
+
+    let after = w.subscriber(100_000);
+    let new_id = w.sub.subscribe(&after, &plan_id, &0);
+
+    assert_eq!(w.sub.get_mandate(&old_id).fee_bps, FEE_BPS);
+    assert_eq!(w.sub.get_mandate(&new_id).fee_bps, 0);
+
+    w.sub.charge(&old_id);
+    w.sub.charge(&new_id);
+
+    // Only the pre-change mandate contributed a fee.
+    assert_eq!(
+        w.token_client.balance(&w.fee_to),
+        PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+    );
+}
+
+#[test]
+fn set_fee_bps_rejects_a_fee_above_the_ceiling() {
+    let w = world();
+    assert_eq!(
+        w.sub.try_set_fee_bps(&(MAX_FEE_BPS + 1)),
+        Err(Ok(Error::FeeTooHigh))
+    );
+    // The stored fee is unchanged by the rejected call.
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+}
+
+#[test]
+fn set_fee_bps_accepts_exactly_the_ceiling() {
+    let w = world();
+    w.sub.set_fee_bps(&MAX_FEE_BPS);
+    assert_eq!(w.sub.fee_bps(), MAX_FEE_BPS);
+}
+
+#[test]
+fn set_fee_bps_requires_admin_auth() {
+    let w = world();
+    // Drop the blanket mock: the call must carry the admin's authorization.
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_set_fee_bps(&0).is_err());
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+}
