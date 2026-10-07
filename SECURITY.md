@@ -37,9 +37,11 @@ We aim to acknowledge within 72 hours.
 
 These are understood tradeoffs, not undiscovered bugs:
 
-- **Admin trust.** The subscription admin sets the protocol fee. The fee is
-  capped at 10% (`MAX_FEE_BPS`), but within that range the admin can change it,
-  and changes affect charges on existing mandates. There is no timelock.
+- **Admin trust.** The subscription admin can change the protocol fee within
+  the 10% `MAX_FEE_BPS` ceiling, but a change only applies to mandates opened
+  after it. Every mandate stores the `fee_bps` it was created with and settles
+  at that rate for life, so an admin cannot reprice an existing subscriber and
+  no timelock is needed to make that safe.
 - **Vault admin.** The vault admin can repoint `set_subscription` to a different
   contract. A malicious admin could point it at a contract that drains balances.
   Production deployment must place both admin keys behind a multisig.
