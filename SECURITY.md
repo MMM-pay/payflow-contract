@@ -52,6 +52,12 @@ These are understood tradeoffs, not undiscovered bugs:
 - **Fee rounding.** Integer basis-point math rounds the fee down, favouring the
   merchant. For a plan priced below 100 stroops with a 1% fee, the fee rounds to
   zero.
+- **Index entries can be archived.** Each position in a merchant's or
+  subscriber's index is its own persistent entry with a 90-day TTL that is
+  extended when written, not when read. An index position untouched for 90
+  days is archived and skipped by the paged getters until it is restored. The
+  mandates and plans themselves are unaffected, and the indexer keeps the full
+  history.
 - **Timestamp dependence.** Scheduling uses ledger timestamps, which validators
   may skew by a small margin. Periods are bounded below at 60 seconds
   (`MIN_PERIOD`) so skew cannot meaningfully accelerate billing.

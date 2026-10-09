@@ -80,20 +80,46 @@ not depend on us staying online.
   plan later **cannot** reprice an open mandate.
 - `max_charges` caps total collections. `0` means open-ended.
 - `cancel` is unilateral and immediate; the merchant is not consulted.
+- A merchant can end a mandate (`end_mandate`) when it stops offering the
+  service. Ending can only stop future charges; it never takes anything.
 - Withdrawing from the vault starves any mandate. Funds are never locked.
 - A keeper outage delays billing; it never accumulates a backlog that drains a
   vault in one burst. `next_charge` advances to `now + period`, not
   `next_charge + period`.
 - The protocol fee is capped at 10% (`MAX_FEE_BPS = 1000`) and is integer basis
-  points. There is no floating point anywhere in the contracts.
+  points, frozen into each mandate when it is opened. An admin fee change only
+  applies to new mandates. There is no floating point anywhere in the contracts.
+
+## Design notes
+
+**Constructors, not `initialize`.** Every contract receives its admin and
+wiring as constructor arguments, so it is configured in the same transaction
+that deploys it. A separate `initialize` call leaves a window in which anyone
+can call it first and become admin.
+
+**Indexes that cannot be griefed.** The lists of a merchant's plans, a
+merchant's mandates and a subscriber's mandates are stored one ledger entry per
+position plus a count, not as a single growing `Vec`. Opening a subscription
+costs the same whether the merchant has one subscriber or a million, and nobody
+can block a merchant by opening throwaway mandates until a list outgrows the
+ledger's entry size limit.
+
+**Paged reads.** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
+transaction may touch at most 100 ledger entries. Each has a matching
+`*_count` function, and `next_plan_id` tells a client how many plans exist.
 
 ## Deployed — Stellar Testnet
 
 | Contract | ID |
 |---|---|
-| `plan-registry` | [`CAW6NLCTOHINSEGCKZDKLNWIQHXB5E6XKY7C5FSK7PRKNOEYT5PPI26K`](https://stellar.expert/explorer/testnet/contract/CAW6NLCTOHINSEGCKZDKLNWIQHXB5E6XKY7C5FSK7PRKNOEYT5PPI26K) |
-| `vault` | [`CCCRRJHVT5ILHRM72E7Y73IUHBMW5N7GF6KEMRVY3BE4RCSYWTIW57YZ`](https://stellar.expert/explorer/testnet/contract/CCCRRJHVT5ILHRM72E7Y73IUHBMW5N7GF6KEMRVY3BE4RCSYWTIW57YZ) |
-| `subscription` | [`CC5PF5RPV6B4SZH4D2JSEZWRZHN3MHOD5BXQJEGDH6E2UUY26X5TBS7N`](https://stellar.expert/explorer/testnet/contract/CC5PF5RPV6B4SZH4D2JSEZWRZHN3MHOD5BXQJEGDH6E2UUY26X5TBS7N) |
+| `plan-registry` | [`CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB`](https://stellar.expert/explorer/testnet/contract/CDQ5EJTVXXX2CBMHWP3BGGUDHSK6D4I25IF5XXH3QGL2TNTBMJUOFKDB) |
+| `vault` | [`CBNQEWSYYQOKNX5KB62OFT6ID5TCVSWN4PS4AXAJK6IWUEXOLVN6DXII`](https://stellar.expert/explorer/testnet/contract/CBNQEWSYYQOKNX5KB62OFT6ID5TCVSWN4PS4AXAJK6IWUEXOLVN6DXII) |
+| `subscription` | [`CD5YZUJU6WLFIHGAV4J2BV42GCVZE5ZGDUGSW5CBRIA47TQHSZZW3XMM`](https://stellar.expert/explorer/testnet/contract/CD5YZUJU6WLFIHGAV4J2BV42GCVZE5ZGDUGSW5CBRIA47TQHSZZW3XMM) |
+
+Settlement token: the native XLM Stellar Asset Contract
+(`CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`). The same ids, the admin and the ledger the suite was
+deployed at are in [`deployments/testnet.env`](deployments/testnet.env).
 
 ## Quick start
 
@@ -101,7 +127,7 @@ not depend on us staying online.
 # prerequisites: Rust 1.96+, stellar-cli 27+
 rustup target add wasm32v1-none
 
-cargo test --all          # 42 tests
+cargo test --all          # 63 tests
 stellar contract build    # wasm -> target/wasm32v1-none/release
 ```
 
@@ -112,14 +138,14 @@ stellar keys generate payflow-deployer --network testnet --fund
 ./scripts/deploy.sh testnet payflow-deployer
 ```
 
-The script deploys in dependency order, initializes each contract, grants the
-subscription contract debit rights on the vault, and prints a ready-to-paste
-env block.
+The script deploys in dependency order, passing each contract its configuration
+as constructor arguments, grants the subscription contract debit rights on the
+vault, and writes the ids to `deployments/<network>.env`.
 
 Smoke-test a live deployment end to end:
 
 ```bash
-REGISTRY=C... VAULT=C... SUBSCRIPTION=C... ./scripts/demo.sh testnet
+./scripts/demo.sh testnet   # reads deployments/testnet.env
 ```
 
 ## Repository layout
@@ -132,6 +158,8 @@ contracts/
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test
+deployments/
+  testnet.env      ids of the live testnet suite
 ```
 
 Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
@@ -145,11 +173,12 @@ Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
 | [payflow-contract](https://github.com/MMM-pay/payflow-contract) | Soroban contracts (this repo) |
 | [payflow-backend](https://github.com/MMM-pay/payflow-backend) | Event indexer + keeper that settles due mandates |
 | [payflow-frontend](https://github.com/MMM-pay/payflow-frontend) | Merchant dashboard and subscriber portal |
+| [payflow-docs](https://github.com/MMM-pay/payflow-docs) | Protocol documentation |
 
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). Good first issues are labelled
-`good-first-issue`. Every PR must pass `cargo fmt --check`, `cargo clippy -D
+`good-first-issue`. Changes are recorded in [CHANGELOG.md](CHANGELOG.md). Every PR must pass `cargo fmt --check`, `cargo clippy -D
 warnings`, and `cargo test --all`.
 
 ## Security
