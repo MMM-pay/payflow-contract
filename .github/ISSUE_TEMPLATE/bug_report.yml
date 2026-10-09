@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in payflow-contract does not work as documented.
+labels: ["bug", "contracts"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through private vulnerability
+        reporting instead (see SECURITY.md), not a public issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where
+      options:
+        - plan-registry
+        - vault
+        - subscription
+        - deploy and demo scripts
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: A failing `cargo test` case is the best reproduction. Otherwise, the contract call, its arguments and the error you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or deployment
+      description: The commit hash, release, or contract ids you were using.

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Payflow documentation
+    url: https://mmm-pay.github.io/payflow-docs/
+    about: How the protocol works, guides and the contract reference.
+  - name: Report a security problem privately
+    url: https://github.com/MMM-pay/payflow-contract/security/advisories/new
+    about: Do not open public issues for vulnerabilities.
