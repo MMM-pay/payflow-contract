@@ -109,6 +109,27 @@ take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
 
+## Try it in five minutes
+
+You need [Freighter](https://www.freighter.app/) (or another wallet supported
+by Stellar Wallets Kit) set to **Testnet**.
+
+1. **Get test XLM.** Copy your address from the wallet and open
+   `https://friendbot.stellar.org/?addr=<your address>`.
+2. **Fund your vault.** In the [demo](https://mmm-pay.github.io/payflow-frontend/),
+   connect your wallet, open **Account** and deposit 5 XLM. The vault is the
+   only balance a mandate can draw from, and you can withdraw it at any time.
+3. **Subscribe.** Open **Subscribe**, pick **Demo Monthly** (1 XLM every
+   minute; the name predates the period), set a charge limit of 3 and confirm.
+4. **Watch it bill.** The first charge is due at once. A scheduled keeper
+   settles due mandates about every 15 minutes, and **Account** shows the
+   charges. Anyone can settle a due mandate, so a merchant does not have to
+   wait for the keeper.
+5. **Stay in control.** Pause, resume or cancel from **Account**. Withdrawing
+   your vault balance also stops further charges.
+6. **Be the merchant.** On **Merchant**, publish your own plan, charge due
+   mandates yourself, or end a subscriber's mandate.
+
 ## Deployed — Stellar Testnet
 
 | Contract | ID |
