@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a deployed Payflow suite.
-# Usage: REGISTRY=C... VAULT=C... SUBSCRIPTION=C... ./scripts/demo.sh [network]
+# Usage: ./scripts/demo.sh [network]
+# Reads contract ids from deployments/<network>.env, or from REGISTRY, VAULT
+# and SUBSCRIPTION in the environment.
 set -euo pipefail
 NETWORK="${1:-testnet}"
+if [ -f "deployments/$NETWORK.env" ]; then
+  # shellcheck disable=SC1090
+  . "deployments/$NETWORK.env"
+  REGISTRY="${REGISTRY:-$PLAN_REGISTRY_ID}"
+  VAULT="${VAULT:-$VAULT_ID}"
+  SUBSCRIPTION="${SUBSCRIPTION:-$SUBSCRIPTION_ID}"
+fi
 : "${REGISTRY:?set REGISTRY}"; : "${VAULT:?set VAULT}"; : "${SUBSCRIPTION:?set SUBSCRIPTION}"
 
 TOKEN="$(stellar contract id asset --asset native --network "$NETWORK" | tail -1)"
@@ -31,3 +40,7 @@ stellar contract invoke --id "$SUBSCRIPTION" --source pf-demo-merchant --network
 
 stellar contract invoke --id "$SUBSCRIPTION" --source pf-demo-merchant --network "$NETWORK" \
   -- get_mandate --mandate_id "$MANDATE" 2>/dev/null | tail -1
+
+echo "==> the merchant's mandates, first page"
+stellar contract invoke --id "$SUBSCRIPTION" --source pf-demo-merchant --network "$NETWORK" \
+  -- merchant_mandates --merchant "$MERCHANT" --start 0 --limit 10 2>/dev/null | tail -1

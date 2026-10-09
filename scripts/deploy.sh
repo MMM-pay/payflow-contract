@@ -3,14 +3,17 @@
 #
 #   ./scripts/deploy.sh [network] [source-identity]
 #
-# Dependency order is not optional: the subscription contract is initialized
+# Dependency order is not optional: the subscription contract is constructed
 # with the addresses of the registry and the vault, and the vault must be told
 # which subscription contract may debit it.
+#
+# Writes the resulting ids to deployments/<network>.env.
 set -euo pipefail
 
 NETWORK="${1:-testnet}"
 SOURCE="${2:-payflow-deployer}"
 FEE_BPS="${FEE_BPS:-100}"
+RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
 WASM_DIR="target/wasm32v1-none/release"
 
 command -v stellar >/dev/null || { echo "stellar CLI not found" >&2; exit 1; }
@@ -32,43 +35,55 @@ echo
 echo "==> building"
 stellar contract build >/dev/null
 
+# deploy <wasm> [constructor args...]
 deploy() {
-  stellar contract deploy --wasm "$WASM_DIR/$1" --source "$SOURCE" --network "$NETWORK" 2>/dev/null | tail -1
+  local wasm="$1"
+  shift
+  stellar contract deploy --wasm "$WASM_DIR/$wasm" --source "$SOURCE" --network "$NETWORK" \
+    -- "$@" 2>/dev/null | tail -1
 }
 
+# Indexers can start from here instead of scanning older ledgers.
+START_LEDGER="$(curl -s -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' "$RPC_URL" \
+  | sed -n 's/.*"sequence":\([0-9]*\).*/\1/p')"
+
+# Each contract takes its configuration as constructor arguments, so it is
+# deployed and configured in one transaction and there is no window in which
+# someone else could claim it.
 echo "==> 1/3 plan-registry"
-REGISTRY="$(deploy payflow_plan_registry.wasm)"
-stellar contract invoke --id "$REGISTRY" --source "$SOURCE" --network "$NETWORK" \
-  -- initialize --admin "$ADMIN" >/dev/null 2>&1
+REGISTRY="$(deploy payflow_plan_registry.wasm --admin "$ADMIN")"
 
 echo "==> 2/3 vault"
-VAULT="$(deploy payflow_vault.wasm)"
-stellar contract invoke --id "$VAULT" --source "$SOURCE" --network "$NETWORK" \
-  -- initialize --admin "$ADMIN" >/dev/null 2>&1
+VAULT="$(deploy payflow_vault.wasm --admin "$ADMIN")"
 
 echo "==> 3/3 subscription"
-SUBSCRIPTION="$(deploy payflow_subscription.wasm)"
-stellar contract invoke --id "$SUBSCRIPTION" --source "$SOURCE" --network "$NETWORK" \
-  -- initialize --admin "$ADMIN" --plan_registry "$REGISTRY" --vault "$VAULT" \
-     --fee_bps "$FEE_BPS" --fee_to "$FEE_TO" >/dev/null 2>&1
+SUBSCRIPTION="$(deploy payflow_subscription.wasm --admin "$ADMIN" \
+  --plan_registry "$REGISTRY" --vault "$VAULT" --fee_bps "$FEE_BPS" --fee_to "$FEE_TO")"
 
+# The vault and the subscription contract each need the other's address, so
+# one side has to be wired after both exist. Only the vault admin can do it.
 echo "==> granting debit rights to subscription"
 stellar contract invoke --id "$VAULT" --source "$SOURCE" --network "$NETWORK" \
   -- set_subscription --subscription "$SUBSCRIPTION" >/dev/null 2>&1
 
 TOKEN="$(stellar contract id asset --asset native --network "$NETWORK" 2>/dev/null | tail -1)"
 
-cat <<EOF
-
-=========================================================
- Payflow deployed to $NETWORK
-=========================================================
-
-NEXT_PUBLIC_STELLAR_NETWORK=$NETWORK
-NEXT_PUBLIC_PLAN_REGISTRY_ID=$REGISTRY
-NEXT_PUBLIC_VAULT_ID=$VAULT
-NEXT_PUBLIC_SUBSCRIPTION_ID=$SUBSCRIPTION
-NEXT_PUBLIC_TOKEN_ID=$TOKEN
-
-=========================================================
+mkdir -p deployments
+cat > "deployments/$NETWORK.env" <<EOF
+# Written by scripts/deploy.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+NETWORK=$NETWORK
+ADMIN=$ADMIN
+FEE_BPS=$FEE_BPS
+FEE_TO=$FEE_TO
+PLAN_REGISTRY_ID=$REGISTRY
+VAULT_ID=$VAULT
+SUBSCRIPTION_ID=$SUBSCRIPTION
+TOKEN_ID=$TOKEN
+START_LEDGER=$START_LEDGER
 EOF
+
+echo
+echo "Wrote deployments/$NETWORK.env:"
+echo
+cat "deployments/$NETWORK.env"
