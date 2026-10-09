@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, String};
 
 /// Mirror of `payflow-plan-registry`'s `Plan`. Declared locally so the
 /// subscription contract can decode registry responses without linking the
@@ -8,6 +8,7 @@ use soroban_sdk::{contracttype, Address};
 pub struct Plan {
     pub id: u64,
     pub merchant: Address,
+    pub name: String,
     pub token: Address,
     pub amount: i128,
     pub period: u64,

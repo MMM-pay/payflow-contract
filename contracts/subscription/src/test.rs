@@ -7,7 +7,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
-    Address, Env,
+    Address, Env, String,
 };
 
 const MONTH: u64 = 2_592_000;
@@ -68,8 +68,13 @@ fn world() -> World<'static> {
 
 impl World<'_> {
     fn plan(&self) -> u64 {
-        self.registry
-            .create_plan(&self.merchant, &self.token, &PRICE, &MONTH)
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &PRICE,
+            &MONTH,
+            &String::from_str(&self.env, "Demo Plan"),
+        )
     }
 
     /// A subscriber with `funding` deposited into the vault.
@@ -408,7 +413,13 @@ fn zero_fee_pays_merchant_in_full() {
     sub.initialize(&admin, &registry_id, &vault_id, &0u32, &fee_to);
     vault.set_subscription(&sub_id);
 
-    let plan_id = registry.create_plan(&merchant, &token, &PRICE, &MONTH);
+    let plan_id = registry.create_plan(
+        &merchant,
+        &token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&env, "Demo Plan"),
+    );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
     vault.deposit(&user, &token, &100_000);

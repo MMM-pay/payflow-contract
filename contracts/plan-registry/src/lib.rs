@@ -11,7 +11,7 @@ pub use error::Error;
 pub use events::{PlanCreated, PlanStatusChanged};
 pub use types::{DataKey, Plan};
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -22,6 +22,10 @@ const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 /// Minimum billing period. Guards against a merchant publishing a
 /// one-second plan and draining a mandate through rapid repeat charges.
 pub const MIN_PERIOD: u64 = 60;
+
+/// Maximum plan name length in bytes. Bounded so a merchant cannot bloat
+/// persistent storage or break list rendering with an unbounded label.
+pub const MAX_NAME_LEN: u32 = 64;
 
 #[contract]
 pub struct PlanRegistry;
@@ -48,11 +52,15 @@ impl PlanRegistry {
         token: Address,
         amount: i128,
         period: u64,
+        name: String,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        if name.len() > MAX_NAME_LEN {
+            return Err(Error::NameTooLong);
         }
         if period < MIN_PERIOD {
             return Err(Error::InvalidPeriod);
@@ -67,6 +75,7 @@ impl PlanRegistry {
         let plan = Plan {
             id,
             merchant: merchant.clone(),
+            name: name.clone(),
             token,
             amount,
             period,
@@ -103,6 +112,7 @@ impl PlanRegistry {
             token: plan.token.clone(),
             amount: plan.amount,
             period: plan.period,
+            name,
         }
         .publish(&env);
 

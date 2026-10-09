@@ -138,6 +138,7 @@ impl Subscription {
             period: plan.period,
             next_charge: now,
             max_charges,
+            fee_bps,
         }
         .publish(&env);
 

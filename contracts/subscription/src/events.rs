@@ -16,6 +16,8 @@ pub struct Subscribed {
     /// 0 means open-ended. Carried in the event so indexers do not have to
     /// make a follow-up contract read to learn a mandate's spend cap.
     pub max_charges: u32,
+    /// The fee rate frozen into this mandate, for the same reason.
+    pub fee_bps: u32,
 }
 
 #[contractevent]

@@ -10,4 +10,5 @@ pub enum Error {
     NotPlanOwner = 4,
     InvalidAmount = 5,
     InvalidPeriod = 6,
+    NameTooLong = 7,
 }
