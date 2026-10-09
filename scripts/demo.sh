@@ -12,9 +12,10 @@ done
 MERCHANT="$(stellar keys address pf-demo-merchant)"
 SUBSCRIBER="$(stellar keys address pf-demo-subscriber)"
 
-echo "==> merchant publishes a 1 XLM / 60s plan"
+echo "==> merchant publishes a named 1 XLM / 60s plan"
 PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \
-  -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 10000000 --period 60 2>/dev/null | tail -1)"
+  -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 10000000 --period 60 \
+  --name "Demo Monthly" 2>/dev/null | tail -1)"
 
 echo "==> subscriber funds the vault with 5 XLM"
 stellar contract invoke --id "$VAULT" --source pf-demo-subscriber --network "$NETWORK" \
