@@ -9,7 +9,9 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Cancelled, Charged, FeeChanged, MandateCompleted, PauseChanged, Subscribed};
+pub use events::{
+    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Subscribed,
+};
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
 
@@ -29,6 +31,11 @@ pub const BPS_DENOMINATOR: i128 = 10_000;
 /// confiscatory fee on mandates that are already open.
 pub const MAX_FEE_BPS: u32 = 1_000;
 
+/// Largest page the index getters return. Each index position is its own
+/// storage entry, and a transaction may touch at most 100 entries in total,
+/// so a page of 50 leaves room for the entries the caller reads alongside it.
+pub const MAX_PAGE: u32 = 50;
+
 /// Billing engine for pull-based recurring payments.
 ///
 /// Classic Stellar has no pull-payment primitive: a payment must be pushed by
@@ -43,7 +50,10 @@ pub struct Subscription;
 
 #[contractimpl]
 impl Subscription {
-    pub fn initialize(
+    /// Runs once, in the same transaction that deploys the contract. With a
+    /// separate `initialize` call, anyone watching the ledger could call it
+    /// between the deploy and the owner's own call and make themselves admin.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         plan_registry: Address,
@@ -51,9 +61,6 @@ impl Subscription {
         fee_bps: u32,
         fee_to: Address,
     ) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
         if fee_bps > MAX_FEE_BPS {
             return Err(Error::FeeTooHigh);
         }
@@ -119,8 +126,18 @@ impl Subscription {
         };
 
         Self::write_mandate(&env, &mandate);
-        Self::index_push(&env, DataKey::SubscriberMandates(subscriber.clone()), id);
-        Self::index_push(&env, DataKey::MerchantMandates(plan.merchant.clone()), id);
+        Self::index_push(
+            &env,
+            DataKey::SubscriberMandateCount(subscriber.clone()),
+            |i| DataKey::SubscriberMandate(subscriber.clone(), i),
+            id,
+        );
+        Self::index_push(
+            &env,
+            DataKey::MerchantMandateCount(plan.merchant.clone()),
+            |i| DataKey::MerchantMandate(plan.merchant.clone(), i),
+            id,
+        );
 
         env.storage()
             .instance()
@@ -248,6 +265,35 @@ impl Subscription {
         Ok(())
     }
 
+    /// End a mandate from the merchant's side, for example when the service is
+    /// discontinued. Deactivating a plan only stops new subscriptions; this is
+    /// how a merchant stops billing the ones already open. Like `cancel`, it
+    /// is permanent, and it can only ever reduce what the subscriber pays.
+    pub fn end_mandate(env: Env, merchant: Address, mandate_id: u64) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let mut mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.merchant != merchant {
+            return Err(Error::NotMerchant);
+        }
+        if mandate.status == MandateStatus::Cancelled || mandate.status == MandateStatus::Completed
+        {
+            return Err(Error::MandateNotActive);
+        }
+
+        mandate.status = MandateStatus::Cancelled;
+        Self::write_mandate(&env, &mandate);
+
+        MandateEnded {
+            mandate_id,
+            merchant,
+            subscriber: mandate.subscriber,
+            charges_made: mandate.charges_made,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Pause or resume billing without losing the mandate's history.
     pub fn set_paused(
         env: Env,
@@ -330,18 +376,32 @@ impl Subscription {
         Ok(env.ledger().timestamp() >= m.next_charge)
     }
 
-    pub fn subscriber_mandates(env: Env, subscriber: Address) -> Vec<u64> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::SubscriberMandates(subscriber))
-            .unwrap_or_else(|| Vec::new(&env))
+    /// How many mandates `subscriber` has opened, in any state.
+    pub fn subscriber_mandate_count(env: Env, subscriber: Address) -> u32 {
+        Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber))
     }
 
-    pub fn merchant_mandates(env: Env, merchant: Address) -> Vec<u64> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::MerchantMandates(merchant))
-            .unwrap_or_else(|| Vec::new(&env))
+    /// Ids of the mandates `subscriber` opened, oldest first, starting at
+    /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
+    pub fn subscriber_mandates(env: Env, subscriber: Address, start: u32, limit: u32) -> Vec<u64> {
+        let len = Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber.clone()));
+        Self::index_page(&env, len, start, limit, |i| {
+            DataKey::SubscriberMandate(subscriber.clone(), i)
+        })
+    }
+
+    /// How many mandates have been opened against `merchant`'s plans.
+    pub fn merchant_mandate_count(env: Env, merchant: Address) -> u32 {
+        Self::index_len(&env, DataKey::MerchantMandateCount(merchant))
+    }
+
+    /// Ids of the mandates opened against `merchant`'s plans, oldest first,
+    /// starting at position `start`. Returns at most `min(limit, MAX_PAGE)`.
+    pub fn merchant_mandates(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
+        let len = Self::index_len(&env, DataKey::MerchantMandateCount(merchant.clone()));
+        Self::index_page(&env, len, start, limit, |i| {
+            DataKey::MerchantMandate(merchant.clone(), i)
+        })
     }
 
     pub fn fee_bps(env: Env) -> Result<u32, Error> {
@@ -387,16 +447,41 @@ impl Subscription {
             .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
     }
 
-    fn index_push(env: &Env, key: DataKey, id: u64) {
-        let mut list: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(env));
-        list.push_back(id);
-        env.storage().persistent().set(&key, &list);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    fn index_len(env: &Env, count_key: DataKey) -> u32 {
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Append `id` to an index stored as one entry per position.
+    ///
+    /// Each subscribe writes two small entries rather than rewriting a list
+    /// that keeps growing. With a single list, anyone could open throwaway
+    /// mandates against a merchant's plan until the list outgrew Soroban's
+    /// entry size limit, after which every new subscription to that merchant
+    /// would fail.
+    fn index_push(env: &Env, count_key: DataKey, slot: impl Fn(u32) -> DataKey, id: u64) {
+        let len = Self::index_len(env, count_key.clone());
+        let slot_key = slot(len);
+        let p = env.storage().persistent();
+        p.set(&slot_key, &id);
+        p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.set(&count_key, &(len + 1));
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    fn index_page(
+        env: &Env,
+        len: u32,
+        start: u32,
+        limit: u32,
+        slot: impl Fn(u32) -> DataKey,
+    ) -> Vec<u64> {
+        let mut out = Vec::new(env);
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+        for i in start..end {
+            if let Some(id) = env.storage().persistent().get::<_, u64>(&slot(i)) {
+                out.push_back(id);
+            }
+        }
+        out
     }
 }

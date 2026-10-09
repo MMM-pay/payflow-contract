@@ -7,24 +7,15 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let id = env.register(PlanRegistry, ());
+    let id = env.register(PlanRegistry, (admin.clone(),));
     let client = PlanRegistryClient::new(&env, &id);
-    client.initialize(&admin);
     (env, client, admin)
 }
 
 #[test]
-fn initialize_sets_admin() {
+fn constructor_sets_admin() {
     let (_env, client, admin) = setup();
     assert_eq!(client.admin(), admin);
-}
-
-#[test]
-fn initialize_is_single_use() {
-    let (env, client, _admin) = setup();
-    let other = Address::generate(&env);
-    let res = client.try_initialize(&other);
-    assert_eq!(res, Err(Ok(Error::AlreadyInitialized)));
 }
 
 #[test]
@@ -51,9 +42,11 @@ fn create_plan_assigns_sequential_ids() {
     assert_eq!(a, 1);
     assert_eq!(b, 2);
     assert_eq!(
-        client.merchant_plans(&merchant),
+        client.merchant_plans(&merchant, &0, &10),
         soroban_sdk::vec![&env, 1, 2]
     );
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+    assert_eq!(client.next_plan_id(), 3);
 }
 
 #[test]
@@ -171,7 +164,8 @@ fn set_plan_active_rejects_non_owner() {
 fn merchant_plans_empty_for_unknown_merchant() {
     let (env, client, _admin) = setup();
     let stranger = Address::generate(&env);
-    assert_eq!(client.merchant_plans(&stranger).len(), 0);
+    assert_eq!(client.merchant_plans(&stranger, &0, &10).len(), 0);
+    assert_eq!(client.merchant_plan_count(&stranger), 0);
 }
 
 #[test]
@@ -242,4 +236,41 @@ fn create_plan_rejects_an_overlong_name() {
         &String::from_str(&env, &too_long),
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
+}
+
+#[test]
+fn merchant_plans_pages_are_bounded() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+
+    for _ in 0..(MAX_PAGE + 3) {
+        client.create_plan(&merchant, &token, &1_000, &3_600, &name);
+    }
+
+    assert_eq!(client.merchant_plan_count(&merchant), MAX_PAGE + 3);
+    assert_eq!(
+        client.merchant_plans(&merchant, &0, &u32::MAX).len(),
+        MAX_PAGE
+    );
+    assert_eq!(
+        client.merchant_plans(&merchant, &MAX_PAGE, &10),
+        soroban_sdk::vec![
+            &env,
+            u64::from(MAX_PAGE) + 1,
+            u64::from(MAX_PAGE) + 2,
+            u64::from(MAX_PAGE) + 3
+        ]
+    );
+    assert_eq!(
+        client.merchant_plans(&merchant, &u32::MAX, &u32::MAX).len(),
+        0
+    );
+}
+
+#[test]
+fn next_plan_id_starts_at_one() {
+    let (_env, client, _admin) = setup();
+    assert_eq!(client.next_plan_id(), 1);
 }

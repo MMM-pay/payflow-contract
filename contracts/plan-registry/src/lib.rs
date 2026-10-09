@@ -27,22 +27,24 @@ pub const MIN_PERIOD: u64 = 60;
 /// persistent storage or break list rendering with an unbounded label.
 pub const MAX_NAME_LEN: u32 = 64;
 
+/// Largest page `merchant_plans` returns in one call. Each id is read from its
+/// own storage entry, and a transaction may touch at most 100 entries.
+pub const MAX_PAGE: u32 = 50;
+
 #[contract]
 pub struct PlanRegistry;
 
 #[contractimpl]
 impl PlanRegistry {
-    /// Set the admin. Callable once.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
+    /// Runs once, in the same transaction that deploys the contract. With a
+    /// separate `initialize` call, anyone watching the ledger could call it
+    /// between the deploy and the owner's own call and make themselves admin.
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextPlanId, &1u64);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-        Ok(())
     }
 
     /// Publish a new plan. Only the merchant may publish plans in its own name.
@@ -87,17 +89,16 @@ impl PlanRegistry {
             .persistent()
             .extend_ttl(&DataKey::Plan(id), PERSIST_THRESHOLD, PERSIST_BUMP);
 
-        let mkey = DataKey::MerchantPlans(merchant.clone());
-        let mut owned: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&mkey)
-            .unwrap_or_else(|| Vec::new(&env));
-        owned.push_back(id);
-        env.storage().persistent().set(&mkey, &owned);
-        env.storage()
-            .persistent()
-            .extend_ttl(&mkey, PERSIST_THRESHOLD, PERSIST_BUMP);
+        // One entry per position, so publishing a plan costs the same however
+        // many plans the merchant already has.
+        let count_key = DataKey::MerchantPlanCount(merchant.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let slot_key = DataKey::MerchantPlan(merchant.clone(), count);
+        let p = env.storage().persistent();
+        p.set(&slot_key, &id);
+        p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.set(&count_key, &(count + 1));
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
 
         env.storage()
             .instance()
@@ -166,11 +167,39 @@ impl PlanRegistry {
             .ok_or(Error::PlanNotFound)
     }
 
-    pub fn merchant_plans(env: Env, merchant: Address) -> Vec<u64> {
+    /// How many plans `merchant` has published, active or not.
+    pub fn merchant_plan_count(env: Env, merchant: Address) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::MerchantPlans(merchant))
-            .unwrap_or_else(|| Vec::new(&env))
+            .get(&DataKey::MerchantPlanCount(merchant))
+            .unwrap_or(0)
+    }
+
+    /// Ids of the plans `merchant` published, oldest first, starting at
+    /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
+    pub fn merchant_plans(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
+        let len = Self::merchant_plan_count(env.clone(), merchant.clone());
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+        let mut out = Vec::new(&env);
+        for i in start..end {
+            if let Some(id) = env
+                .storage()
+                .persistent()
+                .get::<_, u64>(&DataKey::MerchantPlan(merchant.clone(), i))
+            {
+                out.push_back(id);
+            }
+        }
+        out
+    }
+
+    /// The id the next published plan will get. Plans are numbered from 1, so
+    /// `next_plan_id() - 1` is the number of plans published so far.
+    pub fn next_plan_id(env: Env) -> Result<u64, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NextPlanId)
+            .ok_or(Error::NotInitialized)
     }
 
     pub fn admin(env: Env) -> Result<Address, Error> {

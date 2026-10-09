@@ -14,4 +14,5 @@ pub enum Error {
     FeeTooHigh = 8,
     MaxChargesReached = 9,
     InvalidMaxCharges = 10,
+    NotMerchant = 11,
 }

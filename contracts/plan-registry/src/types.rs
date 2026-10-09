@@ -26,5 +26,8 @@ pub enum DataKey {
     Admin,
     NextPlanId,
     Plan(u64),
-    MerchantPlans(Address),
+    /// Number of plans a merchant has published.
+    MerchantPlanCount(Address),
+    /// The n-th plan a merchant published (0-based).
+    MerchantPlan(Address, u32),
 }

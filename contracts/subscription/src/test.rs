@@ -39,17 +39,23 @@ fn world() -> World<'static> {
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let token = sac.address();
 
-    let registry_id = env.register(PlanRegistry, ());
+    let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
-    let vault_id = env.register(Vault, ());
+    let vault_id = env.register(Vault, (admin.clone(),));
     let vault = RealVaultClient::new(&env, &vault_id);
-    vault.initialize(&admin);
 
-    let sub_id = env.register(Subscription, ());
+    let sub_id = env.register(
+        Subscription,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            vault_id.clone(),
+            FEE_BPS,
+            fee_to.clone(),
+        ),
+    );
     let sub = SubscriptionClient::new(&env, &sub_id);
-    sub.initialize(&admin, &registry_id, &vault_id, &FEE_BPS, &fee_to);
 
     vault.set_subscription(&sub_id);
 
@@ -381,13 +387,15 @@ fn indexes_track_both_sides() {
     let b = w.sub.subscribe(&user, &plan_id, &0);
 
     assert_eq!(
-        w.sub.subscriber_mandates(&user),
+        w.sub.subscriber_mandates(&user, &0, &10),
         soroban_sdk::vec![&w.env, a, b]
     );
     assert_eq!(
-        w.sub.merchant_mandates(&w.merchant),
+        w.sub.merchant_mandates(&w.merchant, &0, &10),
         soroban_sdk::vec![&w.env, a, b]
     );
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 2);
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 2);
 }
 
 #[test]
@@ -402,15 +410,21 @@ fn zero_fee_pays_merchant_in_full() {
     let fee_to = Address::generate(&env);
     let token = env.register_stellar_asset_contract_v2(issuer).address();
 
-    let registry_id = env.register(PlanRegistry, ());
+    let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    registry.initialize(&admin);
-    let vault_id = env.register(Vault, ());
+    let vault_id = env.register(Vault, (admin.clone(),));
     let vault = RealVaultClient::new(&env, &vault_id);
-    vault.initialize(&admin);
-    let sub_id = env.register(Subscription, ());
+    let sub_id = env.register(
+        Subscription,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            vault_id.clone(),
+            0u32,
+            fee_to.clone(),
+        ),
+    );
     let sub = SubscriptionClient::new(&env, &sub_id);
-    sub.initialize(&admin, &registry_id, &vault_id, &0u32, &fee_to);
     vault.set_subscription(&sub_id);
 
     let plan_id = registry.create_plan(
@@ -432,26 +446,23 @@ fn zero_fee_pays_merchant_in_full() {
 }
 
 #[test]
-fn initialize_rejects_excessive_fee() {
+#[should_panic]
+fn constructor_rejects_excessive_fee() {
     let env = Env::default();
     env.mock_all_auths();
     let a = Address::generate(&env);
-    let sub_id = env.register(Subscription, ());
-    let sub = SubscriptionClient::new(&env, &sub_id);
-    assert_eq!(
-        sub.try_initialize(&a, &a, &a, &(MAX_FEE_BPS + 1), &a),
-        Err(Ok(Error::FeeTooHigh))
+    env.register(
+        Subscription,
+        (a.clone(), a.clone(), a.clone(), MAX_FEE_BPS + 1, a.clone()),
     );
 }
 
 #[test]
-fn initialize_is_single_use() {
+fn constructor_records_its_configuration() {
     let w = world();
-    let a = Address::generate(&w.env);
-    assert_eq!(
-        w.sub.try_initialize(&a, &a, &a, &0u32, &a),
-        Err(Ok(Error::AlreadyInitialized))
-    );
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+    assert_eq!(w.sub.plan_registry(), w.registry.address);
+    assert_eq!(w.sub.vault(), w.vault.address);
 }
 
 #[test]
@@ -554,4 +565,200 @@ fn set_fee_bps_requires_admin_auth() {
     w.env.set_auths(&[]);
     assert!(w.sub.try_set_fee_bps(&0).is_err());
     assert_eq!(w.sub.fee_bps(), FEE_BPS);
+}
+
+#[test]
+fn index_pages_are_bounded_and_ordered() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
+    for _ in 0..5 {
+        ids.push_back(w.sub.subscribe(&user, &plan_id, &0));
+    }
+
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &1, &2),
+        soroban_sdk::vec![&w.env, ids.get_unchecked(1), ids.get_unchecked(2)]
+    );
+    // A page that runs past the end is cut short, not an error.
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &4, &10),
+        soroban_sdk::vec![&w.env, ids.get_unchecked(4)]
+    );
+    assert_eq!(w.sub.merchant_mandates(&w.merchant, &9, &10).len(), 0);
+    // Huge start and limit values must not overflow.
+    assert_eq!(
+        w.sub
+            .merchant_mandates(&w.merchant, &u32::MAX, &u32::MAX)
+            .len(),
+        0
+    );
+    assert_eq!(w.sub.subscriber_mandates(&user, &0, &0).len(), 0);
+}
+
+#[test]
+fn index_page_size_is_capped() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    for _ in 0..(MAX_PAGE + 5) {
+        w.sub.subscribe(&user, &plan_id, &0);
+    }
+
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), MAX_PAGE + 5);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &0, &u32::MAX).len(),
+        MAX_PAGE
+    );
+    assert_eq!(
+        w.sub
+            .merchant_mandates(&w.merchant, &MAX_PAGE, &MAX_PAGE)
+            .len(),
+        5
+    );
+}
+
+/// Opening a mandate against a merchant with many existing mandates writes
+/// the same fixed-size entries as the first one did. Before, every subscribe
+/// rewrote one growing list, so throwaway mandates could push it past the
+/// ledger entry size limit and block the merchant's real subscribers.
+#[test]
+fn subscribe_cost_does_not_grow_with_the_merchant_index() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    for _ in 0..300 {
+        w.sub.subscribe(&user, &plan_id, &0);
+    }
+
+    let latecomer = w.subscriber(100_000);
+    let id = w.sub.subscribe(&latecomer, &plan_id, &0);
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 301);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &300, &1),
+        soroban_sdk::vec![&w.env, id]
+    );
+    assert_eq!(
+        w.sub.subscriber_mandates(&latecomer, &0, &10),
+        soroban_sdk::vec![&w.env, id]
+    );
+}
+
+#[test]
+fn merchant_can_end_a_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&id);
+
+    w.sub.end_mandate(&w.merchant, &id);
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Cancelled);
+    assert_eq!(m.charges_made, 1);
+
+    w.advance(MONTH);
+    assert!(!w.sub.is_due(&id));
+    assert_eq!(w.sub.try_charge(&id), Err(Ok(Error::MandateNotActive)));
+}
+
+#[test]
+fn merchant_can_end_a_paused_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.set_paused(&user, &id, &true);
+
+    w.sub.end_mandate(&w.merchant, &id);
+
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+    // Ending is permanent: the subscriber cannot resume it.
+    assert_eq!(
+        w.sub.try_set_paused(&user, &id, &false),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+#[test]
+fn only_the_mandates_merchant_can_end_it() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let stranger = Address::generate(&w.env);
+    assert_eq!(
+        w.sub.try_end_mandate(&stranger, &id),
+        Err(Ok(Error::NotMerchant))
+    );
+    // The subscriber is not the merchant either; they have `cancel`.
+    assert_eq!(
+        w.sub.try_end_mandate(&user, &id),
+        Err(Ok(Error::NotMerchant))
+    );
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn ending_a_finished_mandate_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.cancel(&user, &cancelled);
+    assert_eq!(
+        w.sub.try_end_mandate(&w.merchant, &cancelled),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    let completed = w.sub.subscribe(&user, &plan_id, &1);
+    w.sub.charge(&completed);
+    assert_eq!(
+        w.sub.get_mandate(&completed).status,
+        MandateStatus::Completed
+    );
+    assert_eq!(
+        w.sub.try_end_mandate(&w.merchant, &completed),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+#[test]
+fn end_mandate_requires_the_merchants_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    w.sub.end_mandate(&w.merchant, &id);
+
+    let auths = w.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, w.merchant);
+}
+
+#[test]
+fn end_mandate_emits_an_event_naming_the_merchant() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&id);
+
+    w.sub.end_mandate(&w.merchant, &id);
+
+    assert_eq!(event_field_u32(&w.env, "charges_made"), Some(1));
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "mandate_ended".try_into().unwrap();
+    assert_eq!(name, &expected);
 }

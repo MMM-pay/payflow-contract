@@ -45,6 +45,20 @@ pub struct Cancelled {
     pub charges_made: u32,
 }
 
+/// Emitted when the merchant ends a mandate, for example because it stopped
+/// offering the service. The mandate is cancelled exactly as if the
+/// subscriber had cancelled it; the event records who did it.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateEnded {
+    #[topic]
+    pub mandate_id: u64,
+    #[topic]
+    pub merchant: Address,
+    pub subscriber: Address,
+    pub charges_made: u32,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PauseChanged {

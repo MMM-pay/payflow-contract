@@ -31,15 +31,14 @@ pub struct Vault;
 
 #[contractimpl]
 impl Vault {
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
+    /// Runs once, in the same transaction that deploys the contract. With a
+    /// separate `initialize` call, anyone watching the ledger could call it
+    /// between the deploy and the owner's own call and make themselves admin.
+    pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-        Ok(())
     }
 
     /// Point the vault at the subscription contract allowed to debit it.

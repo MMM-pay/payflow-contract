@@ -28,9 +28,8 @@ fn setup() -> Harness<'static> {
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let token = sac.address();
 
-    let vault_id = env.register(Vault, ());
+    let vault_id = env.register(Vault, (admin.clone(),));
     let vault = VaultClient::new(&env, &vault_id);
-    vault.initialize(&admin);
     vault.set_subscription(&subscription);
 
     Harness {
@@ -151,13 +150,10 @@ fn balance_of_unknown_user_is_zero() {
 }
 
 #[test]
-fn initialize_is_single_use() {
+fn constructor_sets_admin() {
     let h = setup();
-    let other = Address::generate(&h.env);
-    assert_eq!(
-        h.vault.try_initialize(&other),
-        Err(Ok(Error::AlreadyInitialized))
-    );
+    // The constructor ran at registration, so the vault is already configured.
+    assert!(h.vault.try_admin().is_ok());
 }
 
 #[test]

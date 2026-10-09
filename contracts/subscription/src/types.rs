@@ -64,6 +64,12 @@ pub enum DataKey {
     FeeTo,
     NextMandateId,
     Mandate(u64),
-    SubscriberMandates(Address),
-    MerchantMandates(Address),
+    /// Number of mandates a subscriber has opened.
+    SubscriberMandateCount(Address),
+    /// The n-th mandate a subscriber opened (0-based).
+    SubscriberMandate(Address, u32),
+    /// Number of mandates opened against a merchant's plans.
+    MerchantMandateCount(Address),
+    /// The n-th mandate opened against a merchant's plans (0-based).
+    MerchantMandate(Address, u32),
 }
