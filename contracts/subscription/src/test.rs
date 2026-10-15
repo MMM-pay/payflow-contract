@@ -762,3 +762,63 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_ended".try_into().unwrap();
     assert_eq!(name, &expected);
 }
+
+#[test]
+fn fee_to_contract_address_receives_the_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // Use the plan-registry contract itself as the fee destination. A contract
+    // address (starts with C) proves the fee path works for a non-account
+    // recipient such as a multisig or treasury contract.
+    let registry_id = env.register(PlanRegistry, (admin.clone(),));
+    let registry = RegistryClient::new(&env, &registry_id);
+
+    let sac = env.register_stellar_asset_contract_v2(issuer);
+    let token = sac.address();
+    let token_client = TokenClient::new(&env, &token);
+    let minter = StellarAssetClient::new(&env, &token);
+
+    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault = RealVaultClient::new(&env, &vault_id);
+
+    // fee_to = the registry contract address (a contract, not an account).
+    let sub_id = env.register(
+        Subscription,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            vault_id.clone(),
+            FEE_BPS,
+            registry_id.clone(),
+        ),
+    );
+    let sub = SubscriptionClient::new(&env, &sub_id);
+    vault.set_subscription(&sub_id);
+
+    let plan_id = registry.create_plan(
+        &merchant,
+        &token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&env, "Demo Plan"),
+    );
+    let user = Address::generate(&env);
+    minter.mint(&user, &100_000);
+    vault.deposit(&user, &token, &50_000);
+
+    let id = sub.subscribe(&user, &plan_id, &0);
+    sub.charge(&id);
+
+    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    // The fee went to the registry contract's token balance, not to an
+    // account address.
+    assert_eq!(token_client.balance(&registry_id), expected_fee);
+    assert_eq!(token_client.balance(&merchant), PRICE - expected_fee);
+    assert_eq!(vault.balance(&user, &token), 50_000 - PRICE);
+}
