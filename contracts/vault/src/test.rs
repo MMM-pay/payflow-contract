@@ -161,3 +161,41 @@ fn subscription_address_is_recorded() {
     let h = setup();
     assert_eq!(h.vault.subscription(), h.subscription);
 }
+
+#[test]
+fn admin_repoint_of_subscription_does_not_move_funds() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+    let balance_before = h.vault.balance(&user, &h.token);
+    let vault_tokens_before = h.token_client.balance(&h.vault_id);
+    assert_eq!(balance_before, 4_000);
+    assert_eq!(vault_tokens_before, 4_000);
+
+    // The vault admin's only write path that touches any funds-related state
+    // is `set_subscription` (repoint). That repoint must not move user funds.
+    let new_subscription = Address::generate(&h.env);
+    h.vault.set_subscription(&new_subscription);
+
+    assert_eq!(h.vault.subscription(), new_subscription);
+    assert_eq!(h.vault.balance(&user, &h.token), balance_before);
+    assert_eq!(h.token_client.balance(&h.vault_id), vault_tokens_before);
+}
+
+#[test]
+fn admin_repoint_changes_only_the_subscription_pointer() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &2_000);
+    let original_subscription = h.vault.subscription();
+    let admin_before = h.vault.admin();
+
+    let new_subscription = Address::generate(&h.env);
+    h.vault.set_subscription(&new_subscription);
+
+    // Repointing does not touch balances, the admin, or the deposited tokens.
+    assert_eq!(h.vault.admin(), admin_before);
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
+    assert_ne!(h.vault.subscription(), original_subscription);
+}
