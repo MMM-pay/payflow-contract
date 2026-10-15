@@ -762,3 +762,50 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_ended".try_into().unwrap();
     assert_eq!(name, &expected);
 }
+
+/// A `max_charges = 1` mandate emits `Charged` and then `MandateCompleted`
+/// in that order. Indexers rely on the ordering, so pin it down: the
+/// second-to-last emitted event must be `Charged` and the last must be
+/// `MandateCompleted`.
+#[test]
+fn one_charge_mandate_completes_with_events_in_order() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &1);
+    w.sub.charge(&id);
+
+    // Collect the topic-0 event name of every event emitted by the charge,
+    // in emission order, immediately after the call (before any other host
+    // function resets the event context). The two `vault.debit` calls each
+    // emit a transfer/debit pair first, so the billing events land last.
+    let mut names = soroban_sdk::Vec::<soroban_sdk::String>::new(&w.env);
+    for event in w.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] {
+            let s = name.to_utf8_string_lossy();
+            names.push_back(soroban_sdk::String::from_str(&w.env, &s));
+        }
+    }
+
+    let n = names.len();
+    assert!(n >= 2, "expected at least 2 named events, got {n}");
+    let exp_charged = soroban_sdk::String::from_str(&w.env, "charged");
+    let exp_completed = soroban_sdk::String::from_str(&w.env, "mandate_completed");
+    assert_eq!(
+        names.get(n - 2).unwrap(),
+        exp_charged,
+        "second-to-last event must be Charged, log was {names:?}"
+    );
+    assert_eq!(
+        names.get(n - 1).unwrap(),
+        exp_completed,
+        "last event must be MandateCompleted, log was {names:?}"
+    );
+
+    // Confirm the mandate state matches the completed one-charge path.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 1);
+    assert_eq!(m.status, MandateStatus::Completed);
+}
