@@ -1,7 +1,10 @@
 target/
 .env
 .env.local
+temp_auto_push.bat
 *.wasm
 .DS_Store
 .stellar/
 test_snapshots/
+.gitignore
+branch_structure.json
