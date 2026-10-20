@@ -109,6 +109,19 @@ take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
 
+## Architecture decision records
+
+Settled design choices are written up as short ADRs (context, decision,
+consequences) in [`docs/adr/`](docs/adr/index.md):
+
+- [0001: Vault separate from billing](docs/adr/0001-vault-separate-from-billing.md)
+- [0002: `now + period` scheduling](docs/adr/0002-now-plus-period-scheduling.md)
+- [0003: Constructors instead of `initialize`](docs/adr/0003-constructors-not-initialize.md)
+- [0004: Per-position indexes](docs/adr/0004-per-position-indexes.md)
+- [0005: Permissionless `charge`](docs/adr/0005-permissionless-charge.md)
+
+Add a new ADR whenever a design choice changes.
+
 ## Try it in five minutes
 
 You need [Freighter](https://www.freighter.app/) (or another wallet supported
