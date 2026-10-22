@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use payflow_test_token::{TestToken, TestTokenClient};
 use soroban_sdk::{
     testutils::Address as _,
     token::{StellarAssetClient, TokenClient},
@@ -162,15 +163,14 @@ fn subscription_address_is_recorded() {
     assert_eq!(h.vault.subscription(), h.subscription);
 }
 
-/// The vault admin can only call `set_subscription`, which repoints the
-/// subscription contract. No admin function touches user balances directly.
-/// This test verifies that every admin-callable function leaves all user
-/// balances unchanged.
+/// The vault admin can only call configuration functions (`set_subscription`,
+/// `set_allowlist_enabled`, `set_token_allowed`). None of them touches user
+/// balances directly. This test verifies that every admin-callable function
+/// leaves all user balances unchanged.
 ///
 /// SECURITY.md: "The vault admin can repoint set_subscription to a different
 /// contract. A malicious admin could point it at a contract that drains
-/// balances." This test pins down that the only admin function exists and
-/// does not move funds.
+/// balances." This test pins down that the admin functions do not move funds.
 #[test]
 fn admin_has_no_path_to_user_funds() {
     let h = setup();
@@ -184,10 +184,14 @@ fn admin_has_no_path_to_user_funds() {
     let bal_a_before = h.vault.balance(&user_a, &h.token);
     let bal_b_before = h.vault.balance(&user_b, &h.token);
 
-    // The only admin function is set_subscription; call it with a different
-    // subscription address. This should not move any user balances.
+    // Exercise every admin function: repoint the subscription contract and
+    // flip the allowlist state around. None may move user balances.
     let new_subscription = Address::generate(&h.env);
     h.vault.set_subscription(&new_subscription);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_token_allowed(&h.token, &false);
+    h.vault.set_allowlist_enabled(&false);
 
     let bal_a_after = h.vault.balance(&user_a, &h.token);
     let bal_b_after = h.vault.balance(&user_b, &h.token);
@@ -310,6 +314,125 @@ impl Rng {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Token allowlist (#39): only tokens the admin vouched for may be deposited
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allowlist_is_disabled_by_default() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    // Testnet keeps accepting every SEP-41 token until the admin opts in.
+    assert!(!h.vault.allowlist_enabled());
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn deposits_reject_unlisted_tokens_when_the_allowlist_is_on() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+
+    assert!(h.vault.allowlist_enabled());
+    assert!(!h.vault.token_allowed(&h.token));
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+    // The rejected deposit moved nothing.
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+}
+
+#[test]
+fn an_allowlisted_token_can_be_deposited() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    assert!(h.vault.token_allowed(&h.token));
+
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+/// The acceptance criterion for the allowlist: removing a token blocks new
+/// deposits but never withdrawals, so a subscriber can always exit.
+#[test]
+fn removing_a_token_blocks_deposits_but_not_withdrawals() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    h.vault.set_token_allowed(&h.token, &false);
+
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+    h.vault.withdraw(&user, &h.token, &4_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000);
+}
+
+#[test]
+fn disabling_the_allowlist_reopens_deposits() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+
+    h.vault.set_allowlist_enabled(&false);
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn set_allowlist_enabled_requires_admin_auth() {
+    let h = setup();
+    // Drop the blanket mock: the call must carry the admin's authorization.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_set_allowlist_enabled(&true).is_err());
+    assert!(!h.vault.allowlist_enabled());
+}
+
+#[test]
+fn set_token_allowed_requires_admin_auth() {
+    let h = setup();
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_set_token_allowed(&h.token, &true).is_err());
+    assert!(!h.vault.token_allowed(&h.token));
+}
+
+/// The allowlist functions are configuration only: toggling them must not
+/// change the admin's or any user's balances.
+#[test]
+fn allowlist_admin_functions_move_no_funds() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &3_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_token_allowed(&h.token, &false);
+    h.vault.set_allowlist_enabled(&false);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 3_000);
+    assert_eq!(h.token_client.balance(&user), 7_000);
+}
+
 #[test]
 fn admin_repoint_of_subscription_does_not_move_funds() {
     let h = setup();
@@ -346,4 +469,133 @@ fn admin_repoint_changes_only_the_subscription_pointer() {
     assert_eq!(h.vault.balance(&user, &h.token), 2_000);
     assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
     assert_ne!(h.vault.subscription(), original_subscription);
+}
+
+struct FailingTokenHarness<'a> {
+    env: Env,
+    vault: VaultClient<'a>,
+    vault_id: Address,
+    token: Address,
+    test_token: TestTokenClient<'a>,
+}
+
+fn setup_failing_token() -> FailingTokenHarness<'static> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let subscription = Address::generate(&env);
+
+    let token = env.register(TestToken, (token_admin,));
+    let test_token = TestTokenClient::new(&env, &token);
+
+    let vault_id = env.register(Vault, (admin,));
+    let vault = VaultClient::new(&env, &vault_id);
+    vault.set_subscription(&subscription);
+
+    FailingTokenHarness {
+        env,
+        vault,
+        vault_id,
+        token,
+        test_token,
+    }
+}
+
+#[test]
+fn failing_transfer_reverts_deposit_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+
+    // Initial state: user has 10_000 in token, vault holds 0, user internal balance is 0.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Deposit must fail and revert completely.
+    assert!(h.vault.try_deposit(&user, &h.token, &4_000).is_err());
+
+    // Invariant: internal balance and token balances remain completely untouched.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+
+    // Once transfer failure is cleared, deposit succeeds normally.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+}
+
+#[test]
+fn failing_transfer_reverts_withdraw_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Withdraw must fail.
+    assert!(h.vault.try_withdraw(&user, &h.token, &1_500).is_err());
+
+    // Invariant: internal balance was NOT decremented, tokens were NOT moved.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    // Re-enabling transfers allows withdrawal.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.withdraw(&user, &h.token, &1_500);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 2_500);
+    assert_eq!(h.test_token.balance(&user), 7_500);
+    assert_eq!(h.test_token.balance(&h.vault_id), 2_500);
+}
+
+#[test]
+fn failing_transfer_reverts_debit_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    let merchant = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Debit must fail.
+    assert!(h
+        .vault
+        .try_debit(&user, &h.token, &merchant, &1_200)
+        .is_err());
+
+    // Invariant: internal balance was NOT decremented, merchant received nothing.
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    // Re-enabling transfers allows debit.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.debit(&user, &h.token, &merchant, &1_200);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_800);
+    assert_eq!(h.test_token.balance(&merchant), 1_200);
+    assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
 }

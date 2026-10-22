@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use events::{PlanCreated, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
@@ -98,6 +98,7 @@ impl PlanRegistry {
             period,
             active: true,
             keeper_bps,
+            successor_id: 0,
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -171,6 +172,73 @@ impl PlanRegistry {
             merchant,
             plan_id,
             active,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Point a plan at the plan that replaces it, if any.
+    ///
+    /// A merchant that replaces a plan retires the old one and opens a new one
+    /// carrying the new terms, so subscribers of the old plan need an on-chain
+    /// pointer to the new one to be able to be offered the replacement. The
+    /// pointer is stored on the retiring plan itself (`Plan.successor_id`, 0
+    /// when there is none) rather than in a side key, so `get_plan` hands back
+    /// the answer in the same read that returns the plan, and apps never need a
+    /// second lookup. Because the pointer lives on the old plan it never
+    /// touches an open mandate's frozen terms.
+    ///
+    /// The retiring plan may be re-pointed, which is how a merchant that
+    /// replaces a replacement retires the middle plan. Both plans must belong
+    /// to `merchant` and be denominated in the same token; a replacement from
+    /// another merchant's catalogue or another asset would be meaningless, and
+    /// a plan cannot be its own successor.
+    pub fn set_successor(
+        env: Env,
+        merchant: Address,
+        plan_id: u64,
+        successor_id: u64,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let plan_key = DataKey::Plan(plan_id);
+        let mut plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&plan_key)
+            .ok_or(Error::PlanNotFound)?;
+
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        if successor_id == plan_id {
+            return Err(Error::SelfSuccessor);
+        }
+
+        let successor: Plan = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Plan(successor_id))
+            .ok_or(Error::SuccessorNotFound)?;
+
+        if successor.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        if successor.token != plan.token {
+            return Err(Error::SuccessorTokenMismatch);
+        }
+
+        plan.successor_id = successor_id;
+        env.storage().persistent().set(&plan_key, &plan);
+        env.storage()
+            .persistent()
+            .extend_ttl(&plan_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        PlanSuccessorSet {
+            merchant,
+            plan_id,
+            successor_id,
         }
         .publish(&env);
 

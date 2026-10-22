@@ -19,3 +19,4 @@ payflow-shared = { path = "../shared" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 payflow-plan-registry = { path = "../plan-registry" }
 payflow-vault = { path = "../vault" }
+payflow-test-token = { path = "../test-token" }
