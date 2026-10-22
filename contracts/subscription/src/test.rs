@@ -2,6 +2,7 @@
 
 use super::*;
 use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
+use payflow_test_token::{TestToken, TestTokenClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
@@ -1112,4 +1113,189 @@ fn fee_to_contract_address_receives_the_fee() {
     assert_eq!(token_client.balance(&registry_id), expected_fee);
     assert_eq!(token_client.balance(&merchant), PRICE - expected_fee);
     assert_eq!(vault.balance(&user, &token), 50_000 - PRICE);
+}
+
+struct FailingTokenWorld<'a> {
+    env: Env,
+    sub: SubscriptionClient<'a>,
+    registry: RegistryClient<'a>,
+    vault: RealVaultClient<'a>,
+    token: Address,
+    test_token: TestTokenClient<'a>,
+    merchant: Address,
+    fee_to: Address,
+    keeper: Address,
+}
+
+fn failing_token_world() -> FailingTokenWorld<'static> {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    let keeper = Address::generate(&env);
+
+    let token = env.register(TestToken, (token_admin,));
+    let test_token = TestTokenClient::new(&env, &token);
+
+    let registry_id = env.register(PlanRegistry, (admin.clone(),));
+    let registry = RegistryClient::new(&env, &registry_id);
+
+    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault = RealVaultClient::new(&env, &vault_id);
+
+    let sub_id = env.register(
+        Subscription,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            vault_id.clone(),
+            FEE_BPS,
+            fee_to.clone(),
+        ),
+    );
+    let sub = SubscriptionClient::new(&env, &sub_id);
+
+    vault.set_subscription(&sub_id);
+
+    FailingTokenWorld {
+        env,
+        sub,
+        registry,
+        vault,
+        token,
+        test_token,
+        merchant,
+        fee_to,
+        keeper,
+    }
+}
+
+impl FailingTokenWorld<'_> {
+    fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &PRICE,
+            &MONTH,
+            &String::from_str(&self.env, "Demo Plan"),
+            &keeper_bps,
+        )
+    }
+
+    fn subscriber(&self, funding: i128) -> Address {
+        let user = Address::generate(&self.env);
+        self.test_token.mint(&user, &(funding * 2));
+        self.vault.deposit(&user, &self.token, &funding);
+        user
+    }
+}
+
+#[test]
+fn charge_reverts_completely_when_token_fails_transfer() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+
+    // Initial balances
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+
+    // Tell token to fail transfers.
+    w.test_token.set_fail_transfers(&true);
+
+    // Attempting charge must fail.
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    // Invariant: mandate billing state was not advanced.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.last_charge, 0);
+    assert_eq!(m.next_charge, 1_000_000);
+    assert_eq!(m.status, MandateStatus::Active);
+
+    // Invariant: vault internal balance and all token balances remain consistent and unchanged.
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.keeper), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+
+    // Clearing failure allows charge to settle normally.
+    w.test_token.set_fail_transfers(&false);
+    w.sub.charge(&w.keeper, &id);
+
+    let m_after = w.sub.get_mandate(&id);
+    assert_eq!(m_after.charges_made, 1);
+    assert_eq!(m_after.last_charge, 1_000_000);
+    assert_eq!(m_after.next_charge, 1_000_000 + MONTH);
+
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    assert_eq!(w.test_token.balance(&w.merchant), PRICE - fee);
+    assert_eq!(w.test_token.balance(&w.fee_to), fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000 - PRICE);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000 - PRICE);
+}
+
+#[test]
+fn charge_reverts_completely_when_fee_transfer_fails_after_merchant_debit() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    // Target failure specifically at the protocol fee recipient.
+    // In `Subscription::charge`, merchant debit happens first, followed by fee debit.
+    // A failure during fee debit must revert the whole transaction, rolling back the merchant debit.
+    w.test_token.set_fail_transfers_to(&w.fee_to, &true);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    // Invariant: complete rollback. Merchant did NOT keep tokens, user vault balance not deducted.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.last_charge, 0);
+    assert_eq!(m.next_charge, 1_000_000);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+}
+
+#[test]
+fn charge_reverts_completely_when_keeper_tip_transfer_fails() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(50_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    // Target failure specifically at the keeper.
+    // In `Subscription::charge`, merchant debit happens first, fee debit second, and tip debit third.
+    // A failure during tip debit must revert the whole transaction, rolling back both merchant and fee debits.
+    w.test_token.set_fail_transfers_to(&w.keeper, &true);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    // Invariant: complete rollback across all three debit recipients.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.last_charge, 0);
+    assert_eq!(m.next_charge, 1_000_000);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.keeper), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
 }

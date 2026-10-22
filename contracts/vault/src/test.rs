@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use payflow_test_token::{TestToken, TestTokenClient};
 use soroban_sdk::{
     testutils::Address as _,
     token::{StellarAssetClient, TokenClient},
@@ -346,4 +347,133 @@ fn admin_repoint_changes_only_the_subscription_pointer() {
     assert_eq!(h.vault.balance(&user, &h.token), 2_000);
     assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
     assert_ne!(h.vault.subscription(), original_subscription);
+}
+
+struct FailingTokenHarness<'a> {
+    env: Env,
+    vault: VaultClient<'a>,
+    vault_id: Address,
+    token: Address,
+    test_token: TestTokenClient<'a>,
+}
+
+fn setup_failing_token() -> FailingTokenHarness<'static> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let subscription = Address::generate(&env);
+
+    let token = env.register(TestToken, (token_admin,));
+    let test_token = TestTokenClient::new(&env, &token);
+
+    let vault_id = env.register(Vault, (admin,));
+    let vault = VaultClient::new(&env, &vault_id);
+    vault.set_subscription(&subscription);
+
+    FailingTokenHarness {
+        env,
+        vault,
+        vault_id,
+        token,
+        test_token,
+    }
+}
+
+#[test]
+fn failing_transfer_reverts_deposit_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+
+    // Initial state: user has 10_000 in token, vault holds 0, user internal balance is 0.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Deposit must fail and revert completely.
+    assert!(h.vault.try_deposit(&user, &h.token, &4_000).is_err());
+
+    // Invariant: internal balance and token balances remain completely untouched.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+
+    // Once transfer failure is cleared, deposit succeeds normally.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+}
+
+#[test]
+fn failing_transfer_reverts_withdraw_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Withdraw must fail.
+    assert!(h.vault.try_withdraw(&user, &h.token, &1_500).is_err());
+
+    // Invariant: internal balance was NOT decremented, tokens were NOT moved.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    // Re-enabling transfers allows withdrawal.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.withdraw(&user, &h.token, &1_500);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 2_500);
+    assert_eq!(h.test_token.balance(&user), 7_500);
+    assert_eq!(h.test_token.balance(&h.vault_id), 2_500);
+}
+
+#[test]
+fn failing_transfer_reverts_debit_and_leaves_balances_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    let merchant = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    // Configure token to fail transfers.
+    h.test_token.set_fail_transfers(&true);
+
+    // Debit must fail.
+    assert!(h
+        .vault
+        .try_debit(&user, &h.token, &merchant, &1_200)
+        .is_err());
+
+    // Invariant: internal balance was NOT decremented, merchant received nothing.
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    // Re-enabling transfers allows debit.
+    h.test_token.set_fail_transfers(&false);
+    h.vault.debit(&user, &h.token, &merchant, &1_200);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_800);
+    assert_eq!(h.test_token.balance(&merchant), 1_200);
+    assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
 }

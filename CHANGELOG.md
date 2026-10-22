@@ -95,6 +95,12 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   that the sum of internal balances equals the vault's token holdings.
 - **Test: `charges_keep_vault_balances_in_sync`** — the same invariant driven
   through the real `charge` path in the subscription contract.
+- **Test: token transfer failure behaviour** — adds `payflow-test-token`, a
+  test-only token contract that can be configured to fail transfers globally or
+  for targeted recipient addresses. Verifies in `payflow-vault` and
+  `payflow-subscription` that failing transfers revert transactions completely
+  (deposits, withdrawals, debits, and charges across merchant, fee, and tip
+  debits) and keep vault internal balances and token holdings consistent.
 - `docs/adr/`: five architecture decision records (vault/billing split,
   `now + period` scheduling, constructors, per-position indexes,
   permissionless `charge`), linked from README.
