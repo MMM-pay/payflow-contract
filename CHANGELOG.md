@@ -75,6 +75,8 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `subscription:charge(keeper, mandate_id)` pays the plan's tip to `keeper` out
   of the merchant's share. Mandates store `keeper_bps` alongside `fee_bps`;
   `Charged` gains `tip` and `keeper`, and `Subscribed` gains `keeper_bps`.
+- `subscription:due_mandates(merchant, start, limit)` returns due mandate ids
+  from one bounded page of the merchant index.
 - `contracts/shared`: the `Plan` type and `MAX_KEEPER_BPS` are defined once and
   used by both the registry and the subscription contract, so the interface
   between them cannot drift.
@@ -106,11 +108,11 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   permissionless `charge`), linked from README.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s `keeper` argument and
-the new `tip`/`keeper`/`keeper_bps` event fields) ripple into
-`payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
-consume the new fields and pass the keeper argument are tracked in the pull
-request.
+`due_mandates`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
+`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
+into `payflow-backend`, `payflow-frontend` and `payflow-docs`. The PR should list
+follow-up issues for consumers of `due_mandates`, the new fields, and keeper
+arguments.
 
 ### Changed
 

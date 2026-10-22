@@ -402,13 +402,7 @@ impl Subscription {
     /// check vault balance; a funded-ness check is the caller's job.
     pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
         let m = Self::read_mandate(&env, mandate_id)?;
-        if m.status != MandateStatus::Active {
-            return Ok(false);
-        }
-        if m.max_charges != 0 && m.charges_made >= m.max_charges {
-            return Ok(false);
-        }
-        Ok(env.ledger().timestamp() >= m.next_charge)
+        Ok(Self::mandate_is_due(&m, env.ledger().timestamp()))
     }
 
     /// How many mandates `subscriber` has opened, in any state.
@@ -439,6 +433,32 @@ impl Subscription {
         })
     }
 
+    /// Ids of due mandates opened against `merchant`'s plans, in index order.
+    /// Reads at most one page of index slots and their mandate entries.
+    pub fn due_mandates(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
+        let end = start.saturating_add(limit.min(MAX_PAGE));
+        let now = env.ledger().timestamp();
+        let mut due = Vec::new(&env);
+        let storage = env.storage().persistent();
+
+        // Avoid a separate count read: a full page reads at most 50 index
+        // slots and 50 mandates, staying within the 100-entry footprint.
+        for position in start..end {
+            let Some(id) =
+                storage.get::<_, u64>(&DataKey::MerchantMandate(merchant.clone(), position))
+            else {
+                continue;
+            };
+            let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(id)) else {
+                continue;
+            };
+            if Self::mandate_is_due(&mandate, now) {
+                due.push_back(id);
+            }
+        }
+        due
+    }
+
     pub fn fee_bps(env: Env) -> Result<u32, Error> {
         env.storage()
             .instance()
@@ -460,6 +480,12 @@ impl Subscription {
 }
 
 impl Subscription {
+    fn mandate_is_due(mandate: &Mandate, now: u64) -> bool {
+        mandate.status == MandateStatus::Active
+            && (mandate.max_charges == 0 || mandate.charges_made < mandate.max_charges)
+            && now >= mandate.next_charge
+    }
+
     fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
         env.storage()
             .instance()
