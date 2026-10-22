@@ -162,15 +162,14 @@ fn subscription_address_is_recorded() {
     assert_eq!(h.vault.subscription(), h.subscription);
 }
 
-/// The vault admin can only call `set_subscription`, which repoints the
-/// subscription contract. No admin function touches user balances directly.
-/// This test verifies that every admin-callable function leaves all user
-/// balances unchanged.
+/// The vault admin can only call configuration functions (`set_subscription`,
+/// `set_allowlist_enabled`, `set_token_allowed`). None of them touches user
+/// balances directly. This test verifies that every admin-callable function
+/// leaves all user balances unchanged.
 ///
 /// SECURITY.md: "The vault admin can repoint set_subscription to a different
 /// contract. A malicious admin could point it at a contract that drains
-/// balances." This test pins down that the only admin function exists and
-/// does not move funds.
+/// balances." This test pins down that the admin functions do not move funds.
 #[test]
 fn admin_has_no_path_to_user_funds() {
     let h = setup();
@@ -184,10 +183,14 @@ fn admin_has_no_path_to_user_funds() {
     let bal_a_before = h.vault.balance(&user_a, &h.token);
     let bal_b_before = h.vault.balance(&user_b, &h.token);
 
-    // The only admin function is set_subscription; call it with a different
-    // subscription address. This should not move any user balances.
+    // Exercise every admin function: repoint the subscription contract and
+    // flip the allowlist state around. None may move user balances.
     let new_subscription = Address::generate(&h.env);
     h.vault.set_subscription(&new_subscription);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_token_allowed(&h.token, &false);
+    h.vault.set_allowlist_enabled(&false);
 
     let bal_a_after = h.vault.balance(&user_a, &h.token);
     let bal_b_after = h.vault.balance(&user_b, &h.token);
@@ -308,6 +311,125 @@ impl Rng {
             .wrapping_add(1442695040888963407);
         self.state % bound
     }
+}
+
+// ---------------------------------------------------------------------------
+// Token allowlist (#39): only tokens the admin vouched for may be deposited
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allowlist_is_disabled_by_default() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    // Testnet keeps accepting every SEP-41 token until the admin opts in.
+    assert!(!h.vault.allowlist_enabled());
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn deposits_reject_unlisted_tokens_when_the_allowlist_is_on() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+
+    assert!(h.vault.allowlist_enabled());
+    assert!(!h.vault.token_allowed(&h.token));
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+    // The rejected deposit moved nothing.
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+}
+
+#[test]
+fn an_allowlisted_token_can_be_deposited() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    assert!(h.vault.token_allowed(&h.token));
+
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+/// The acceptance criterion for the allowlist: removing a token blocks new
+/// deposits but never withdrawals, so a subscriber can always exit.
+#[test]
+fn removing_a_token_blocks_deposits_but_not_withdrawals() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    h.vault.set_token_allowed(&h.token, &false);
+
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+    h.vault.withdraw(&user, &h.token, &4_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000);
+}
+
+#[test]
+fn disabling_the_allowlist_reopens_deposits() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+
+    h.vault.set_allowlist_enabled(&false);
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn set_allowlist_enabled_requires_admin_auth() {
+    let h = setup();
+    // Drop the blanket mock: the call must carry the admin's authorization.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_set_allowlist_enabled(&true).is_err());
+    assert!(!h.vault.allowlist_enabled());
+}
+
+#[test]
+fn set_token_allowed_requires_admin_auth() {
+    let h = setup();
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_set_token_allowed(&h.token, &true).is_err());
+    assert!(!h.vault.token_allowed(&h.token));
+}
+
+/// The allowlist functions are configuration only: toggling them must not
+/// change the admin's or any user's balances.
+#[test]
+fn allowlist_admin_functions_move_no_funds() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &3_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_token_allowed(&h.token, &false);
+    h.vault.set_allowlist_enabled(&false);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 3_000);
+    assert_eq!(h.token_client.balance(&user), 7_000);
 }
 
 #[test]

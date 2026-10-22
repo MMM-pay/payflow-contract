@@ -43,12 +43,7 @@ impl Vault {
 
     /// Point the vault at the subscription contract allowed to debit it.
     pub fn set_subscription(env: Env, subscription: Address) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        admin.require_auth();
+        Self::require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -59,11 +54,48 @@ impl Vault {
         Ok(())
     }
 
+    /// Turn the token allowlist on or off. Off by default, so a deployment
+    /// (testnet included) keeps accepting every SEP-41 token until the admin
+    /// opts in. Toggling it moves no funds: it only gates future deposits.
+    pub fn set_allowlist_enabled(env: Env, enabled: bool) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistEnabled, &enabled);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        Ok(())
+    }
+
+    /// Add or remove one token from the allowlist. Removing a token blocks
+    /// new deposits of it; balances already held can still be withdrawn, so
+    /// allowlisting can never trap funds.
+    pub fn set_token_allowed(env: Env, token: Address, allowed: bool) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        let key = DataKey::TokenAllowed(token);
+        env.storage().persistent().set(&key, &allowed);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        Ok(())
+    }
+
     /// Move `amount` of `token` from the subscriber's wallet into the vault.
     pub fn deposit(env: Env, user: Address, token: Address, amount: i128) -> Result<(), Error> {
         user.require_auth();
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+
+        // A malicious token contract can emit misleading Deposit events that
+        // indexers and UIs show as real balances. When the allowlist is on,
+        // only tokens the admin vouched for may add such events. Withdrawals
+        // are deliberately not checked: allowlisting must not trap funds.
+        if Self::allowlist_on(&env) && !Self::token_on(&env, &token) {
+            return Err(Error::TokenNotAllowed);
         }
 
         let vault = env.current_contract_address();
@@ -158,6 +190,18 @@ impl Vault {
         Self::read_balance(&env, &user, &token)
     }
 
+    /// Whether the token allowlist is enforced. Off unless the admin turned it
+    /// on.
+    pub fn allowlist_enabled(env: Env) -> bool {
+        Self::allowlist_on(&env)
+    }
+
+    /// Whether `token` is on the allowlist. Only meaningful while the
+    /// allowlist is enabled; absent means not allowed.
+    pub fn token_allowed(env: Env, token: Address) -> bool {
+        Self::token_on(&env, &token)
+    }
+
     pub fn subscription(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
@@ -174,6 +218,30 @@ impl Vault {
 }
 
 impl Vault {
+    fn require_admin(env: &Env) -> Result<Address, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        Ok(admin)
+    }
+
+    fn allowlist_on(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::AllowlistEnabled)
+            .unwrap_or(false)
+    }
+
+    fn token_on(env: &Env, token: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenAllowed(token.clone()))
+            .unwrap_or(false)
+    }
+
     fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {
         let key = DataKey::Balance(user.clone(), token.clone());
         env.storage().persistent().get(&key).unwrap_or(0)
