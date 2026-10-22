@@ -19,4 +19,11 @@ pub enum Error {
     ProfileUrlTooLong = 10,
     /// `create_plan` was given a keeper tip above MAX_KEEPER_BPS.
     KeeperBpsTooHigh = 11,
+    /// `set_successor` was given a plan that does not exist.
+    SuccessorNotFound = 12,
+    /// A plan cannot be its own successor.
+    SelfSuccessor = 13,
+    /// The replacement plan is denominated in a different token than the plan
+    /// it replaces, so the pointer would be meaningless.
+    SuccessorTokenMismatch = 14,
 }

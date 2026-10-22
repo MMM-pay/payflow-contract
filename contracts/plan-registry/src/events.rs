@@ -28,6 +28,17 @@ pub struct PlanStatusChanged {
     pub active: bool,
 }
 
+/// Emitted when a merchant points a plan at the plan that replaces it, if any.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanSuccessorSet {
+    #[topic]
+    pub merchant: Address,
+    #[topic]
+    pub plan_id: u64,
+    pub successor_id: u64,
+}
+
 /// Emitted when a merchant sets or updates its self-declared profile. The
 /// profile is not verified by the contract.
 #[contractevent]

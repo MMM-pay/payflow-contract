@@ -86,6 +86,11 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `plan-registry:deactivate_page(merchant, start, limit)`: deactivates up to
   `MAX_PAGE` of a merchant's plans in one call; only the merchant's own plans
   are touched.
+- `plan-registry:set_successor(merchant, plan_id, successor_id)`: points a
+  retired plan at the plan that replaces it, so subscribers of the old plan have
+  an on-chain pointer to the new one and apps can suggest the replacement. Both
+  plans must be owned by the merchant and be denominated in the same token; a
+  plan cannot point at itself. Emits `PlanSuccessorSet`.
 - **Test: admin has no path to user funds** — verifies that every admin-
   callable function leaves all user balances unchanged.
 - **Test: fees paid to a contract address** — verifies that the protocol fee
@@ -100,11 +105,11 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   permissionless `charge`), linked from README.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s `keeper` argument and
-the new `tip`/`keeper`/`keeper_bps` event fields) ripple into
-`payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
-consume the new fields and pass the keeper argument are tracked in the pull
-request.
+`PlanSuccessorSet`, `set_successor`, `Plan.successor_id`, `create_plan`'s
+`keeper_bps`, `charge`'s `keeper` argument and the new `tip`/`keeper`/
+`keeper_bps` event fields) ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`: follow-up issues to consume the new fields and pass the keeper
+argument are tracked in the pull request.
 
 ### Changed
 
@@ -120,6 +125,12 @@ request.
   argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
   gain fields. Existing testnet deployments must be redeployed: stored `Plan`
   and `Mandate` values do not decode into the new shape.
+- **Breaking:** `Plan` gains `successor_id` (0 = the plan has no successor),
+  returned by `get_plan` and written by `set_successor`. Existing testnet
+  deployments must be redeployed: stored `Plan` values do not decode into the
+  new shape. This also requires downstream updates in `payflow-backend`,
+  `payflow-frontend` and `payflow-docs`; follow-up issues should be linked in the
+  pull request.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -138,6 +149,10 @@ request.
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
   is transferred to the `fee_to` address when a mandate is charged.
+- **New test: `set_successor`** — the replacement is stored on the retired plan
+  through `get_plan`, self-successor, unknown-successor and cross-merchant
+  pointers are rejected, a different token is rejected, and the merchant must
+  sign.
 
 ## [0.1.0] - 2026-09-02
 
