@@ -104,7 +104,7 @@ impl PlanRegistry {
             merchant: merchant.clone(),
             name: name.clone(),
             description: description.clone(),
-            token,
+            token: token.clone(),
             amount,
             period,
             active: true,
@@ -127,6 +127,17 @@ impl PlanRegistry {
         p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
         p.set(&count_key, &(count + 1));
         p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        // One entry per position in the per-token index, so publishing a plan
+        // costs constant time and storage footprint regardless of how many
+        // plans already use the token.
+        let token_count_key = DataKey::TokenPlanCount(token.clone());
+        let token_count: u32 = p.get(&token_count_key).unwrap_or(0);
+        let token_slot_key = DataKey::TokenPlan(token.clone(), token_count);
+        p.set(&token_slot_key, &id);
+        p.extend_ttl(&token_slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.set(&token_count_key, &(token_count + 1));
+        p.extend_ttl(&token_count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
 
         env.storage()
             .instance()
@@ -384,6 +395,32 @@ impl PlanRegistry {
                 .storage()
                 .persistent()
                 .get::<_, u64>(&DataKey::MerchantPlan(merchant.clone(), i))
+            {
+                out.push_back(id);
+            }
+        }
+        out
+    }
+
+    /// How many plans are priced in `token`, active or not.
+    pub fn token_plan_count(env: Env, token: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenPlanCount(token))
+            .unwrap_or(0)
+    }
+
+    /// Ids of the plans priced in `token`, oldest first, starting at
+    /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
+    pub fn token_plans(env: Env, token: Address, start: u32, limit: u32) -> Vec<u64> {
+        let len = Self::token_plan_count(env.clone(), token.clone());
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+        let mut out = Vec::new(&env);
+        for i in start..end {
+            if let Some(id) = env
+                .storage()
+                .persistent()
+                .get::<_, u64>(&DataKey::TokenPlan(token.clone(), i))
             {
                 out.push_back(id);
             }

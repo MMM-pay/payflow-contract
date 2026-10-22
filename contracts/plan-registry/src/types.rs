@@ -29,4 +29,8 @@ pub enum DataKey {
     MerchantPlan(Address, u32),
     /// A merchant's self-declared profile.
     Profile(Address),
+    /// Number of plans priced in a given token.
+    TokenPlanCount(Address),
+    /// The n-th plan priced in a given token (0-based).
+    TokenPlan(Address, u32),
 }

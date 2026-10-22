@@ -973,3 +973,97 @@ fn create_plan_rejects_an_overlong_description() {
     );
     assert_eq!(res, Err(Ok(Error::DescriptionTooLong)));
 }
+
+// ---------------------------------------------------------------------------
+// Per-token plan index
+// ---------------------------------------------------------------------------
+
+#[test]
+fn token_plans_empty_for_unknown_token() {
+    let (env, client, _admin) = setup();
+    let stranger_token = Address::generate(&env);
+    assert_eq!(client.token_plans(&stranger_token, &0, &10).len(), 0);
+    assert_eq!(client.token_plan_count(&stranger_token), 0);
+}
+
+#[test]
+fn create_plan_indexes_by_token() {
+    let (env, client, _admin) = setup();
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+    let token_usdc = Address::generate(&env);
+    let token_xlm = Address::generate(&env);
+
+    let plan_1 = client.create_plan(
+        &merchant_a,
+        &token_usdc,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "USDC Plan 1"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let plan_2 = client.create_plan(
+        &merchant_b,
+        &token_usdc,
+        &2_000,
+        &604_800,
+        &String::from_str(&env, "USDC Plan 2"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let plan_3 = client.create_plan(
+        &merchant_a,
+        &token_xlm,
+        &5_000,
+        &604_800,
+        &String::from_str(&env, "XLM Plan 1"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    assert_eq!(client.token_plan_count(&token_usdc), 2);
+    assert_eq!(
+        client.token_plans(&token_usdc, &0, &10),
+        soroban_sdk::vec![&env, plan_1, plan_2]
+    );
+
+    assert_eq!(client.token_plan_count(&token_xlm), 1);
+    assert_eq!(
+        client.token_plans(&token_xlm, &0, &10),
+        soroban_sdk::vec![&env, plan_3]
+    );
+}
+
+#[test]
+fn token_plans_pages_are_bounded() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+
+    for _ in 0..(MAX_PAGE + 3) {
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
+    }
+
+    assert_eq!(client.token_plan_count(&token), MAX_PAGE + 3);
+    assert_eq!(client.token_plans(&token, &0, &u32::MAX).len(), MAX_PAGE);
+    assert_eq!(
+        client.token_plans(&token, &MAX_PAGE, &10),
+        soroban_sdk::vec![
+            &env,
+            u64::from(MAX_PAGE) + 1,
+            u64::from(MAX_PAGE) + 2,
+            u64::from(MAX_PAGE) + 3
+        ]
+    );
+    assert_eq!(client.token_plans(&token, &u32::MAX, &u32::MAX).len(), 0);
+}

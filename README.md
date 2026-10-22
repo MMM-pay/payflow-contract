@@ -115,7 +115,7 @@ costs the same whether the merchant has one subscriber or a million, and nobody
 can block a merchant by opening throwaway mandates until a list outgrows the
 ledger's entry size limit.
 
-**Paged reads.** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+**Paged reads.** `merchant_plans`, `token_plans`, `merchant_mandates` and `subscriber_mandates`
 take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.

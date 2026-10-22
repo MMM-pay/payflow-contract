@@ -31,6 +31,14 @@ change the contract interface.
   payflow-backend, payflow-frontend and payflow-docs need to read the new
   field and to map the new error code. Closes #91.
 
+- **plan-registry:** list plans by token. A per-token index is maintained
+  with the same per-position layout as the per-merchant index, exposing
+  `token_plans(token, start, limit)` and `token_plan_count(token)` so apps
+  and storefronts can list all plans priced in a given asset without an
+  off-chain indexer. Writing to the index adds constant cost to `create_plan`.
+  This is an interface addition: payflow-backend, payflow-frontend and
+  payflow-docs can query the new read endpoints. Closes #106.
+
 - **subscription:** `upgrade(subscriber, mandate_id, new_plan_id)` moves a
   mandate onto another plan of the same merchant, denominated in the same
   token. Moving to a more expensive plan collects the price difference for
