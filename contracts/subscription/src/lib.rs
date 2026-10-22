@@ -10,13 +10,14 @@ mod test;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Subscribed,
+    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Refunded,
+    Subscribed,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::MAX_KEEPER_BPS;
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -130,6 +131,8 @@ impl Subscription {
             max_charges,
             fee_bps,
             keeper_bps,
+            paused_until: 0,
+            refunded: 0,
             status: MandateStatus::Active,
         };
 
@@ -193,11 +196,11 @@ impl Subscription {
 
         let mut mandate = Self::read_mandate(&env, mandate_id)?;
 
-        if mandate.status != MandateStatus::Active {
+        let now = env.ledger().timestamp();
+        if !Self::active_at(&mandate, now) {
             return Err(Error::MandateNotActive);
         }
 
-        let now = env.ledger().timestamp();
         if now < mandate.next_charge {
             return Err(Error::NotDue);
         }
@@ -236,6 +239,14 @@ impl Subscription {
 
         if tip > 0 {
             vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
+        }
+
+        // Settling through a scheduled pause that has run its course resumes
+        // the mandate: the subscriber never has to send a transaction just to
+        // come back from a pause they themselves timed.
+        if mandate.status == MandateStatus::Paused {
+            mandate.status = MandateStatus::Active;
+            mandate.paused_until = 0;
         }
 
         mandate.charges_made += 1;
@@ -330,6 +341,10 @@ impl Subscription {
     }
 
     /// Pause or resume billing without losing the mandate's history.
+    ///
+    /// An open-ended pause: a mandate paused this way stays paused until it is
+    /// resumed here. `pause_until` is the alternative for a pause that should
+    /// lift by itself.
     pub fn set_paused(
         env: Env,
         subscriber: Address,
@@ -348,6 +363,9 @@ impl Subscription {
             (MandateStatus::Paused, false) => MandateStatus::Active,
             _ => return Err(Error::MandateNotActive),
         };
+        // This call owns the pause schedule: pausing opens an indefinite
+        // pause, resuming cancels whatever schedule was set before.
+        mandate.paused_until = 0;
 
         Self::write_mandate(&env, &mandate);
 
@@ -355,6 +373,104 @@ impl Subscription {
             mandate_id,
             subscriber,
             paused,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Pause billing until a given date, without needing a transaction from
+    /// the subscriber afterwards.
+    ///
+    /// The mandate is paused like `set_paused` does, but it carries a
+    /// schedule: once the ledger clock reaches `until`, `charge` and `is_due`
+    /// treat it as Active again on their own. The resume is therefore free —
+    /// no keeper window is missed because the subscriber forgot to resume,
+    /// which is what loses merchants their returning customers.
+    ///
+    /// `next_charge` is pushed to at least `until`, so billing continues from
+    /// the end of the pause rather than from a date that has already passed.
+    pub fn pause_until(
+        env: Env,
+        subscriber: Address,
+        mandate_id: u64,
+        until: u64,
+    ) -> Result<(), Error> {
+        subscriber.require_auth();
+
+        let mut mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.subscriber != subscriber {
+            return Err(Error::NotSubscriber);
+        }
+        if mandate.status == MandateStatus::Cancelled || mandate.status == MandateStatus::Completed
+        {
+            return Err(Error::MandateNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+        if until <= now {
+            return Err(Error::InvalidUntil);
+        }
+
+        mandate.status = MandateStatus::Paused;
+        mandate.paused_until = until;
+        mandate.next_charge = mandate.next_charge.max(until);
+        Self::write_mandate(&env, &mandate);
+
+        PauseChanged {
+            mandate_id,
+            subscriber,
+            paused: true,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Refund part of what this mandate paid the merchant.
+    ///
+    /// The merchant returns money from its own wallet, straight to the
+    /// subscriber's wallet, and the contract records the refund on the
+    /// mandate and emits `Refunded`, so the dispute trail lives on chain
+    /// instead of in ad-hoc transfers nobody can attribute. It deliberately
+    /// does not touch the vault: crediting internal balances without moving
+    /// tokens would break the vault's invariant that internal balances sum to
+    /// its holdings.
+    ///
+    /// Total refunds are capped at what the merchant actually collected for
+    /// this mandate (price minus the frozen fee and tip, per settled charge),
+    /// so a merchant can never "refund" more than it ever received. The cap
+    /// holds regardless of mandate status, which is why a cancelled mandate
+    /// remains refundable.
+    pub fn refund(env: Env, merchant: Address, mandate_id: u64, amount: i128) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let mut mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.merchant != merchant {
+            return Err(Error::NotMerchant);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let remaining = Self::merchant_received(&mandate)? - mandate.refunded;
+        if amount > remaining {
+            return Err(Error::RefundExceedsReceived);
+        }
+
+        token::TokenClient::new(&env, &mandate.token).transfer(
+            &merchant,
+            &mandate.subscriber,
+            &amount,
+        );
+
+        mandate.refunded += amount;
+        Self::write_mandate(&env, &mandate);
+
+        Refunded {
+            mandate_id,
+            subscriber: mandate.subscriber.clone(),
+            merchant,
+            amount,
+            refunded_total: mandate.refunded,
         }
         .publish(&env);
         Ok(())
@@ -402,13 +518,62 @@ impl Subscription {
     /// check vault balance; a funded-ness check is the caller's job.
     pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
         let m = Self::read_mandate(&env, mandate_id)?;
-        if m.status != MandateStatus::Active {
+        if !Self::active_at(&m, env.ledger().timestamp()) {
             return Ok(false);
         }
         if m.max_charges != 0 && m.charges_made >= m.max_charges {
             return Ok(false);
         }
         Ok(env.ledger().timestamp() >= m.next_charge)
+    }
+
+    /// Total committed spend of `subscriber` in `token` per `period_secs`,
+    /// normalising mandates with different billing periods to the period the
+    /// caller asks about. Monthly and weekly mandates therefore add up to one
+    /// figure the subscriber can fund their vault against.
+    ///
+    /// Only mandates that `charge` would treat as active are counted:
+    /// cancelled, completed, indefinitely paused and not-yet-due-scheduled
+    /// mandates contribute nothing. At most `MAX_PAGE` mandates (the first
+    /// page of the subscriber's index) are read, so the call stays well
+    /// inside the ledger's 100-entry footprint limit.
+    pub fn committed_per_period(
+        env: Env,
+        subscriber: Address,
+        token: Address,
+        period_secs: u64,
+    ) -> Result<i128, Error> {
+        let now = env.ledger().timestamp();
+        let len = Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber.clone()));
+        let ids = Self::index_page(&env, len, 0, MAX_PAGE, |i| {
+            DataKey::SubscriberMandate(subscriber.clone(), i)
+        });
+
+        let mut total: i128 = 0;
+        for id in ids.iter() {
+            let Some(m) = env
+                .storage()
+                .persistent()
+                .get::<_, Mandate>(&DataKey::Mandate(id))
+            else {
+                continue;
+            };
+            if m.token != token || !Self::active_at(&m, now) || m.period == 0 {
+                continue;
+            }
+            // Integer math only, truncated downwards: a subscriber who plans
+            // against this figure is never told they have more committed than
+            // they do.
+            let contribution = m
+                .amount
+                .checked_mul(period_secs as i128)
+                .ok_or(Error::AmountOverflow)?
+                / m.period as i128;
+            total = total
+                .checked_add(contribution)
+                .ok_or(Error::AmountOverflow)?;
+        }
+        Ok(total)
     }
 
     /// How many mandates `subscriber` has opened, in any state.
@@ -460,6 +625,34 @@ impl Subscription {
 }
 
 impl Subscription {
+    /// Whether `charge` may treat this mandate as active at `now`. A mandate
+    /// paused until a date resumes by itself once that date passes; a pause
+    /// without a date (`paused_until == 0`) stays in force until `set_paused`
+    /// resumes it manually.
+    fn active_at(m: &Mandate, now: u64) -> bool {
+        match m.status {
+            MandateStatus::Active => true,
+            MandateStatus::Paused => m.paused_until != 0 && now >= m.paused_until,
+            _ => false,
+        }
+    }
+
+    /// What the merchant has actually collected for this mandate so far: the
+    /// per-charge share (price minus the protocol fee minus the keeper tip,
+    /// all frozen into the mandate at subscribe time) times the number of
+    /// settled charges. This is the hard ceiling on `refund`.
+    fn merchant_received(m: &Mandate) -> Result<i128, Error> {
+        let fee = m.amount * (m.fee_bps as i128) / BPS_DENOMINATOR;
+        let gross = m.amount - fee;
+        let tip = gross
+            .checked_mul(m.keeper_bps.min(MAX_KEEPER_BPS) as i128)
+            .ok_or(Error::AmountOverflow)?
+            / BPS_DENOMINATOR;
+        (gross - tip)
+            .checked_mul(m.charges_made as i128)
+            .ok_or(Error::AmountOverflow)
+    }
+
     fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
         env.storage()
             .instance()

@@ -11,6 +11,7 @@ use soroban_sdk::{
 };
 
 const MONTH: u64 = 2_592_000;
+const WEEK: u64 = 604_800;
 const PRICE: i128 = 10_000;
 const FEE_BPS: u32 = 100; // 1%
 const KEEPER_BPS: u32 = 200; // 2% of the merchant share
@@ -94,6 +95,18 @@ impl World<'_> {
         )
     }
 
+    /// A plan with an arbitrary price and period on the world's token.
+    fn plan_amount(&self, amount: i128, period: u64) -> u64 {
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &amount,
+            &period,
+            &String::from_str(&self.env, "Custom Plan"),
+            &0,
+        )
+    }
+
     /// A subscriber with `funding` deposited into the vault.
     fn subscriber(&self, funding: i128) -> Address {
         let user = Address::generate(&self.env);
@@ -146,6 +159,29 @@ fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Pull an i128 field out of the data map of the most recently emitted event
+/// that carries it.
+fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
+    let mut found = None;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::I128(ref parts) = entry.val {
+                    found = Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                }
+            }
+        }
+    }
+    found
 }
 
 #[test]
@@ -1050,6 +1086,472 @@ fn assert_vault_invariant(w: &World, users: &[Address; 4], expected: &[i128]) {
         w.token_client.balance(&w.vault.address),
         "the sum of internal balances must equal the vault's token holdings"
     );
+}
+
+// ---------------------------------------------------------------------------
+// pause_until (#41): a pause that lifts by itself
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pause_until_blocks_charging_until_the_date() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let until = w.env.ledger().timestamp() + MONTH;
+    w.sub.pause_until(&user, &id, &until);
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Paused);
+    assert_eq!(m.paused_until, until);
+    // Billing is pushed to the end of the pause, never before it.
+    assert_eq!(m.next_charge, until);
+    assert!(!w.sub.is_due(&id));
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    // One second short of the date, still paused.
+    w.advance(MONTH - 1);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    w.advance(1);
+    assert!(w.sub.is_due(&id));
+    w.sub.charge(&w.keeper, &id);
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 1);
+    assert_eq!(m.status, MandateStatus::Active);
+    assert_eq!(m.paused_until, 0);
+    assert_eq!(m.next_charge, w.env.ledger().timestamp() + MONTH);
+}
+
+#[test]
+fn resume_after_pause_until_needs_no_transaction_from_the_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let until = w.env.ledger().timestamp() + MONTH;
+    w.sub.pause_until(&user, &id, &until);
+
+    w.advance(MONTH + 1);
+    w.sub.charge(&w.keeper, &id);
+
+    // The only signature the resume required was the keeper's, exactly as for
+    // an ordinary charge. The subscriber signed nothing after pausing.
+    let auths = w.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, w.keeper);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn manual_resume_still_works_while_a_date_is_set() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub
+        .pause_until(&user, &id, &(w.env.ledger().timestamp() + MONTH));
+    w.sub.set_paused(&user, &id, &false);
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Active);
+    assert_eq!(m.paused_until, 0);
+    // Resuming does not move the billing schedule. The pause pushed the next
+    // charge to the end of the pause; an early resume honours that date
+    // rather than pulling a charge forwards.
+    assert!(!w.sub.is_due(&id));
+    assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn pause_until_can_extend_an_existing_pause() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let first = w.env.ledger().timestamp() + MONTH;
+    let second = first + MONTH;
+    w.sub.pause_until(&user, &id, &first);
+    w.sub.pause_until(&user, &id, &second);
+
+    // Past the first date but before the second: still paused.
+    w.advance(MONTH + 1);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn pause_until_rejects_a_date_that_has_passed() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let now = w.env.ledger().timestamp();
+
+    assert_eq!(
+        w.sub.try_pause_until(&user, &id, &now),
+        Err(Ok(Error::InvalidUntil))
+    );
+    assert_eq!(
+        w.sub.try_pause_until(&user, &id, &(now - 1)),
+        Err(Ok(Error::InvalidUntil))
+    );
+    // The rejected calls left the mandate untouched.
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn only_the_subscriber_of_a_mandate_can_pause_it_until_a_date() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let stranger = Address::generate(&w.env);
+    let until = w.env.ledger().timestamp() + MONTH;
+
+    assert_eq!(
+        w.sub.try_pause_until(&stranger, &id, &until),
+        Err(Ok(Error::NotSubscriber))
+    );
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn pause_until_requires_the_subscriber_to_authorize() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let until = w.env.ledger().timestamp() + MONTH;
+    let attacker = Address::generate(&w.env);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "pause_until",
+            args: (&user, &id, &until).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w.sub.try_pause_until(&user, &id, &until).is_err());
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn pausing_a_cancelled_mandate_until_a_date_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.cancel(&user, &id);
+
+    assert_eq!(
+        w.sub
+            .try_pause_until(&user, &id, &(w.env.ledger().timestamp() + MONTH)),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// committed_per_period (#40): what the subscriber owes per period
+// ---------------------------------------------------------------------------
+
+#[test]
+fn committed_per_period_normalises_mixed_periods() {
+    let w = world();
+    let monthly = w.plan(); // PRICE per MONTH
+    let weekly = w.plan_amount(7_000, WEEK);
+    let user = w.subscriber(1_000_000);
+
+    w.sub.subscribe(&user, &monthly, &0);
+    w.sub.subscribe(&user, &weekly, &0);
+
+    // Hand calculation: 10_000 per month, plus 7_000 per week normalised to a
+    // month: 7_000 * 2_592_000 / 604_800 = 30_000 exactly. Total 40_000.
+    assert_eq!(w.sub.committed_per_period(&user, &w.token, &MONTH), 40_000);
+    // Normalised to the week instead: 10_000 * 604_800 / 2_592_000 = 2_333
+    // (truncated down), plus 7_000.
+    assert_eq!(w.sub.committed_per_period(&user, &w.token, &WEEK), 9_333);
+}
+
+#[test]
+fn committed_per_period_excludes_paused_and_finished_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+
+    let active = w.sub.subscribe(&user, &plan_id, &0);
+    let paused = w.sub.subscribe(&user, &plan_id, &0);
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0);
+    let completed = w.sub.subscribe(&user, &plan_id, &1);
+    let scheduled = w.sub.subscribe(&user, &plan_id, &0);
+
+    w.sub.set_paused(&user, &paused, &true);
+    w.sub.cancel(&user, &cancelled);
+    w.sub.charge(&w.keeper, &completed); // max_charges = 1 -> Completed
+    w.sub
+        .pause_until(&user, &scheduled, &(w.env.ledger().timestamp() + MONTH));
+
+    // Only the one Active mandate counts: 5 subscribed, 4 excluded.
+    assert_eq!(active, w.sub.get_mandate(&active).id);
+    assert_eq!(w.sub.committed_per_period(&user, &w.token, &MONTH), PRICE);
+
+    // Once the scheduled pause runs out the mandate counts again, because
+    // `charge` would settle it with no transaction from the subscriber.
+    w.advance(MONTH + 1);
+    assert_eq!(
+        w.sub.committed_per_period(&user, &w.token, &MONTH),
+        2 * PRICE
+    );
+}
+
+#[test]
+fn committed_per_period_only_counts_this_subscriber_and_token() {
+    let w = world();
+    let plan_id = w.plan();
+    let other_token = w
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&w.env))
+        .address();
+    let other_plan = w.registry.create_plan(
+        &w.merchant,
+        &other_token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&w.env, "Other Token Plan"),
+        &0,
+    );
+
+    let user = w.subscriber(1_000_000);
+    let stranger = w.subscriber(1_000_000);
+    w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.subscribe(&user, &other_plan, &0);
+    w.sub.subscribe(&stranger, &plan_id, &0);
+
+    assert_eq!(w.sub.committed_per_period(&user, &w.token, &MONTH), PRICE);
+    assert_eq!(
+        w.sub.committed_per_period(&user, &other_token, &MONTH),
+        PRICE
+    );
+    assert_eq!(
+        w.sub.committed_per_period(&stranger, &w.token, &MONTH),
+        PRICE
+    );
+    // A stranger's mandates never add up into someone else's figure.
+    assert_ne!(
+        w.sub.committed_per_period(&user, &w.token, &MONTH),
+        2 * PRICE
+    );
+}
+
+// ---------------------------------------------------------------------------
+// refund (#36): merchant returns money with an on-chain record
+// ---------------------------------------------------------------------------
+
+/// Per-charge merchant receipts on the world's standard plan: price minus the
+/// 1% protocol fee, with no keeper tip.
+fn merchant_receipt_per_charge() -> i128 {
+    PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+}
+
+#[test]
+fn refund_returns_merchant_proceeds_to_the_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    let received = merchant_receipt_per_charge();
+    assert_eq!(w.token_client.balance(&w.merchant), received);
+
+    w.sub.refund(&w.merchant, &id, &4_000);
+
+    assert_eq!(w.token_client.balance(&w.merchant), received - 4_000);
+    assert_eq!(w.token_client.balance(&user), 100_000 + 4_000);
+    assert_eq!(w.sub.get_mandate(&id).refunded, 4_000);
+    // The refund returns the merchant's own money; the vault balance the
+    // subscriber was charged is untouched.
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn over_refund_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    let received = merchant_receipt_per_charge();
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &(received + 1)),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+
+    w.sub.refund(&w.merchant, &id, &(received - 1));
+    // One more unit now exceeds what is left of the cap.
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &2),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+    assert_eq!(w.sub.get_mandate(&id).refunded, received - 1);
+}
+
+#[test]
+fn refund_cap_grows_with_every_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let cap = 2 * merchant_receipt_per_charge();
+    w.sub.refund(&w.merchant, &id, &cap);
+    assert_eq!(w.sub.get_mandate(&id).refunded, cap);
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &1),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+}
+
+#[test]
+fn refund_works_on_a_cancelled_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+    w.sub.cancel(&user, &id);
+
+    w.sub
+        .refund(&w.merchant, &id, &merchant_receipt_per_charge());
+
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+    assert_eq!(
+        w.token_client.balance(&user),
+        100_000 + merchant_receipt_per_charge()
+    );
+}
+
+#[test]
+fn only_the_merchant_of_a_mandate_can_refund() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+    let stranger = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub.try_refund(&stranger, &id, &1),
+        Err(Ok(Error::NotMerchant))
+    );
+    // The subscriber has `cancel`; they cannot pull their own money back.
+    assert_eq!(
+        w.sub.try_refund(&user, &id, &1),
+        Err(Ok(Error::NotMerchant))
+    );
+}
+
+#[test]
+fn refund_requires_the_merchants_signature() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    // Drop the blanket mock: the call must carry the merchant's own
+    // authorization, or anyone could refund money out of a merchant's wallet.
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_refund(&w.merchant, &id, &1).is_err());
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        merchant_receipt_per_charge()
+    );
+}
+
+#[test]
+fn refund_rejects_non_positive_amounts() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &-5),
+        Err(Ok(Error::InvalidAmount))
+    );
+}
+
+#[test]
+fn refunding_a_never_charged_mandate_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    // The merchant collected nothing, so there is nothing to refund.
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &1),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+}
+
+#[test]
+fn refund_event_links_the_refund_to_the_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    w.sub.refund(&w.merchant, &id, &1_234);
+
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "refunded".try_into().unwrap();
+    assert_eq!(name, &expected);
+    // The mandate id is a topic, so an indexer can attribute the refund
+    // without reading contract state.
+    assert_eq!(body.topics[1], ScVal::U64(id));
+    // And the amounts travel in the event data, also without a state read.
+    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(1_234));
+    assert_eq!(last_event_field_i128(&w.env, "refunded_total"), Some(1_234));
 }
 
 #[test]

@@ -87,6 +87,23 @@ pub struct MandateCompleted {
     pub charges_made: u32,
 }
 
+/// A merchant refunded part of what it collected for a mandate. The event
+/// links the refund to the mandate, so both sides can prove a refund from
+/// chain data alone. `refunded_total` is the running total refunded on this
+/// mandate, which is what the contract caps at the merchant's receipts.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Refunded {
+    #[topic]
+    pub mandate_id: u64,
+    #[topic]
+    pub subscriber: Address,
+    #[topic]
+    pub merchant: Address,
+    pub amount: i128,
+    pub refunded_total: i128,
+}
+
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
 /// after this point only; existing mandates keep the fee they were opened with.
 #[contractevent]

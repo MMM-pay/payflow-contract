@@ -17,4 +17,11 @@ pub enum Error {
     NotMerchant = 11,
     /// Fee or tip math would overflow `i128` at this amount.
     AmountOverflow = 12,
+    /// `pause_until` was given a date that has already passed. Pausing must
+    /// move billing forwards, never backwards.
+    InvalidUntil = 13,
+    /// A refund larger than what the merchant has collected for this mandate.
+    RefundExceedsReceived = 14,
+    /// A refund amount that is zero or negative.
+    InvalidAmount = 15,
 }
