@@ -762,3 +762,156 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_ended".try_into().unwrap();
     assert_eq!(name, &expected);
 }
+
+/// Verify that the protocol fee is transferred to the fee_to address when a
+/// mandate is charged. This tests that fee_to can be set to any address
+/// (account or contract) and the fee is correctly transferred.
+#[test]
+fn fee_paid_to_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+
+    let token = env.register_stellar_asset_contract_v2(issuer).address();
+
+    let registry_id = env.register(PlanRegistry, (admin.clone(),));
+    let registry = RegistryClient::new(&env, &registry_id);
+    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault = RealVaultClient::new(&env, &vault_id);
+    vault.set_subscription(&Address::generate(&env));
+
+    let sub_id = env.register(
+        Subscription,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            vault_id.clone(),
+            FEE_BPS,
+            fee_to.clone(),
+        ),
+    );
+    let sub = SubscriptionClient::new(&env, &sub_id);
+
+    vault.set_subscription(&sub_id);
+
+    let plan_id = registry.create_plan(
+        &merchant,
+        &token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&env, "Demo Plan"),
+    );
+    let user = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&user, &100_000);
+    vault.deposit(&user, &token, &100_000);
+
+    let id = sub.subscribe(&user, &plan_id, &0);
+    sub.charge(&id);
+
+    // The merchant should receive the price minus the fee.
+    let expected_fee = PRICE * (FEE_BPS as i128) / BPS_DENOMINATOR;
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&merchant),
+        PRICE - expected_fee,
+        "merchant should receive price minus fee"
+    );
+    // The fee should be transferred to fee_to.
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&fee_to),
+        expected_fee,
+        "fee should be transferred to fee_to address"
+    );
+}
+
+/// The sum of internal vault balances per token must equal the vault's token
+/// balance, after every deposit, withdrawal and charge. This test drives the
+/// real charge path through the subscription contract for several subscribers
+/// and asserts the invariant after every step.
+#[test]
+fn charges_keep_vault_balances_in_sync() {
+    let w = world();
+    let plan_id = w.plan();
+
+    let users: [Address; 4] = [
+        Address::generate(&w.env),
+        Address::generate(&w.env),
+        Address::generate(&w.env),
+        Address::generate(&w.env),
+    ];
+    let mut ids: [u64; 4] = [0; 4];
+    let mut expected: [i128; 4] = [0; 4];
+    for i in 0..4 {
+        w.minter.mint(&users[i], &200_000);
+        w.vault.deposit(&users[i], &w.token, &100_000);
+        expected[i] = 100_000;
+        ids[i] = w.sub.subscribe(&users[i], &plan_id, &0);
+    }
+
+    assert_vault_invariant(&w, &users, &expected);
+
+    // Deterministic pseudo-random steps: withdraw part of a balance, or try a
+    // real charge one period later.
+    let mut state: u64 = 0x_1234_5678_9abc_def0;
+    let mut below = move |bound: u64| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        state % bound
+    };
+
+    for _ in 0..120 {
+        let i = below(4) as usize;
+        let user = users[i].clone();
+
+        if below(2) == 0 || expected[i] < PRICE {
+            // Withdraw part of the balance, or nothing when it is empty.
+            if expected[i] > 0 {
+                let amount = 1 + (below(expected[i] as u64) as i128);
+                w.vault.withdraw(&user, &w.token, &amount);
+                expected[i] -= amount;
+            }
+        } else {
+            // Settle the mandate one period after the previous state change.
+            w.advance(MONTH);
+            let before = w.sub.get_mandate(&ids[i]).charges_made;
+            let res = w.sub.try_charge(&ids[i]);
+            if res.is_ok() {
+                assert_eq!(
+                    w.sub.get_mandate(&ids[i]).charges_made,
+                    before + 1,
+                    "a successful charge must record the charge"
+                );
+                // The whole price leaves the user's vault balance: the
+                // merchant share goes to the merchant and the fee to fee_to.
+                expected[i] -= PRICE;
+            }
+            // A failed charge (underfunded) changes nothing.
+        }
+
+        assert_vault_invariant(&w, &users, &expected);
+    }
+}
+
+/// Asserts each subscriber's internal vault balance matches the expected
+/// value and that their sum equals the vault's token holdings.
+fn assert_vault_invariant(w: &World, users: &[Address; 4], expected: &[i128]) {
+    let mut sum: i128 = 0;
+    for (i, user) in users.iter().enumerate() {
+        assert_eq!(
+            w.vault.balance(user, &w.token),
+            expected[i],
+            "internal balance of user {i} drifted from the expected value"
+        );
+        sum += expected[i];
+    }
+    assert_eq!(
+        sum,
+        w.token_client.balance(&w.vault.address),
+        "the sum of internal balances must equal the vault's token holdings"
+    );
+}

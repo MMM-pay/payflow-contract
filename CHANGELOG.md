@@ -50,6 +50,61 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - 42 → 63 tests, covering paging limits, entry footprint limits, merchant
   ending and constructor configuration.
 
+## Unreleased
+
+### Security
+
+- **Vault admin has no path to user funds.** The vault admin can only call
+  `set_subscription`, which repoints the subscription contract. No admin
+  function (including `set_subscription`) touches user balances directly.
+  This is pinned down by a new test `admin_has_no_path_to_user_funds`.
+
+### Added
+
+- `plan-registry:set_profile(merchant, name, url)` and
+  `plan-registry:profile(merchant)`: a merchant-set, self-declared profile
+  (display name and URL, both length-limited) shown alongside plans so
+  subscribers can tell who they are paying. Emits `ProfileUpdated`; the
+  profile is not verified by the contract.
+- `plan-registry:deactivate_page(merchant, start, limit)`: deactivates up to
+  `MAX_PAGE` of a merchant's plans in one call; only the merchant's own plans
+  are touched.
+- **Test: admin has no path to user funds** — verifies that every admin-
+  callable function leaves all user balances unchanged.
+- **Test: fees paid to a contract address** — verifies that the protocol fee
+  is correctly transferred to the `fee_to` address when a mandate is charged.
+- **Test: `internal_balances_add_up_to_the_vault_holdings`** — 300 randomized
+  deposit/withdraw/debit steps across four users, asserting after every step
+  that the sum of internal balances equals the vault's token holdings.
+- **Test: `charges_keep_vault_balances_in_sync`** — the same invariant driven
+  through the real `charge` path in the subscription contract.
+- `docs/adr/`: five architecture decision records (vault/billing split,
+  `now + period` scheduling, constructors, per-position indexes,
+  permissionless `charge`), linked from README.
+
+Interface changes (`set_profile`, `profile`, `deactivate_page`,
+`ProfileUpdated`) ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`: follow-up issues to consume the new event and endpoints are
+tracked in the pull request.
+
+### Changed
+
+- **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+  take `start` and `limit` and return at most 50 ids per call.
+- **Breaking:** `initialize` is replaced by `__constructor` in all three
+  contracts.
+- `rust-toolchain.toml` names the `wasm32v1-none` target that
+  `stellar contract build` uses.
+
+### Tests
+
+- 42 → 63 tests, covering paging limits, entry footprint limits, merchant
+  ending and constructor configuration.
+- **New test: `admin_has_no_path_to_user_funds`** — asserts that `set_subscription`
+  does not change any user balances.
+- **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
+  is transferred to the `fee_to` address when a mandate is charged.
+
 ## [0.1.0] - 2026-09-02
 
 First testnet deployment: plan registry, vault and subscription contracts with

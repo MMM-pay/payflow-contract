@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets the auto-merge workflow run CI on main after it merges a PR.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

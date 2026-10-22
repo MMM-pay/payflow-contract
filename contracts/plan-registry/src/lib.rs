@@ -8,8 +8,8 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged};
-pub use types::{DataKey, Plan};
+pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use types::{DataKey, Plan, Profile};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -26,6 +26,10 @@ pub const MIN_PERIOD: u64 = 60;
 /// Maximum plan name length in bytes. Bounded so a merchant cannot bloat
 /// persistent storage or break list rendering with an unbounded label.
 pub const MAX_NAME_LEN: u32 = 64;
+
+/// Maximum profile URL length in bytes. Self-declared and unbounded in theory,
+/// capped here so storage and UI rendering stay bounded.
+pub const MAX_URL_LEN: u32 = 256;
 
 /// Largest page `merchant_plans` returns in one call. Each id is read from its
 /// own storage entry, and a transaction may touch at most 100 entries.
@@ -158,6 +162,107 @@ impl PlanRegistry {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Set or replace `merchant`'s self-declared profile: a display name and a
+    /// URL (website or terms). The profile is not verified by the contract;
+    /// subscribers should treat it as a claim the merchant makes about itself.
+    /// Only the merchant may set its own profile.
+    pub fn set_profile(
+        env: Env,
+        merchant: Address,
+        name: String,
+        url: String,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        if name.len() > MAX_NAME_LEN {
+            return Err(Error::ProfileNameTooLong);
+        }
+        if url.len() > MAX_URL_LEN {
+            return Err(Error::ProfileUrlTooLong);
+        }
+
+        let profile = Profile {
+            merchant: merchant.clone(),
+            name: name.clone(),
+            url: url.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(merchant.clone()), &profile);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Profile(merchant.clone()),
+            PERSIST_THRESHOLD,
+            PERSIST_BUMP,
+        );
+
+        ProfileUpdated {
+            merchant,
+            name,
+            url,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// `merchant`'s self-declared profile, if one has been set.
+    pub fn profile(env: Env, merchant: Address) -> Result<Profile, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Profile(merchant))
+            .ok_or(Error::ProfileNotFound)
+    }
+
+    /// Deactivate up to `limit` of `merchant`'s plans, starting at position
+    /// `start` of its plan index. Only plans in `merchant`'s own index are
+    /// touched, so a merchant can never deactivate another merchant's plans.
+    /// Already-inactive plans are skipped. Returns how many plans were
+    /// deactivated in this page. At most `min(limit, MAX_PAGE)` plans are
+    /// touched, so the call stays within the ledger entry footprint budget.
+    pub fn deactivate_page(
+        env: Env,
+        merchant: Address,
+        start: u32,
+        limit: u32,
+    ) -> Result<u32, Error> {
+        merchant.require_auth();
+
+        let len = Self::merchant_plan_count(env.clone(), merchant.clone());
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+        let mut deactivated: u32 = 0;
+        let p = env.storage().persistent();
+        for i in start..end {
+            let slot_key = DataKey::MerchantPlan(merchant.clone(), i);
+            let Some(plan_id) = p.get::<_, u64>(&slot_key) else {
+                continue;
+            };
+
+            let plan_key = DataKey::Plan(plan_id);
+            let mut plan: Plan = p.get(&plan_key).ok_or(Error::PlanNotFound)?;
+            if plan.merchant != merchant {
+                // Defensive: the per-merchant index only lists its own plans.
+                continue;
+            }
+            if !plan.active {
+                continue;
+            }
+
+            plan.active = false;
+            p.set(&plan_key, &plan);
+            p.extend_ttl(&plan_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanStatusChanged {
+                merchant: merchant.clone(),
+                plan_id,
+                active: false,
+            }
+            .publish(&env);
+
+            deactivated += 1;
+        }
+        Ok(deactivated)
     }
 
     pub fn get_plan(env: Env, plan_id: u64) -> Result<Plan, Error> {
