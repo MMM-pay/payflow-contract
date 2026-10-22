@@ -37,6 +37,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all --all-targets
+
   build:
     name: build-wasm
     runs-on: ubuntu-latest

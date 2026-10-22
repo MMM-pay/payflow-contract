@@ -13,6 +13,8 @@ rustup target add wasm32v1-none
 cargo test --all
 ```
 
+The Minimum Supported Rust Version (MSRV) for these contracts is **1.91.0**, pinned in `Cargo.toml` (`rust-version = "1.91.0"`) and verified in CI.
+
 You will also want the Stellar CLI (27+) to build wasm and deploy:
 
 ```bash
@@ -21,13 +23,14 @@ stellar contract build
 
 ## What CI enforces
 
-A PR cannot merge unless all four jobs pass:
+A PR cannot merge unless all CI jobs pass:
 
 | Job | Command |
 |---|---|
 | `fmt` | `cargo fmt --all -- --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test --all` |
+| `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
 Run all four locally before pushing.
