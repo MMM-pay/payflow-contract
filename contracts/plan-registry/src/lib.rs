@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use events::{PlanCreated, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
@@ -28,6 +28,10 @@ pub const MIN_PERIOD: u64 = 60;
 /// persistent storage or break list rendering with an unbounded label.
 pub const MAX_NAME_LEN: u32 = 64;
 
+/// Maximum plan description length in bytes. Bounded so a merchant cannot
+/// bloat persistent storage or break list rendering with a long blurb.
+pub const MAX_DESCRIPTION_LEN: u32 = payflow_shared::MAX_DESCRIPTION_LEN;
+
 /// Maximum profile URL length in bytes. Self-declared and unbounded in theory,
 /// capped here so storage and UI rendering stay bounded.
 pub const MAX_URL_LEN: u32 = 256;
@@ -40,6 +44,7 @@ pub const MAX_PAGE: u32 = 50;
 pub struct PlanRegistry;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl PlanRegistry {
     /// Runs once, in the same transaction that deploys the contract. With a
     /// separate `initialize` call, anyone watching the ledger could call it
@@ -59,6 +64,7 @@ impl PlanRegistry {
     /// part of the plan's immutable terms: a mandate opened against this plan
     /// keeps the tip it was opened with, so raising the tip later cannot take
     /// money from an existing subscriber or merchant.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -66,6 +72,7 @@ impl PlanRegistry {
         amount: i128,
         period: u64,
         name: String,
+        description: String,
         keeper_bps: u32,
     ) -> Result<u64, Error> {
         merchant.require_auth();
@@ -75,6 +82,9 @@ impl PlanRegistry {
         }
         if name.len() > MAX_NAME_LEN {
             return Err(Error::NameTooLong);
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(Error::DescriptionTooLong);
         }
         if period < MIN_PERIOD {
             return Err(Error::InvalidPeriod);
@@ -93,11 +103,13 @@ impl PlanRegistry {
             id,
             merchant: merchant.clone(),
             name: name.clone(),
+            description: description.clone(),
             token,
             amount,
             period,
             active: true,
             keeper_bps,
+            successor_id: 0,
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -130,6 +142,7 @@ impl PlanRegistry {
             amount: plan.amount,
             period: plan.period,
             name,
+            description,
             keeper_bps,
         }
         .publish(&env);
@@ -171,6 +184,73 @@ impl PlanRegistry {
             merchant,
             plan_id,
             active,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Point a plan at the plan that replaces it, if any.
+    ///
+    /// A merchant that replaces a plan retires the old one and opens a new one
+    /// carrying the new terms, so subscribers of the old plan need an on-chain
+    /// pointer to the new one to be able to be offered the replacement. The
+    /// pointer is stored on the retiring plan itself (`Plan.successor_id`, 0
+    /// when there is none) rather than in a side key, so `get_plan` hands back
+    /// the answer in the same read that returns the plan, and apps never need a
+    /// second lookup. Because the pointer lives on the old plan it never
+    /// touches an open mandate's frozen terms.
+    ///
+    /// The retiring plan may be re-pointed, which is how a merchant that
+    /// replaces a replacement retires the middle plan. Both plans must belong
+    /// to `merchant` and be denominated in the same token; a replacement from
+    /// another merchant's catalogue or another asset would be meaningless, and
+    /// a plan cannot be its own successor.
+    pub fn set_successor(
+        env: Env,
+        merchant: Address,
+        plan_id: u64,
+        successor_id: u64,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let plan_key = DataKey::Plan(plan_id);
+        let mut plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&plan_key)
+            .ok_or(Error::PlanNotFound)?;
+
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        if successor_id == plan_id {
+            return Err(Error::SelfSuccessor);
+        }
+
+        let successor: Plan = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Plan(successor_id))
+            .ok_or(Error::SuccessorNotFound)?;
+
+        if successor.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        if successor.token != plan.token {
+            return Err(Error::SuccessorTokenMismatch);
+        }
+
+        plan.successor_id = successor_id;
+        env.storage().persistent().set(&plan_key, &plan);
+        env.storage()
+            .persistent()
+            .extend_ttl(&plan_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        PlanSuccessorSet {
+            merchant,
+            plan_id,
+            successor_id,
         }
         .publish(&env);
 

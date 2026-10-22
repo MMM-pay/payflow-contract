@@ -13,6 +13,8 @@ pub struct PlanCreated {
     pub period: u64,
     /// Carried in the event so indexers need no follow-up contract read.
     pub name: String,
+    /// Short summary of what the plan includes. May be empty.
+    pub description: String,
     /// Keeper tip frozen into the plan, in basis points of the merchant share.
     pub keeper_bps: u32,
 }
@@ -26,6 +28,17 @@ pub struct PlanStatusChanged {
     #[topic]
     pub plan_id: u64,
     pub active: bool,
+}
+
+/// Emitted when a merchant points a plan at the plan that replaces it, if any.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanSuccessorSet {
+    #[topic]
+    pub merchant: Address,
+    #[topic]
+    pub plan_id: u64,
+    pub successor_id: u64,
 }
 
 /// Emitted when a merchant sets or updates its self-declared profile. The

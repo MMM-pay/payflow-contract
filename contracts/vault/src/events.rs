@@ -24,6 +24,18 @@ pub struct Withdraw {
     pub balance: i128,
 }
 
+/// Emitted when the admin sets the per-token deposit cap of a subscriber.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DepositCapSet {
+    #[topic]
+    pub user: Address,
+    #[topic]
+    pub token: Address,
+    /// The new cap. Zero means unlimited.
+    pub cap: i128,
+}
+
 /// Emitted when the subscription contract debits a subscriber to pay a merchant.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

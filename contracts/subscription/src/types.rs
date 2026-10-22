@@ -48,6 +48,14 @@ pub struct Mandate {
     /// time for the same reason as `fee_bps`: a later plan cannot raise what an
     /// open mandate pays whoever settles it.
     pub keeper_bps: u32,
+    /// Unix seconds when a scheduled pause (`pause_until`) lifts by itself.
+    /// 0 means no schedule: a paused mandate stays paused until `set_paused`
+    /// resumes it. Only meaningful while `status` is `Paused`.
+    pub paused_until: u64,
+    /// Total amount the merchant has refunded on this mandate so far. The
+    /// merchant can never refund more than it has collected, so this counter
+    /// is the hard cap `refund` enforces.
+    pub refunded: i128,
     pub status: MandateStatus,
 }
 

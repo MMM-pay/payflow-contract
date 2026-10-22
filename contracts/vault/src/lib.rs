@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, Withdraw};
+pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
 pub use types::DataKey;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -43,12 +43,7 @@ impl Vault {
 
     /// Point the vault at the subscription contract allowed to debit it.
     pub fn set_subscription(env: Env, subscription: Address) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        admin.require_auth();
+        Self::require_admin(&env)?;
 
         env.storage()
             .instance()
@@ -59,6 +54,81 @@ impl Vault {
         Ok(())
     }
 
+    /// Turn the token allowlist on or off. Off by default, so a deployment
+    /// (testnet included) keeps accepting every SEP-41 token until the admin
+    /// opts in. Toggling it moves no funds: it only gates future deposits.
+    pub fn set_allowlist_enabled(env: Env, enabled: bool) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistEnabled, &enabled);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        Ok(())
+    }
+
+    /// Add or remove one token from the allowlist. Removing a token blocks
+    /// new deposits of it; balances already held can still be withdrawn, so
+    /// allowlisting can never trap funds.
+    pub fn set_token_allowed(env: Env, token: Address, allowed: bool) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        let key = DataKey::TokenAllowed(token);
+        env.storage().persistent().set(&key, &allowed);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        Ok(())
+    }
+
+    /// Cap how much a subscriber may hold for one token.
+    ///
+    /// While the protocol is unaudited, the cost of a bug grows with the
+    /// amount of subscriber funds the vault can hold, so the admin can cap
+    /// the balance a subscriber may keep per token. The cap is per
+    /// (user, token): one subscriber's cap never affects another.
+    ///
+    /// A cap of 0 means unlimited, which is the default and what an
+    /// existing deployment runs with until an admin sets a cap.
+    ///
+    /// The cap only gates new deposits. A balance that is already above a
+    /// newly set cap can still be withdrawn, and can still be debited by the
+    /// subscription contract: the cap limits how much can be added, and
+    /// never traps funds.
+    pub fn set_deposit_cap(
+        env: Env,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        if amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = DataKey::DepositCap(user.clone(), token.clone());
+        env.storage().persistent().set(&key, &amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        DepositCapSet {
+            user,
+            token,
+            cap: amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The deposit cap for (user, token). Zero means unlimited.
+    pub fn deposit_cap(env: Env, user: Address, token: Address) -> i128 {
+        Self::read_deposit_cap(&env, &user, &token)
+    }
+
     /// Move `amount` of `token` from the subscriber's wallet into the vault.
     pub fn deposit(env: Env, user: Address, token: Address, amount: i128) -> Result<(), Error> {
         user.require_auth();
@@ -66,10 +136,25 @@ impl Vault {
             return Err(Error::InvalidAmount);
         }
 
+        // A malicious token contract can emit misleading Deposit events that
+        // indexers and UIs show as real balances. When the allowlist is on,
+        // only tokens the admin vouched for may add such events. Withdrawals
+        // are deliberately not checked: allowlisting must not trap funds.
+        if Self::allowlist_on(&env) && !Self::token_on(&env, &token) {
+            return Err(Error::TokenNotAllowed);
+        }
+
+        let new_balance = Self::read_balance(&env, &user, &token) + amount;
+        // The cap is checked before the transfer, so a rejected deposit moves
+        // no tokens at all.
+        let cap = Self::read_deposit_cap(&env, &user, &token);
+        if cap > 0 && new_balance > cap {
+            return Err(Error::DepositCapExceeded);
+        }
+
         let vault = env.current_contract_address();
         token::TokenClient::new(&env, &token).transfer(&user, &vault, &amount);
 
-        let new_balance = Self::read_balance(&env, &user, &token) + amount;
         Self::write_balance(&env, &user, &token, new_balance);
 
         Deposit {
@@ -158,6 +243,18 @@ impl Vault {
         Self::read_balance(&env, &user, &token)
     }
 
+    /// Whether the token allowlist is enforced. Off unless the admin turned it
+    /// on.
+    pub fn allowlist_enabled(env: Env) -> bool {
+        Self::allowlist_on(&env)
+    }
+
+    /// Whether `token` is on the allowlist. Only meaningful while the
+    /// allowlist is enabled; absent means not allowed.
+    pub fn token_allowed(env: Env, token: Address) -> bool {
+        Self::token_on(&env, &token)
+    }
+
     pub fn subscription(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
@@ -174,6 +271,36 @@ impl Vault {
 }
 
 impl Vault {
+    fn require_admin(env: &Env) -> Result<Address, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        Ok(admin)
+    }
+
+    fn allowlist_on(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::AllowlistEnabled)
+            .unwrap_or(false)
+    }
+
+    fn token_on(env: &Env, token: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenAllowed(token.clone()))
+            .unwrap_or(false)
+    }
+
+    /// The deposit cap for (user, token). Absent means unlimited.
+    fn read_deposit_cap(env: &Env, user: &Address, token: &Address) -> i128 {
+        let key = DataKey::DepositCap(user.clone(), token.clone());
+        env.storage().persistent().get(&key).unwrap_or(0)
+    }
+
     fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {
         let key = DataKey::Balance(user.clone(), token.clone());
         env.storage().persistent().get(&key).unwrap_or(0)
