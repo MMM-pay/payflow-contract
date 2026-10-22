@@ -10,7 +10,8 @@ mod test;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Subscribed,
+    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, MandateTransferred,
+    PauseChanged, Subscribed,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
@@ -300,6 +301,95 @@ impl Subscription {
         Ok(())
     }
 
+    /// Propose moving a mandate to `new_subscriber`. The current subscriber
+    /// supplies the position from `subscriber_mandates`; this lets transfers
+    /// update old indexes in constant time, including mandates created before
+    /// reverse-position metadata existed.
+    pub fn propose_mandate_owner(
+        env: Env,
+        subscriber: Address,
+        mandate_id: u64,
+        new_subscriber: Address,
+        subscriber_position: u32,
+    ) -> Result<(), Error> {
+        subscriber.require_auth();
+
+        let mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.subscriber != subscriber {
+            return Err(Error::NotSubscriber);
+        }
+        if mandate.status != MandateStatus::Active && mandate.status != MandateStatus::Paused {
+            return Err(Error::MandateNotActive);
+        }
+        if subscriber == new_subscriber {
+            return Err(Error::SameSubscriber);
+        }
+        Self::validate_subscriber_index(&env, &subscriber, subscriber_position, mandate_id)?;
+
+        Self::write_pending_owner(&env, mandate_id, &new_subscriber);
+        Self::write_pending_position(&env, mandate_id, subscriber_position);
+        Ok(())
+    }
+
+    /// Accept a pending mandate ownership transfer. Future charges are debited
+    /// from the new subscriber's vault balance; the merchant index and all
+    /// frozen mandate terms remain unchanged.
+    pub fn accept_mandate_owner(
+        env: Env,
+        new_subscriber: Address,
+        mandate_id: u64,
+    ) -> Result<(), Error> {
+        new_subscriber.require_auth();
+
+        let mut mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.status != MandateStatus::Active && mandate.status != MandateStatus::Paused {
+            return Err(Error::MandateNotActive);
+        }
+
+        let pending_owner: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingMandateOwner(mandate_id))
+            .ok_or(Error::NoPendingTransfer)?;
+        if pending_owner != new_subscriber {
+            return Err(Error::NotProposedOwner);
+        }
+        let subscriber_position: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingSubscriberPosition(mandate_id))
+            .ok_or(Error::NoPendingTransfer)?;
+
+        let old_subscriber = mandate.subscriber.clone();
+        Self::index_len(
+            &env,
+            DataKey::SubscriberMandateCount(new_subscriber.clone()),
+        )
+        .checked_add(1)
+        .ok_or(Error::MandateIndexFull)?;
+
+        Self::remove_subscriber_index(&env, &old_subscriber, mandate_id, subscriber_position)?;
+        Self::index_push(
+            &env,
+            DataKey::SubscriberMandateCount(new_subscriber.clone()),
+            |i| DataKey::SubscriberMandate(new_subscriber.clone(), i),
+            mandate_id,
+        );
+
+        mandate.subscriber = new_subscriber.clone();
+        Self::write_mandate(&env, &mandate);
+        Self::remove_pending_owner(&env, mandate_id);
+
+        MandateTransferred {
+            mandate_id,
+            old_subscriber,
+            new_subscriber,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     /// End a mandate from the merchant's side, for example when the service is
     /// discontinued. Deactivating a plan only stops new subscriptions; this is
     /// how a merchant stops billing the ones already open. Like `cancel`, it
@@ -411,12 +501,12 @@ impl Subscription {
         Ok(env.ledger().timestamp() >= m.next_charge)
     }
 
-    /// How many mandates `subscriber` has opened, in any state.
+    /// How many mandates currently belong to `subscriber`, in any state.
     pub fn subscriber_mandate_count(env: Env, subscriber: Address) -> u32 {
         Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber))
     }
 
-    /// Ids of the mandates `subscriber` opened, oldest first, starting at
+    /// Ids of mandates currently belonging to `subscriber`, starting at
     /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
     pub fn subscriber_mandates(env: Env, subscriber: Address, start: u32, limit: u32) -> Vec<u64> {
         let len = Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber.clone()));
@@ -480,6 +570,84 @@ impl Subscription {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    fn validate_subscriber_index(
+        env: &Env,
+        subscriber: &Address,
+        position: u32,
+        mandate_id: u64,
+    ) -> Result<(), Error> {
+        let count = Self::index_len(env, DataKey::SubscriberMandateCount(subscriber.clone()));
+        let key = DataKey::SubscriberMandate(subscriber.clone(), position);
+        if position >= count || env.storage().persistent().get::<_, u64>(&key) != Some(mandate_id) {
+            return Err(Error::InvalidSubscriberIndex);
+        }
+        Ok(())
+    }
+
+    fn remove_subscriber_index(
+        env: &Env,
+        subscriber: &Address,
+        mandate_id: u64,
+        position: u32,
+    ) -> Result<(), Error> {
+        Self::validate_subscriber_index(env, subscriber, position, mandate_id)?;
+
+        let count_key = DataKey::SubscriberMandateCount(subscriber.clone());
+        let len = Self::index_len(env, count_key.clone());
+        let last_position = len - 1;
+        let last_key = DataKey::SubscriberMandate(subscriber.clone(), last_position);
+        let storage = env.storage().persistent();
+
+        if position != last_position {
+            let moved_id: u64 = storage
+                .get(&last_key)
+                .ok_or(Error::InvalidSubscriberIndex)?;
+            if moved_id == mandate_id {
+                return Err(Error::InvalidSubscriberIndex);
+            }
+            let moved_key = DataKey::SubscriberMandate(subscriber.clone(), position);
+            storage.set(&moved_key, &moved_id);
+            storage.extend_ttl(&moved_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            if storage
+                .get::<_, Address>(&DataKey::PendingMandateOwner(moved_id))
+                .is_some()
+            {
+                Self::write_pending_position(env, moved_id, position);
+            }
+        }
+
+        storage.remove(&last_key);
+        let new_len = len - 1;
+        storage.set(&count_key, &new_len);
+        storage.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        Ok(())
+    }
+
+    fn write_pending_owner(env: &Env, mandate_id: u64, owner: &Address) {
+        let key = DataKey::PendingMandateOwner(mandate_id);
+        env.storage().persistent().set(&key, owner);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    fn write_pending_position(env: &Env, mandate_id: u64, position: u32) {
+        let key = DataKey::PendingSubscriberPosition(mandate_id);
+        env.storage().persistent().set(&key, &position);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    fn remove_pending_owner(env: &Env, mandate_id: u64) {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingMandateOwner(mandate_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingSubscriberPosition(mandate_id));
     }
 
     fn index_len(env: &Env, count_key: DataKey) -> u32 {

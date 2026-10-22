@@ -87,6 +87,16 @@ pub struct MandateCompleted {
     pub charges_made: u32,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateTransferred {
+    #[topic]
+    pub mandate_id: u64,
+    #[topic]
+    pub old_subscriber: Address,
+    pub new_subscriber: Address,
+}
+
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
 /// after this point only; existing mandates keep the fee they were opened with.
 #[contractevent]

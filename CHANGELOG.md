@@ -52,6 +52,17 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ## Unreleased
 
+### Added
+
+- `subscription:propose_mandate_owner` and `accept_mandate_owner` let a
+  subscriber transfer an active or paused mandate to a new address with
+  authorization from both owners. The proposal includes the subscriber-index
+  position; acceptance updates the subscriber lists in constant time and emits
+  `MandateTransferred`. Merchant indexes and frozen mandate terms are unchanged.
+- Interface follow-up: `payflow-backend`, `payflow-frontend` and
+  `payflow-docs` need to add the transfer workflow and consume
+  `MandateTransferred`; track those downstream issues in the implementation PR.
+
 ### Security
 
 - **Settlement no longer depends on one operator.** A plan may set

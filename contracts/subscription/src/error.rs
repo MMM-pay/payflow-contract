@@ -17,4 +17,9 @@ pub enum Error {
     NotMerchant = 11,
     /// Fee or tip math would overflow `i128` at this amount.
     AmountOverflow = 12,
+    InvalidSubscriberIndex = 13,
+    NoPendingTransfer = 14,
+    NotProposedOwner = 15,
+    SameSubscriber = 16,
+    MandateIndexFull = 17,
 }
