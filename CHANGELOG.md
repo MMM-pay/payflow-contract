@@ -68,6 +68,31 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Added
 
+- `subscription:pause_until(subscriber, mandate_id, until)`: a pause that
+  lifts by itself. The mandate is paused like `set_paused` does, but once the
+  ledger clock reaches `until`, `charge` and `is_due` treat it as Active again
+  without any transaction from the subscriber. `next_charge` is pushed to at
+  least `until`. New error `InvalidUntil` (13). Manual resume via
+  `set_paused(false)` still works while a date is set.
+- `subscription:committed_per_period(subscriber, token, period_secs)`: the
+  subscriber's total committed spend per period, normalising mandates with
+  different billing periods to the period the caller asks about. Cancelled,
+  completed and still-paused mandates are excluded; at most `MAX_PAGE`
+  mandates are read so the call stays inside the ledger footprint limit.
+- `subscription:refund(merchant, mandate_id, amount)`: a merchant returns
+  money from its own wallet straight to the subscriber's wallet, with the
+  refund recorded on the mandate and emitted as `Refunded`, so disputes can be
+  settled from chain data. Total refunds are capped at what the merchant
+  actually collected for that mandate (price minus the frozen fee and tip, per
+  settled charge), and refunds keep working on cancelled mandates. New errors
+  `RefundExceedsReceived` (14) and `InvalidAmount` (15).
+- `vault:set_allowlist_enabled(bool)`, `vault:set_token_allowed(token, bool)`
+  and the views `allowlist_enabled` / `token_allowed`: an admin token
+  allowlist. When enabled, `deposit` rejects tokens the admin has not vouched
+  for with the new error `TokenNotAllowed` (6), so a malicious token contract
+  cannot emit misleading `Deposit` events. Off by default (testnet keeps
+  accepting every SEP-41 token), and withdrawals are never checked, so
+  allowlisting can never trap funds.
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
@@ -108,6 +133,11 @@ request.
 
 ### Changed
 
+- **Breaking:** `Mandate` gains `paused_until` (the self-lifting pause
+  schedule, 0 for none) and `refunded` (the running total the merchant has
+  refunded). Existing deployments must be redeployed because stored mandates
+  do not contain the new fields. This also requires downstream updates in
+  `payflow-backend`, `payflow-frontend` and `payflow-docs`.
 - **Breaking:** `Mandate` gains `created_at`, set when `subscribe` opens it and
   returned by `get_mandate`. Existing deployments must be redeployed because
   stored mandates do not contain the new field. This also requires downstream
@@ -131,6 +161,15 @@ request.
 
 - 42 → 63 tests, covering paging limits, entry footprint limits, merchant
   ending and constructor configuration.
+- **New tests for this unreleased set:** scheduled pauses (no charge before
+  `until`, self-resume with only the keeper's signature, manual resume,
+  extension, rejected past dates and foreign signers), `committed_per_period`
+  (mixed-period hand calculations, exclusion of paused/cancelled/completed
+  mandates, per-subscriber and per-token isolation), refunds (over-refund
+  rejected, cap grows with charges, works on cancelled mandates, merchant
+  signature required, event links the refund to the mandate) and the vault
+  allowlist (off by default, unlisted deposits rejected, removal blocks
+  deposits but not withdrawals, admin auth required, no funds moved).
 - **Keeper tip tests:** the tip is paid from the merchant's share, the
   subscriber pays the same total with or without it, a missing or wrong signer
   cannot settle or collect, and the registry rejects a tip above the cap.
