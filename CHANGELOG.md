@@ -1,11 +1,11 @@
-# Changelog
+#Changelog
 
 All notable changes to the Payflow contracts. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/). Before 1.0, a minor version may
 change the contract interface.
 
-## [0.2.0] - 2026-10-09
+# # [0.2.0] - 2026-10-09
 
 Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/testnet.env).
 
@@ -113,6 +113,12 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   that the sum of internal balances equals the vault's token holdings.
 - **Test: `charges_keep_vault_balances_in_sync`** — the same invariant driven
   through the real `charge` path in the subscription contract.
+- **Test: token transfer failure behaviour** — adds `payflow-test-token`, a
+  test-only token contract that can be configured to fail transfers globally or
+  for targeted recipient addresses. Verifies in `payflow-vault` and
+  `payflow-subscription` that failing transfers revert transactions completely
+  (deposits, withdrawals, debits, and charges across merchant, fee, and tip
+  debits) and keep vault internal balances and token holdings consistent.
 - `docs/adr/`: five architecture decision records (vault/billing split,
   `now + period` scheduling, constructors, per-position indexes,
   permissionless `charge`), linked from README.
@@ -128,6 +134,11 @@ request.
 
 ### Changed
 
+- **Breaking:** `Mandate` gains `created_at`, set when `subscribe` opens it and
+  returned by `get_mandate`. Existing deployments must be redeployed because
+  stored mandates do not contain the new field. This also requires downstream
+  updates in `payflow-backend`, `payflow-frontend` and `payflow-docs`; follow-up
+  issues should be linked in the pull request.
 - **Breaking:** `charge` takes the settling `keeper: Address` and requires its
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.

@@ -159,6 +159,8 @@ impl Subscription {
             amount: plan.amount,
             period: plan.period,
             next_charge: start,
+            created_at: now,
+            next_charge: now,
             last_charge: 0,
             charges_made: 0,
             max_charges,

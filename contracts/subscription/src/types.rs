@@ -32,6 +32,8 @@ pub struct Mandate {
     /// Frozen at subscribe time. A later plan edit cannot reprice this mandate.
     pub amount: i128,
     pub period: u64,
+    /// Unix seconds when the mandate was opened.
+    pub created_at: u64,
     /// Unix seconds. Chargeable once the ledger timestamp reaches this.
     pub next_charge: u64,
     pub last_charge: u64,
