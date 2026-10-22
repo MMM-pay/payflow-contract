@@ -5,7 +5,7 @@ use payflow_test_token::{TestToken, TestTokenClient};
 use soroban_sdk::{
     testutils::Address as _,
     token::{StellarAssetClient, TokenClient},
-    Address, Env, IntoVal,
+    Address, Env, IntoVal, String,
 };
 
 struct Harness<'a> {
@@ -42,6 +42,15 @@ fn setup() -> Harness<'static> {
         token,
         subscription,
     }
+}
+
+#[test]
+fn version_matches_package_version() {
+    let h = setup();
+    assert_eq!(
+        h.vault.version(),
+        String::from_str(&h.env, env!("CARGO_PKG_VERSION"))
+    );
 }
 
 fn funded_user(h: &Harness, amount: i128) -> Address {

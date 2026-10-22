@@ -17,7 +17,7 @@ pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeResult, DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::MAX_KEEPER_BPS;
-use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -52,6 +52,11 @@ pub struct Subscription;
 
 #[contractimpl]
 impl Subscription {
+    /// The version of this contract's crate.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
     /// Runs once, in the same transaction that deploys the contract. With a
     /// separate `initialize` call, anyone watching the ledger could call it
     /// between the deploy and the owner's own call and make themselves admin.

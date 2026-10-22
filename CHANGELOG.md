@@ -9,6 +9,11 @@ change the contract interface.
 
 ### Added
 
+- **contracts:** expose `version()` on the subscription, plan-registry and vault
+  contracts so clients can identify the deployed crate version. This interface
+  addition needs handling in payflow-backend, payflow-frontend and payflow-docs.
+  Closes #66.
+
 - **vault:** an optional per-token deposit cap while the protocol is unaudited.
   The admin can call `set_deposit_cap(user, token, amount)` to cap the balance
   one subscriber may hold for one token; a cap of `0` means unlimited, which is

@@ -125,6 +125,15 @@ impl World<'_> {
 }
 
 #[test]
+fn version_matches_package_version() {
+    let w = world();
+    assert_eq!(
+        w.sub.version(),
+        String::from_str(&w.env, env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn subscribe_copies_plan_terms_into_mandate() {
     let w = world();
     let plan_id = w.plan();

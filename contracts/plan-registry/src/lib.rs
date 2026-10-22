@@ -46,6 +46,11 @@ pub struct PlanRegistry;
 #[contractimpl]
 #[allow(clippy::too_many_arguments)]
 impl PlanRegistry {
+    /// The version of this contract's crate.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
     /// Runs once, in the same transaction that deploys the contract. With a
     /// separate `initialize` call, anyone watching the ledger could call it
     /// between the deploy and the owner's own call and make themselves admin.

@@ -11,7 +11,7 @@ pub use error::Error;
 pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
 pub use types::DataKey;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -31,6 +31,11 @@ pub struct Vault;
 
 #[contractimpl]
 impl Vault {
+    /// The version of this contract's crate.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
     /// Runs once, in the same transaction that deploys the contract. With a
     /// separate `initialize` call, anyone watching the ledger could call it
     /// between the deploy and the owner's own call and make themselves admin.

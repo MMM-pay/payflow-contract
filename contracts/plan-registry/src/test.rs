@@ -17,6 +17,15 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
 }
 
 #[test]
+fn version_matches_package_version() {
+    let (env, client, _) = setup();
+    assert_eq!(
+        client.version(),
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn constructor_sets_admin() {
     let (_env, client, admin) = setup();
     assert_eq!(client.admin(), admin);
