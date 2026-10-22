@@ -734,6 +734,15 @@ impl Subscription {
         })
     }
 
+    /// The id the next opened mandate will get. Mandates are numbered from 1,
+    /// so `next_mandate_id() - 1` is the number of mandates opened so far.
+    pub fn next_mandate_id(env: Env) -> Result<u64, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::NextMandateId)
+            .ok_or(Error::NotInitialized)
+    }
+
     pub fn fee_bps(env: Env) -> Result<u32, Error> {
         env.storage()
             .instance()

@@ -143,6 +143,23 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
 }
 
+#[test]
+fn next_mandate_id_matches_the_next_subscription() {
+    let w = world();
+    let plan_id = w.plan();
+    let first_user = w.subscriber(100_000);
+    let second_user = w.subscriber(100_000);
+
+    assert_eq!(w.sub.next_mandate_id(), 1);
+
+    let first_id = w.sub.subscribe(&first_user, &plan_id, &0);
+    let next_id = w.sub.next_mandate_id();
+    assert_eq!(next_id, first_id + 1);
+
+    let second_id = w.sub.subscribe(&second_user, &plan_id, &0);
+    assert_eq!(second_id, next_id);
+}
+
 /// Pull a u32 field out of the data map of any emitted contract event.
 fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
     for event in env.events().all().events() {
