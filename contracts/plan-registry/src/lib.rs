@@ -59,6 +59,15 @@ impl PlanRegistry {
     /// part of the plan's immutable terms: a mandate opened against this plan
     /// keeps the tip it was opened with, so raising the tip later cannot take
     /// money from an existing subscriber or merchant.
+    ///
+    /// `available_until` is a unix timestamp after which the plan stops
+    /// accepting new subscribers (0 = forever), so a promotion ends itself
+    /// without anyone remembering to call `set_plan_active(false)`. It only
+    /// gates new subscriptions; mandates opened before the cutoff keep
+    /// billing. Enforced by the subscription contract's `subscribe`.
+    // A published plan's terms are all named explicitly; grouping them into a
+    // struct would obscure the interface rather than clarify it.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -67,6 +76,7 @@ impl PlanRegistry {
         period: u64,
         name: String,
         keeper_bps: u32,
+        available_until: u64,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -98,6 +108,7 @@ impl PlanRegistry {
             period,
             active: true,
             keeper_bps,
+            available_until,
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -131,6 +142,7 @@ impl PlanRegistry {
             period: plan.period,
             name,
             keeper_bps,
+            available_until,
         }
         .publish(&env);
 

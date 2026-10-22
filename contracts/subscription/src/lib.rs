@@ -93,81 +93,40 @@ impl Subscription {
         let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
         let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
 
-        if !plan.active {
-            return Err(Error::PlanInactive);
-        }
+        Self::do_subscribe(&env, subscriber, plan, max_charges)
+    }
 
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextMandateId)
-            .ok_or(Error::NotInitialized)?;
+    /// Fund the vault and open a mandate in one transaction, so a new
+    /// subscriber signs once instead of signing a deposit and then a
+    /// subscribe — the gap between the two is where sign-ups were lost.
+    ///
+    /// The subscriber's one `require_auth` at the top of this call is the only
+    /// signature needed. The nested calls that also require the subscriber's
+    /// auth — `vault.deposit`, and the token transfer it makes in turn — are
+    /// covered as sub-invocations of this same authorization, so the whole
+    /// three-level tree is signed by one signature (wallets build those auth
+    /// entries from simulation; the auth-tree test pins down the shape).
+    ///
+    /// Atomic by construction: if the deposit fails (for example the wallet
+    /// holds too few tokens), the whole invocation aborts and no mandate is
+    /// created. If mandate creation then fails, the deposit is rolled back
+    /// with it.
+    pub fn subscribe_with_deposit(
+        env: Env,
+        subscriber: Address,
+        plan_id: u64,
+        max_charges: u32,
+        deposit: i128,
+    ) -> Result<u64, Error> {
+        subscriber.require_auth();
 
-        let fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::FeeBps)
-            .ok_or(Error::NotInitialized)?;
+        let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
+        let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
 
-        // The registry already caps this, but clamp again here: the mandate's
-        // tip must never exceed MAX_KEEPER_BPS even if the registry contract
-        // passed to this deployment does not enforce the cap.
-        let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+        let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+        VaultClient::new(&env, &vault_addr).deposit(&subscriber, &plan.token, &deposit);
 
-        let now = env.ledger().timestamp();
-        let mandate = Mandate {
-            id,
-            subscriber: subscriber.clone(),
-            plan_id,
-            merchant: plan.merchant.clone(),
-            token: plan.token.clone(),
-            amount: plan.amount,
-            period: plan.period,
-            next_charge: now,
-            last_charge: 0,
-            charges_made: 0,
-            max_charges,
-            fee_bps,
-            keeper_bps,
-            status: MandateStatus::Active,
-        };
-
-        Self::write_mandate(&env, &mandate);
-        Self::index_push(
-            &env,
-            DataKey::SubscriberMandateCount(subscriber.clone()),
-            |i| DataKey::SubscriberMandate(subscriber.clone(), i),
-            id,
-        );
-        Self::index_push(
-            &env,
-            DataKey::MerchantMandateCount(plan.merchant.clone()),
-            |i| DataKey::MerchantMandate(plan.merchant.clone(), i),
-            id,
-        );
-
-        env.storage()
-            .instance()
-            .set(&DataKey::NextMandateId, &(id + 1));
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-
-        Subscribed {
-            mandate_id: id,
-            subscriber,
-            merchant: plan.merchant,
-            plan_id,
-            amount: plan.amount,
-            period: plan.period,
-            next_charge: now,
-            max_charges,
-            fee_bps,
-            keeper_bps,
-        }
-        .publish(&env);
-
-        Ok(id)
+        Self::do_subscribe(&env, subscriber, plan, max_charges)
     }
 
     /// Execute a due charge.
@@ -438,6 +397,20 @@ impl Subscription {
         })
     }
 
+    /// How many mandates have been opened against `plan_id`, in any state.
+    pub fn plan_mandate_count(env: Env, plan_id: u64) -> u32 {
+        Self::index_len(&env, DataKey::PlanMandateCount(plan_id))
+    }
+
+    /// Ids of the mandates opened against `plan_id`, oldest first, starting at
+    /// position `start`. Returns at most `min(limit, MAX_PAGE)`.
+    pub fn plan_mandates(env: Env, plan_id: u64, start: u32, limit: u32) -> Vec<u64> {
+        let len = Self::index_len(&env, DataKey::PlanMandateCount(plan_id));
+        Self::index_page(&env, len, start, limit, |i| {
+            DataKey::PlanMandate(plan_id, i)
+        })
+    }
+
     pub fn fee_bps(env: Env) -> Result<u32, Error> {
         env.storage()
             .instance()
@@ -464,6 +437,106 @@ impl Subscription {
             .instance()
             .get(&key)
             .ok_or(Error::NotInitialized)
+    }
+
+    /// Shared body of `subscribe` and `subscribe_with_deposit`, reached only
+    /// after the public entry point has taken the subscriber's
+    /// `require_auth` (and, for the deposit variant, funded the vault).
+    ///
+    /// The plan's terms are copied into the mandate and never re-read, so a
+    /// merchant cannot change the price of a subscription after the fact.
+    fn do_subscribe(
+        env: &Env,
+        subscriber: Address,
+        plan: Plan,
+        max_charges: u32,
+    ) -> Result<u64, Error> {
+        let plan_id = plan.id;
+        let now = env.ledger().timestamp();
+
+        // A plan that is switched off, or whose availability window has
+        // passed, accepts no new subscribers. Existing mandates never re-read
+        // the plan, so both checks can only ever stop new sign-ups.
+        if !plan.active || (plan.available_until != 0 && now >= plan.available_until) {
+            return Err(Error::PlanInactive);
+        }
+
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextMandateId)
+            .ok_or(Error::NotInitialized)?;
+
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeeBps)
+            .ok_or(Error::NotInitialized)?;
+
+        // The registry already caps this, but clamp again here: the mandate's
+        // tip must never exceed MAX_KEEPER_BPS even if the registry contract
+        // passed to this deployment does not enforce the cap.
+        let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+
+        let mandate = Mandate {
+            id,
+            subscriber: subscriber.clone(),
+            plan_id,
+            merchant: plan.merchant.clone(),
+            token: plan.token.clone(),
+            amount: plan.amount,
+            period: plan.period,
+            next_charge: now,
+            last_charge: 0,
+            charges_made: 0,
+            max_charges,
+            fee_bps,
+            keeper_bps,
+            status: MandateStatus::Active,
+        };
+
+        Self::write_mandate(env, &mandate);
+        Self::index_push(
+            env,
+            DataKey::SubscriberMandateCount(subscriber.clone()),
+            |i| DataKey::SubscriberMandate(subscriber.clone(), i),
+            id,
+        );
+        Self::index_push(
+            env,
+            DataKey::MerchantMandateCount(plan.merchant.clone()),
+            |i| DataKey::MerchantMandate(plan.merchant.clone(), i),
+            id,
+        );
+        Self::index_push(
+            env,
+            DataKey::PlanMandateCount(plan_id),
+            |i| DataKey::PlanMandate(plan_id, i),
+            id,
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::NextMandateId, &(id + 1));
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+        Subscribed {
+            mandate_id: id,
+            subscriber,
+            merchant: plan.merchant,
+            plan_id,
+            amount: plan.amount,
+            period: plan.period,
+            next_charge: now,
+            max_charges,
+            fee_bps,
+            keeper_bps,
+        }
+        .publish(env);
+
+        Ok(id)
     }
 
     fn read_mandate(env: &Env, id: u64) -> Result<Mandate, Error> {

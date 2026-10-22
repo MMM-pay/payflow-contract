@@ -15,6 +15,9 @@ pub struct PlanCreated {
     pub name: String,
     /// Keeper tip frozen into the plan, in basis points of the merchant share.
     pub keeper_bps: u32,
+    /// Unix seconds after which the plan stops accepting new subscribers,
+    /// 0 = forever. Carried in the event so indexers need no follow-up read.
+    pub available_until: u64,
 }
 
 /// Emitted when a merchant activates or deactivates a plan.

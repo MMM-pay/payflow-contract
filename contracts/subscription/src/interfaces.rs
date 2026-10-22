@@ -13,4 +13,9 @@ pub trait PlanRegistryInterface {
 #[contractclient(name = "VaultClient")]
 pub trait VaultInterface {
     fn debit(env: Env, user: Address, token: Address, to: Address, amount: i128);
+    /// Credit side of `payflow-vault`, used by `subscribe_with_deposit` so a
+    /// subscriber can fund and subscribe in one transaction. The nested call
+    /// requires the subscriber's auth, which is covered by the outer
+    /// `subscribe_with_deposit` authorization.
+    fn deposit(env: Env, user: Address, token: Address, amount: i128);
 }

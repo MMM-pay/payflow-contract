@@ -42,4 +42,9 @@ pub struct Plan {
     /// points of the merchant's share. 0 means the merchant keeps it all.
     /// At most `MAX_KEEPER_BPS`; the registry rejects anything higher.
     pub keeper_bps: u32,
+    /// Unix seconds after which the plan stops accepting new subscribers;
+    /// 0 means it is available forever. Only new subscriptions are affected:
+    /// mandates opened before the cutoff keep billing. The subscription
+    /// contract enforces the cutoff in `subscribe`.
+    pub available_until: u64,
 }

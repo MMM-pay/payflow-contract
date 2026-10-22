@@ -82,7 +82,6 @@ impl World<'_> {
     fn plan(&self) -> u64 {
         self.plan_with_keeper(0)
     }
-
     fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
@@ -91,6 +90,20 @@ impl World<'_> {
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
             &keeper_bps,
+            &0,
+        )
+    }
+
+    /// A promotional plan that stops accepting subscribers at `cutoff`.
+    fn plan_expiring(&self, cutoff: u64) -> u64 {
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &PRICE,
+            &MONTH,
+            &String::from_str(&self.env, "Promo Plan"),
+            &0,
+            &cutoff,
         )
     }
 
@@ -542,6 +555,7 @@ fn zero_fee_pays_merchant_in_full() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -754,6 +768,13 @@ fn subscribe_cost_does_not_grow_with_the_merchant_index() {
         w.sub.subscriber_mandates(&latecomer, &0, &10),
         soroban_sdk::vec![&w.env, id]
     );
+    // The per-plan index uses the same one-entry-per-position layout, so it
+    // adds fixed-size writes to subscribe as well, never a growing list.
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 301);
+    assert_eq!(
+        w.sub.plan_mandates(&plan_id, &300, &1),
+        soroban_sdk::vec![&w.env, id]
+    );
 }
 
 #[test]
@@ -919,6 +940,7 @@ fn fee_paid_to_address() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1076,6 +1098,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);
@@ -1090,4 +1113,297 @@ fn fee_to_contract_address_receives_the_fee() {
     assert_eq!(token_client.balance(&registry_id), expected_fee);
     assert_eq!(token_client.balance(&merchant), PRICE - expected_fee);
     assert_eq!(vault.balance(&user, &token), 50_000 - PRICE);
+}
+
+// ---------------------------------------------------------------------------
+// Plan availability cutoff
+// ---------------------------------------------------------------------------
+
+/// The acceptance criterion for the cutoff: a subscriber gets in just before
+/// it and is rejected just after it, while the mandate opened before it keeps
+/// billing — `charge` never re-reads the plan.
+#[test]
+fn plan_cutoff_stops_new_subscriptions_but_not_existing_mandates() {
+    let w = world();
+    let now = w.env.ledger().timestamp();
+    let cutoff = now + 1_000;
+    let plan_id = w.plan_expiring(cutoff);
+    let user = w.subscriber(100_000);
+
+    // One second before the cutoff the plan is still open.
+    w.env.ledger().set_timestamp(cutoff - 1);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    // At the cutoff itself it accepts no one new.
+    w.env.ledger().set_timestamp(cutoff);
+    let late = w.subscriber(100_000);
+    assert_eq!(
+        w.sub.try_subscribe(&late, &plan_id, &0),
+        Err(Ok(Error::PlanInactive))
+    );
+
+    // The mandate opened before the cutoff keeps billing past it.
+    w.env.ledger().set_timestamp(cutoff + MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-plan mandate index
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plan_mandate_index_lists_subscribers_and_pages() {
+    let w = world();
+    let a = w.plan();
+    let b = w.plan();
+
+    let alice = w.subscriber(100_000);
+    let bob = w.subscriber(100_000);
+    let carol = w.subscriber(100_000);
+    let dave = w.subscriber(100_000);
+
+    let m1 = w.sub.subscribe(&alice, &a, &0);
+    let m2 = w.sub.subscribe(&bob, &a, &0);
+    let m3 = w.sub.subscribe(&carol, &a, &0);
+    let m4 = w.sub.subscribe(&dave, &b, &0);
+
+    // Per-plan isolation, oldest first.
+    assert_eq!(w.sub.plan_mandate_count(&a), 3);
+    assert_eq!(
+        w.sub.plan_mandates(&a, &0, &10),
+        soroban_sdk::vec![&w.env, m1, m2, m3]
+    );
+    assert_eq!(w.sub.plan_mandate_count(&b), 1);
+    assert_eq!(
+        w.sub.plan_mandates(&b, &0, &10),
+        soroban_sdk::vec![&w.env, m4]
+    );
+
+    // Paging bounds, same contract as the merchant and subscriber indexes.
+    assert_eq!(
+        w.sub.plan_mandates(&a, &1, &1),
+        soroban_sdk::vec![&w.env, m2]
+    );
+    assert_eq!(w.sub.plan_mandates(&a, &0, &u32::MAX).len(), 3);
+    assert_eq!(w.sub.plan_mandates(&a, &3, &10).len(), 0);
+    assert_eq!(w.sub.plan_mandates(&a, &u32::MAX, &u32::MAX).len(), 0);
+
+    // A cancelled mandate stays listed: the index records who subscribed,
+    // not who is still billing.
+    w.sub.cancel(&alice, &m1);
+    assert_eq!(w.sub.plan_mandate_count(&a), 3);
+    assert_eq!(
+        w.sub.plan_mandates(&a, &0, &10),
+        soroban_sdk::vec![&w.env, m1, m2, m3]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// subscribe_with_deposit: fund and subscribe in one transaction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscribe_with_deposit_funds_and_subscribes_in_one_call() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &100_000);
+
+    // No prior deposit: the single call moves the tokens into the vault and
+    // opens the mandate.
+    let id = w.sub.subscribe_with_deposit(&user, &plan_id, &0, &40_000);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 40_000);
+    assert_eq!(w.token_client.balance(&user), 60_000);
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.subscriber, user);
+    assert_eq!(m.amount, PRICE);
+    assert_eq!(m.status, MandateStatus::Active);
+    // Mandate ids stay sequential: nothing was consumed by the deposit half.
+    assert_eq!(id, 1);
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 1);
+}
+
+/// The acceptance criterion "if the deposit fails nothing is subscribed": a
+/// wallet holding too few tokens aborts the whole transaction, and no
+/// mandate id is consumed.
+#[test]
+fn subscribe_with_deposit_aborts_atomically_when_the_deposit_fails() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &1_000); // holds less than the deposit
+
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &40_000)
+        .is_err());
+
+    // Nothing was subscribed and nothing was credited.
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&user), 1_000);
+
+    // No mandate id was burned: the next subscribe still gets id 1.
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    assert_eq!(id, 1);
+}
+
+/// The acceptance criterion "auth tree asserted in a test": exactly the
+/// authorizations a wallet builds from one subscriber signature are enough
+/// for the whole flow. The tree is three levels deep — the root invocation
+/// on the subscription contract, the vault's deposit as its nested
+/// invocation, and the token transfer the vault makes inside that deposit:
+///
+///   user ─ subscribe_with_deposit (subscription contract)
+///          └─ deposit (vault)
+///             └─ transfer (token)
+///
+/// All three belong to the same single signature.
+#[test]
+fn one_subscriber_signature_covers_the_nested_vault_deposit() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &100_000);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_with_deposit",
+            args: (&user, &plan_id, &0u32, &40_000i128).into_val(&w.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &w.vault.address,
+                fn_name: "deposit",
+                args: (&user, &w.token, &40_000i128).into_val(&w.env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &w.token,
+                    fn_name: "transfer",
+                    args: (&user, &w.vault.address, &40_000i128).into_val(&w.env),
+                    sub_invokes: &[],
+                }],
+            }],
+        },
+    }]);
+
+    let id = w.sub.subscribe_with_deposit(&user, &plan_id, &0, &40_000);
+    assert_eq!(w.vault.balance(&user, &w.token), 40_000);
+    assert_eq!(w.sub.get_mandate(&id).subscriber, user);
+}
+
+/// The nested entry is load-bearing: the same root signature without it does
+/// not cover the vault's own `require_auth`, so the transaction fails.
+#[test]
+fn without_the_nested_auth_entry_the_deposit_is_not_covered() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &100_000);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_with_deposit",
+            args: (&user, &plan_id, &0u32, &40_000i128).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &40_000)
+        .is_err());
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+}
+
+#[test]
+fn subscribe_with_deposit_requires_the_subscribers_signature() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let stranger = Address::generate(&w.env);
+    w.minter.mint(&user, &100_000);
+
+    // A different signer authorizing the same call does not cover `user`.
+    w.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_with_deposit",
+            args: (&user, &plan_id, &0u32, &40_000i128).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &40_000)
+        .is_err());
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+}
+
+/// The deposit half rolls back when mandate creation fails: an expired plan
+/// rejects the subscribe, and the tokens stay in the subscriber's wallet.
+#[test]
+fn subscribe_with_deposit_rolls_the_deposit_back_when_the_plan_is_expired() {
+    let w = world();
+    let now = w.env.ledger().timestamp();
+    let cutoff = now + 10;
+    let plan_id = w.plan_expiring(cutoff);
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &100_000);
+
+    w.env.ledger().set_timestamp(cutoff);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_deposit(&user, &plan_id, &0, &40_000),
+        Err(Ok(Error::PlanInactive))
+    );
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&user), 100_000);
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Subscriber spend limit, through the real charge path
+// ---------------------------------------------------------------------------
+
+/// A subscriber's per-period vault ceiling stops a charge that would cross
+/// it, atomically: no partial debits, and the mandate simply stays due.
+#[test]
+fn a_spend_limit_blocks_the_charge_atomically() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // "Never debit more than the price minus one unit in this window."
+    w.vault
+        .set_spend_limit(&user, &w.token, &(PRICE - 1), &MONTH);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    // The merchant-share debit succeeded but the fee debit crossed the
+    // ceiling; the whole charge rolled back.
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
+    assert!(w.sub.is_due(&id));
+
+    // Raising the limit lets the same charge through.
+    w.vault.set_spend_limit(&user, &w.token, &PRICE, &MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
 }
