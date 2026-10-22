@@ -15,4 +15,6 @@ pub enum Error {
     MaxChargesReached = 9,
     InvalidMaxCharges = 10,
     NotMerchant = 11,
+    /// Fee or tip math would overflow `i128` at this amount.
+    AmountOverflow = 12,
 }

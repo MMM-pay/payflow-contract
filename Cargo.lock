@@ -1177,6 +1177,14 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "payflow-plan-registry"
 version = "0.2.0"
 dependencies = [
+ "payflow-shared",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "payflow-shared"
+version = "0.2.0"
+dependencies = [
  "soroban-sdk",
 ]
 
@@ -1185,6 +1193,7 @@ name = "payflow-subscription"
 version = "0.2.0"
 dependencies = [
  "payflow-plan-registry",
+ "payflow-shared",
  "payflow-vault",
  "soroban-sdk",
 ]

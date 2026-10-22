@@ -18,6 +18,8 @@ pub struct Subscribed {
     pub max_charges: u32,
     /// The fee rate frozen into this mandate, for the same reason.
     pub fee_bps: u32,
+    /// The keeper tip frozen into this mandate, for the same reason.
+    pub keeper_bps: u32,
 }
 
 #[contractevent]
@@ -29,8 +31,14 @@ pub struct Charged {
     pub subscriber: Address,
     #[topic]
     pub merchant: Address,
+    /// Merchant share after the protocol fee and the keeper tip.
     pub amount: i128,
     pub fee: i128,
+    /// Paid to `keeper` out of the merchant share. The subscriber's total debit
+    /// is `amount + fee + tip` exactly as it was before tips existed.
+    pub tip: i128,
+    /// Account that settled this charge and received the tip.
+    pub keeper: Address,
     pub charges_made: u32,
     pub next_charge: u64,
 }

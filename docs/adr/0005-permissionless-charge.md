@@ -18,3 +18,15 @@ a due charge.
   take more than authorized.
 - There is no access control to audit on this path; safety rests on the
   mandate limits and the vault's balance checks.
+
+## Update: keeper tip (issue #44)
+
+A plan may set `keeper_bps`, a share of the merchant's own payment paid to
+whoever settles the charge. That makes the tip an incentive for independent
+keepers rather than a reason to gate the path, so `charge` stays open to any
+caller but now takes the keeper `Address` and requires its authorization, so
+the tip is only ever sent to an address that proved it controls the account it
+is collecting into. The signature covers the transfer to the caller only; it
+grants no control over the mandate, and the subscriber's total debit is
+unchanged.
+See the front-running analysis in `SECURITY.md`.

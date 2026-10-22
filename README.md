@@ -69,10 +69,13 @@ is empty at charge time. Separating custody from billing means subscribers fund
 ahead, and the biller debits a balance that is already committed. It also means
 custody logic can be audited on its own.
 
-**Why `charge` is permissionless.** The mandate *is* the authorization, so it
+**Why `charge` is open to anyone.** The mandate *is* the authorization, so it
 does not matter who triggers settlement. If the project's keeper goes offline,
 the merchant — or the subscriber, or a stranger — can still settle. Billing does
-not depend on us staying online.
+not depend on us staying online. The caller signs only to receive the plan's
+keeper tip, if it sets one; that signature gives it no power over the mandate.
+A tip is paid out of the merchant's share, so it never raises what the
+subscriber pays.
 
 ## Guarantees for the subscriber
 
@@ -89,6 +92,9 @@ not depend on us staying online.
 - The protocol fee is capped at 10% (`MAX_FEE_BPS = 1000`) and is integer basis
   points, frozen into each mandate when it is opened. An admin fee change only
   applies to new mandates. There is no floating point anywhere in the contracts.
+- A keeper tip is capped at 5% of the merchant's share (`MAX_KEEPER_BPS = 500`)
+  and comes out of that share, never out of the subscriber's payment. It is
+  frozen into the mandate when it is opened.
 
 ## Design notes
 

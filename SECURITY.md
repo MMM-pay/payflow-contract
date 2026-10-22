@@ -49,9 +49,33 @@ These are understood tradeoffs, not undiscovered bugs:
   `debit`. State is written before the transfer in every path, so a malicious
   token cannot observe stale balances, but a hostile token contract can still
   fail or grief a charge.
+- **Keeper tips and front-running.** A plan may pay whoever settles a due
+  charge a tip of at most 5% of the merchant's share (`MAX_KEEPER_BPS`), funded
+  by the merchant. Settlement is open to any caller, so the first keeper to land
+  a valid `charge` is paid, and a copycat that sees a pending settlement can
+  submit an identical call and take the tip by paying a higher inclusion fee.
+  That competition is the point of the feature, and the exposure is bounded:
+
+  - The tip is a share of what the merchant was going to receive anyway. The
+    subscriber is debited `mandate.amount` in total, tip or no tip, and the plan
+    price, protocol fee and tip rate are frozen into the mandate at subscribe
+    time, so no keeper can reprice a charge it settles.
+  - A front-run can only collect the tip once. The first successful charge
+    advances `charges_made` and pushes `next_charge` a full period ahead, so the
+    copycat's second attempt fails with `NotDue` rather than charging twice.
+  - The tip can only go to the caller, and the caller must authorize the call,
+    so nobody can redirect a settlement's tip to a third party or collect on
+    another keeper's behalf.
+  - A losing keeper's transaction reverts at the due-time check; the only loss
+    is its own network fee, and the subscriber, merchant and fee recipient are
+    unaffected either way.
+
+  In short, the extractable value is at most one capped tip per mandate per
+  period, paid by the merchant, and it cannot be repeated, redirected or used
+  to change any mandate's terms.
 - **Fee rounding.** Integer basis-point math rounds the fee down, favouring the
   merchant. For a plan priced below 100 stroops with a 1% fee, the fee rounds to
-  zero.
+  zero. The keeper tip rounds down too, this time in the merchant's favour.
 - **Index entries can be archived.** Each position in a merchant's or
   subscriber's index is its own persistent entry with a 90-day TTL that is
   extended when written, not when read. An index position untouched for 90

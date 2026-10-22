@@ -11,6 +11,7 @@ pub use error::Error;
 pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
+use payflow_shared::MAX_KEEPER_BPS;
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -52,6 +53,12 @@ impl PlanRegistry {
     }
 
     /// Publish a new plan. Only the merchant may publish plans in its own name.
+    ///
+    /// `keeper_bps` is the share of each charge paid to whoever settles it,
+    /// taken out of the merchant's share, capped at `MAX_KEEPER_BPS`. It is
+    /// part of the plan's immutable terms: a mandate opened against this plan
+    /// keeps the tip it was opened with, so raising the tip later cannot take
+    /// money from an existing subscriber or merchant.
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -59,6 +66,7 @@ impl PlanRegistry {
         amount: i128,
         period: u64,
         name: String,
+        keeper_bps: u32,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -70,6 +78,9 @@ impl PlanRegistry {
         }
         if period < MIN_PERIOD {
             return Err(Error::InvalidPeriod);
+        }
+        if keeper_bps > MAX_KEEPER_BPS {
+            return Err(Error::KeeperBpsTooHigh);
         }
 
         let id: u64 = env
@@ -86,6 +97,7 @@ impl PlanRegistry {
             amount,
             period,
             active: true,
+            keeper_bps,
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -118,6 +130,7 @@ impl PlanRegistry {
             amount: plan.amount,
             period: plan.period,
             name,
+            keeper_bps,
         }
         .publish(&env);
 

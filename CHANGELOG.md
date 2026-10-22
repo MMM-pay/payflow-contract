@@ -54,6 +54,13 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Security
 
+- **Settlement no longer depends on one operator.** A plan may set
+  `keeper_bps`, a tip of at most 5% of the merchant's share paid to whoever
+  settles a charge. Competing keepers can now be paid for settling a due
+  mandate. The tip comes out of the merchant's share, so the subscriber's total
+  debit is unchanged, and it is frozen into each mandate at subscribe time. The
+  front-running analysis is in [`SECURITY.md`](SECURITY.md).
+
 - **Vault admin has no path to user funds.** The vault admin can only call
   `set_subscription`, which repoints the subscription contract. No admin
   function (including `set_subscription`) touches user balances directly.
@@ -61,6 +68,16 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Added
 
+- `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
+  to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
+  error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
+  `PlanCreated`.
+- `subscription:charge(keeper, mandate_id)` pays the plan's tip to `keeper` out
+  of the merchant's share. Mandates store `keeper_bps` alongside `fee_bps`;
+  `Charged` gains `tip` and `keeper`, and `Subscribed` gains `keeper_bps`.
+- `contracts/shared`: the `Plan` type and `MAX_KEEPER_BPS` are defined once and
+  used by both the registry and the subscription contract, so the interface
+  between them cannot drift.
 - `plan-registry:set_profile(merchant, name, url)` and
   `plan-registry:profile(merchant)`: a merchant-set, self-declared profile
   (display name and URL, both length-limited) shown alongside plans so
@@ -83,12 +100,21 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   permissionless `charge`), linked from README.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`ProfileUpdated`) ripple into `payflow-backend`, `payflow-frontend` and
-`payflow-docs`: follow-up issues to consume the new event and endpoints are
-tracked in the pull request.
+`ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s `keeper` argument and
+the new `tip`/`keeper`/`keeper_bps` event fields) ripple into
+`payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
+consume the new fields and pass the keeper argument are tracked in the pull
+request.
 
 ### Changed
 
+- **Breaking:** `charge` takes the settling `keeper: Address` and requires its
+  authorization; it no longer settles without a signature. Any address may
+  still act as keeper.
+- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
+  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
+  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
+  and `Mandate` values do not decode into the new shape.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -100,6 +126,9 @@ tracked in the pull request.
 
 - 42 → 63 tests, covering paging limits, entry footprint limits, merchant
   ending and constructor configuration.
+- **Keeper tip tests:** the tip is paid from the merchant's share, the
+  subscriber pays the same total with or without it, a missing or wrong signer
+  cannot settle or collect, and the registry rejects a tip above the cap.
 - **New test: `admin_has_no_path_to_user_funds`** — asserts that `set_subscription`
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee

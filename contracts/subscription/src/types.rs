@@ -1,19 +1,10 @@
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address};
 
-/// Mirror of `payflow-plan-registry`'s `Plan`. Declared locally so the
-/// subscription contract can decode registry responses without linking the
-/// registry crate into its own wasm.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Plan {
-    pub id: u64,
-    pub merchant: Address,
-    pub name: String,
-    pub token: Address,
-    pub amount: i128,
-    pub period: u64,
-    pub active: bool,
-}
+/// The registry's `Plan`, imported from the shared crate rather than copied.
+/// A field added to or removed from the registry's plan therefore changes the
+/// type this contract decodes, and the subscription build fails instead of
+/// silently failing to decode `get_plan` at runtime.
+pub use payflow_shared::Plan;
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +42,10 @@ pub struct Mandate {
     /// change therefore cannot alter the economics of a mandate that is
     /// already open — the same guarantee the plan's price already has.
     pub fee_bps: u32,
+    /// Keeper tip in basis points of the merchant share, frozen at subscribe
+    /// time for the same reason as `fee_bps`: a later plan cannot raise what an
+    /// open mandate pays whoever settles it.
+    pub keeper_bps: u32,
     pub status: MandateStatus,
 }
 

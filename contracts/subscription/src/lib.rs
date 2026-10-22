@@ -15,6 +15,7 @@ pub use events::{
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
 
+use payflow_shared::MAX_KEEPER_BPS;
 use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -108,6 +109,11 @@ impl Subscription {
             .get(&DataKey::FeeBps)
             .ok_or(Error::NotInitialized)?;
 
+        // The registry already caps this, but clamp again here: the mandate's
+        // tip must never exceed MAX_KEEPER_BPS even if the registry contract
+        // passed to this deployment does not enforce the cap.
+        let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+
         let now = env.ledger().timestamp();
         let mandate = Mandate {
             id,
@@ -122,6 +128,7 @@ impl Subscription {
             charges_made: 0,
             max_charges,
             fee_bps,
+            keeper_bps,
             status: MandateStatus::Active,
         };
 
@@ -156,22 +163,33 @@ impl Subscription {
             next_charge: now,
             max_charges,
             fee_bps,
+            keeper_bps,
         }
         .publish(&env);
 
         Ok(id)
     }
 
-    /// Execute a due charge. Deliberately permissionless: the mandate itself is
-    /// the authorization, so anyone — the merchant, a keeper bot, or the
-    /// subscriber — may settle it. This keeps billing alive without trusting a
-    /// single operator to stay online.
+    /// Execute a due charge.
+    ///
+    /// Open to any caller: the mandate itself is the authorization, so the
+    /// merchant, a keeper bot, or the subscriber may all settle it. `keeper`
+    /// must authorize this call, because the plan's tip is paid to it; that is
+    /// the only signature required, and it grants no power over the mandate.
+    /// Competing keepers are what keeps billing alive without trusting one
+    /// operator to stay online.
+    ///
+    /// The tip is paid out of the merchant's share (see the plan's
+    /// `keeper_bps`), so the subscriber is debited exactly `mandate.amount`
+    /// whether or not a tip is paid, and the protocol fee is unaffected.
     ///
     /// `next_charge` advances to `now + period` rather than
     /// `next_charge + period`. A keeper outage therefore delays billing instead
     /// of accumulating a backlog that could drain a vault in one burst. The
     /// tradeoff is slow forward drift, which favours the subscriber.
-    pub fn charge(env: Env, mandate_id: u64) -> Result<(), Error> {
+    pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<(), Error> {
+        keeper.require_auth();
+
         let mut mandate = Self::read_mandate(&env, mandate_id)?;
 
         if mandate.status != MandateStatus::Active {
@@ -186,9 +204,19 @@ impl Subscription {
             return Err(Error::MaxChargesReached);
         }
 
-        // The mandate's own fee, frozen when the subscriber opened it.
+        // The mandate's own fee and tip, both frozen when the subscriber
+        // opened it. Neither is read from the plan or the config here.
         let fee = mandate.amount * (mandate.fee_bps as i128) / BPS_DENOMINATOR;
-        let merchant_amount = mandate.amount - fee;
+        let merchant_gross = mandate.amount - fee;
+
+        // Tip is a share of the merchant's own money, capped again here so a
+        // mandate can never pay out more than MAX_KEEPER_BPS of that share.
+        let tip_bps = mandate.keeper_bps.min(MAX_KEEPER_BPS);
+        let tip = merchant_gross
+            .checked_mul(tip_bps as i128)
+            .ok_or(Error::AmountOverflow)?
+            / BPS_DENOMINATOR;
+        let merchant_amount = merchant_gross - tip;
 
         let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
         let vault = VaultClient::new(&env, &vault_addr);
@@ -203,6 +231,10 @@ impl Subscription {
         if fee > 0 {
             let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
             vault.debit(&mandate.subscriber, &mandate.token, &fee_to, &fee);
+        }
+
+        if tip > 0 {
+            vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
         }
 
         mandate.charges_made += 1;
@@ -222,6 +254,8 @@ impl Subscription {
             merchant: mandate.merchant.clone(),
             amount: merchant_amount,
             fee,
+            tip,
+            keeper,
             charges_made: mandate.charges_made,
             next_charge: mandate.next_charge,
         }
