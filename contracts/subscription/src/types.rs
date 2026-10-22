@@ -15,12 +15,12 @@ pub enum MandateStatus {
     Paused,
     /// Terminated by the subscriber. Irreversible.
     Cancelled,
-    /// Reached `max_charges`. Irreversible.
+    /// Reached `max_charges` or `max_total`. Irreversible.
     Completed,
 }
 
 /// A standing authorization from a subscriber to a merchant, bounded in
-/// amount, frequency, and total number of charges.
+/// amount, frequency, total number of charges, and total spend.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mandate {
@@ -40,6 +40,10 @@ pub struct Mandate {
     pub charges_made: u32,
     /// 0 means open-ended.
     pub max_charges: u32,
+    /// 0 means open-ended. Includes all settled charge amounts.
+    pub max_total: i128,
+    /// Total amount debited for settled charges.
+    pub total_spent: i128,
     /// Protocol fee in basis points, frozen at subscribe time. An admin fee
     /// change therefore cannot alter the economics of a mandate that is
     /// already open — the same guarantee the plan's price already has.

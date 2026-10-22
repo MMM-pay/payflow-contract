@@ -116,6 +116,10 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   an on-chain pointer to the new one and apps can suggest the replacement. Both
   plans must be owned by the merchant and be denominated in the same token; a
   plan cannot point at itself. Emits `PlanSuccessorSet`.
+- `subscription:subscribe` accepts `max_total` (0 = uncapped). Mandates track
+  settled spend and complete without a debit when the next full charge would
+  exceed the cap; the existing `max_charges` limit continues to apply, and
+  either limit may complete a mandate first. `Subscribed` includes `max_total`.
 - **Test: admin has no path to user funds** — verifies that every admin-
   callable function leaves all user balances unchanged.
 - **Test: fees paid to a contract address** — verifies that the protocol fee
@@ -142,6 +146,11 @@ Interface changes (`set_profile`, `profile`, `deactivate_page`,
 `payflow-docs`: follow-up issues to consume the new fields and pass the keeper
 argument are tracked in the pull request.
 
+The `subscribe` argument and `Mandate`/`Subscribed` fields also change for
+`max_total` and `total_spent`. These interface changes ripple into
+`payflow-backend`, `payflow-frontend` and `payflow-docs`; create and link
+follow-up issues in the pull request.
+
 ### Changed
 
 - **Breaking:** `Mandate` gains `paused_until` (the self-lifting pause
@@ -154,6 +163,11 @@ argument are tracked in the pull request.
   stored mandates do not contain the new field. This also requires downstream
   updates in `payflow-backend`, `payflow-frontend` and `payflow-docs`; follow-up
   issues should be linked in the pull request.
+- **Breaking:** `subscribe` gains `max_total`, `Mandate` gains `max_total` and
+  `total_spent`, and `Subscribed` gains `max_total`. Existing deployments must
+  be redeployed because stored mandates do not contain the new fields. Follow-up
+  issues for `payflow-backend`, `payflow-frontend` and `payflow-docs` should be
+  linked in the pull request.
 - **Breaking:** `charge` takes the settling `keeper: Address` and requires its
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.

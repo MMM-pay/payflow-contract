@@ -24,4 +24,6 @@ pub enum Error {
     RefundExceedsReceived = 14,
     /// A refund amount that is zero or negative.
     InvalidAmount = 15,
+    /// A total-spend cap that is negative.
+    InvalidMaxTotal = 16,
 }

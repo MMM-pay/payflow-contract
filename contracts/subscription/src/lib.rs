@@ -45,8 +45,8 @@ pub const MAX_PAGE: u32 = 50;
 /// A subscriber opens a `Mandate` once, and thereafter any caller may trigger
 /// `charge` when the mandate falls due. The mandate is the only thing standing
 /// between a merchant and a subscriber's balance, and it is bounded on every
-/// axis the subscriber cares about: fixed amount, fixed period, capped count,
-/// and cancellable at any time.
+/// axis the subscriber cares about: fixed amount, fixed period, capped count
+/// and total spend, and cancellable at any time.
 #[contract]
 pub struct Subscription;
 
@@ -88,8 +88,13 @@ impl Subscription {
         subscriber: Address,
         plan_id: u64,
         max_charges: u32,
+        max_total: i128,
     ) -> Result<u64, Error> {
         subscriber.require_auth();
+
+        if max_total < 0 {
+            return Err(Error::InvalidMaxTotal);
+        }
 
         let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
         let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
@@ -129,6 +134,8 @@ impl Subscription {
             last_charge: 0,
             charges_made: 0,
             max_charges,
+            max_total,
+            total_spent: 0,
             fee_bps,
             keeper_bps,
             paused_until: 0,
@@ -166,6 +173,7 @@ impl Subscription {
             period: plan.period,
             next_charge: now,
             max_charges,
+            max_total,
             fee_bps,
             keeper_bps,
         }
@@ -206,6 +214,22 @@ impl Subscription {
         }
         if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
             return Err(Error::MaxChargesReached);
+        }
+
+        let next_total = mandate
+            .total_spent
+            .checked_add(mandate.amount)
+            .ok_or(Error::AmountOverflow)?;
+        if mandate.max_total != 0 && next_total > mandate.max_total {
+            mandate.status = MandateStatus::Completed;
+            Self::write_mandate(&env, &mandate);
+            MandateCompleted {
+                mandate_id,
+                subscriber: mandate.subscriber,
+                charges_made: mandate.charges_made,
+            }
+            .publish(&env);
+            return Ok(());
         }
 
         // The mandate's own fee and tip, both frozen when the subscriber
@@ -250,10 +274,12 @@ impl Subscription {
         }
 
         mandate.charges_made += 1;
+        mandate.total_spent = next_total;
         mandate.last_charge = now;
         mandate.next_charge = now + mandate.period;
 
-        let completed = mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges;
+        let completed = (mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges)
+            || (mandate.max_total != 0 && mandate.total_spent >= mandate.max_total);
         if completed {
             mandate.status = MandateStatus::Completed;
         }
@@ -522,6 +548,9 @@ impl Subscription {
             return Ok(false);
         }
         if m.max_charges != 0 && m.charges_made >= m.max_charges {
+            return Ok(false);
+        }
+        if m.max_total != 0 && m.total_spent >= m.max_total {
             return Ok(false);
         }
         Ok(env.ledger().timestamp() >= m.next_charge)
