@@ -10,6 +10,9 @@
   <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
   </a>
+  <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
+    <img alt="Coverage" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push&amp;job=coverage&amp;label=coverage"/>
+  </a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.96-orange"/>
   <img alt="soroban-sdk" src="https://img.shields.io/badge/soroban--sdk-26-blue"/>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green"/>
