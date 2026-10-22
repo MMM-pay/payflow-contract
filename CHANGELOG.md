@@ -68,6 +68,10 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Added
 
+- `subscription:cancel_page(subscriber, start, limit)` lets a subscriber cancel
+  up to 50 mandates at once, skipping mandates already cancelled or completed.
+  `payflow-backend`, `payflow-frontend` and `payflow-docs` need follow-up issues
+  to expose and document the new operation.
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
