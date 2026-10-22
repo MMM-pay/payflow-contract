@@ -96,8 +96,36 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - **Test: `charges_keep_vault_balances_in_sync`** — the same invariant driven
   through the real `charge` path in the subscription contract.
 - `docs/adr/`: five architecture decision records (vault/billing split,
-  `now + period` scheduling, constructors, per-position indexes,
-  permissionless `charge`), linked from README.
+  `now + period` scheduling, constructors, per-position indexes, permissionless
+  `charge`), linked from README.
+- `vault:deposit_for(from, user, token, amount)`: one account pays into another
+  account's vault balance — employers, parents and sponsors funding someone
+  else's subscriptions. `from` authorizes and pays; only `user` can later
+  withdraw or be debited the credited funds. Emits `DepositFor` with `from` as
+  a topic so the payer is recoverable from events alone. Closes #29.
+- **Referral share for affiliates (#31).** Plans take `referral_bps`, a share
+  of each charge paid to the referrer a subscriber names, capped at
+  `MAX_REFERRAL_BPS` (2000 = 20%) with the new error `ReferralBpsTooHigh`
+  (12). `subscribe` takes `referrer: Option<Address>`; the referrer and its
+  rate are frozen into the mandate like the fee and the keeper tip. In
+  `charge`, the referral comes out of the merchant's share after the protocol
+  fee, so the subscriber still pays exactly the plan price; the share stays
+  with the merchant when no referrer was named. `Charged` gains `referral` and
+  `referrer`, `Subscribed` gains `referrer` and `referral_bps`, and `Plan`
+  gains `referral_bps`.
+- **Separate payout address (#32).** `create_plan` takes
+  `payout: Option<Address>` (defaults to the merchant): charges pay the payout
+  while plan management stays with the merchant. The payout is frozen into
+  each mandate and `PlanCreated` carries it.
+- **Two-step plan ownership transfer (#33).**
+  `propose_plan_owner(merchant, plan_id, new_owner)` /
+  `accept_plan_owner(new_owner, plan_id)`: a merchant proposes, only the
+  proposed address can accept, and the plan moves between both merchants'
+  plan indexes (new errors `PendingOwnershipNotFound` (13) and
+  `NotPendingOwner` (14)). Emits `PlanOwnershipProposed` and `PlanTransferred`.
+  Mandates already open keep paying the payout address frozen at subscribe
+  time; a transfer only moves who manages the plan and which merchant new
+  mandates are attributed to.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
 `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s `keeper` argument and
@@ -105,6 +133,13 @@ the new `tip`/`keeper`/`keeper_bps` event fields) ripple into
 `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
 consume the new fields and pass the keeper argument are tracked in the pull
 request.
+
+The same ripple applies to this release's new interface: `create_plan`'s
+`referral_bps`/`payout` arguments, `subscribe`'s `referrer` argument, the new
+`deposit_for` entry point, the `payout`/`referrer`/`referral_bps` fields on
+`Plan`/`Mandate`, the `referral`/`referrer`/`payout` event fields and the
+`DepositFor`, `PlanOwnershipProposed` and `PlanTransferred` events (issues #29,
+#31, #32, #33).
 
 ### Changed
 
@@ -115,6 +150,14 @@ request.
   argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
   gain fields. Existing testnet deployments must be redeployed: stored `Plan`
   and `Mandate` values do not decode into the new shape.
+- **Breaking:** `plan-registry:create_plan` additionally takes `referral_bps`
+  and `payout: Option<Address>` (after `keeper_bps`), and
+  `subscription:subscribe` takes `referrer: Option<Address>` as its last
+  argument. `Plan` gains `payout` and `referral_bps`; `Mandate` gains `payout`,
+  `referrer` and `referral_bps`. `charge` now pays `mandate.payout` instead of
+  `mandate.merchant` and may pay a third debit to the referrer. Deployments
+  built before these fields existed must be redeployed: stored `Plan` and
+  `Mandate` values do not decode into the new shape.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -133,6 +176,13 @@ request.
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
   is transferred to the `fee_to` address when a mandate is charged.
+- 90 → 119 tests. New coverage: `deposit_for` credits, payer-only auth,
+  recipient-only withdrawal and its event (#29); the referral split's integer
+  bps rounding bound of one stroop, the zero-bps disable, the no-referrer case
+  and the `Charged.referral` event field (#31); charges landing on `payout`
+  with management still under merchant auth (#32); and both merchants' plan
+  indexes updating on transfer, stranger-cannot-accept, one-shot proposals and
+  open mandates continuing to pay their frozen payout (#33).
 
 ## [0.1.0] - 2026-09-02
 

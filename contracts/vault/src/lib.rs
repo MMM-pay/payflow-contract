@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, Withdraw};
+pub use events::{Debit, Deposit, DepositFor, Withdraw};
 pub use types::DataKey;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -73,6 +73,41 @@ impl Vault {
         Self::write_balance(&env, &user, &token, new_balance);
 
         Deposit {
+            user,
+            token,
+            amount,
+            balance: new_balance,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Pay into `user`'s vault balance from `from`'s wallet.
+    ///
+    /// `from` authorizes and pays; `user` owns the credited balance and is the
+    /// only address that can withdraw it or be debited for it. This is how an
+    /// employer, parent or sponsor funds someone else's subscriptions without
+    /// holding the recipient's keys or trusting them with an extra transfer.
+    pub fn deposit_for(
+        env: Env,
+        from: Address,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        from.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let vault = env.current_contract_address();
+        token::TokenClient::new(&env, &token).transfer(&from, &vault, &amount);
+
+        let new_balance = Self::read_balance(&env, &user, &token) + amount;
+        Self::write_balance(&env, &user, &token, new_balance);
+
+        DepositFor {
+            from,
             user,
             token,
             amount,

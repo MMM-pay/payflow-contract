@@ -28,6 +28,10 @@ pub struct Mandate {
     pub subscriber: Address,
     pub plan_id: u64,
     pub merchant: Address,
+    /// Frozen at subscribe time: the address the merchant's share is paid to.
+    /// May be a treasury rather than the merchant itself; a later plan or
+    /// ownership change cannot redirect an open mandate's payouts.
+    pub payout: Address,
     pub token: Address,
     /// Frozen at subscribe time. A later plan edit cannot reprice this mandate.
     pub amount: i128,
@@ -46,6 +50,12 @@ pub struct Mandate {
     /// time for the same reason as `fee_bps`: a later plan cannot raise what an
     /// open mandate pays whoever settles it.
     pub keeper_bps: u32,
+    /// The affiliate that referred this subscriber, if any, frozen at subscribe
+    /// time like every other economic term. `None` means no referrer.
+    pub referrer: Option<Address>,
+    /// The referrer's share, in basis points of the merchant's share, frozen
+    /// at subscribe time. 0 means this mandate pays no referral.
+    pub referral_bps: u32,
     pub status: MandateStatus,
 }
 

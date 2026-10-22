@@ -2,9 +2,10 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    Address, Env,
+    xdr::{ContractEventBody, ScSymbol, ScVal},
+    Address, Env, IntoVal,
 };
 
 struct Harness<'a> {
@@ -346,4 +347,131 @@ fn admin_repoint_changes_only_the_subscription_pointer() {
     assert_eq!(h.vault.balance(&user, &h.token), 2_000);
     assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
     assert_ne!(h.vault.subscription(), original_subscription);
+}
+
+// ---------------------------------------------------------------------------
+// deposit_for: funding someone else's vault
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deposit_for_credits_the_recipient_and_debits_the_payer() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    // The recipient owns the balance; the payer's vault balance is untouched.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.balance(&from, &h.token), 0);
+    // The payer's wallet funded it, and the vault holds the tokens.
+    assert_eq!(h.token_client.balance(&from), 6_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 4_000);
+}
+
+#[test]
+fn deposit_for_accumulates_on_the_recipients_balance() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let other = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &1_000);
+    h.vault.deposit_for(&other, &user, &h.token, &2_500);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_500);
+    assert_eq!(h.token_client.balance(&h.vault_id), 3_500);
+}
+
+/// The acceptance criterion for #29: the event identifies the payer, so an
+/// indexer can attribute the funding without a follow-up contract read.
+#[test]
+fn deposit_for_event_identifies_the_payer() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    let last = h.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    assert_eq!(name.to_utf8_string_lossy(), "deposit_for");
+    // from, user, token are the topics, in that order.
+    assert_eq!(body.topics[1], ScVal::from(from));
+    assert_eq!(body.topics[2], ScVal::from(user));
+    assert_eq!(body.topics[3], ScVal::from(h.token));
+}
+
+/// The acceptance criterion for #29: only `user` can withdraw the credited
+/// funds. The payer can push money in but can never pull it back out.
+#[test]
+fn only_the_recipient_can_withdraw_gifted_funds() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = funded_user(&h, 0);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    // The payer has no vault balance of its own to withdraw.
+    assert_eq!(
+        h.vault.try_withdraw(&from, &h.token, &1_000),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    // The recipient can withdraw everything, and only it receives the tokens.
+    // The payer's wallet keeps its remaining 6_000: the gift is gone and
+    // cannot be pulled back.
+    assert!(h.vault.try_withdraw(&user, &h.token, &4_000).is_ok());
+    assert_eq!(h.token_client.balance(&user), 4_000);
+    assert_eq!(h.token_client.balance(&from), 6_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn deposit_for_rejects_non_positive_amount() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_deposit_for(&from, &user, &h.token, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        h.vault.try_deposit_for(&from, &user, &h.token, &-5),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&from), 10_000);
+}
+
+/// The payer must authorize the debit on its own wallet: a different signer
+/// (here, the recipient) cannot push funds out of someone else's tokens.
+#[test]
+fn deposit_for_requires_the_payers_authorization() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault.address,
+            fn_name: "deposit_for",
+            args: (&from, &user, &h.token, &4_000).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(h
+        .vault
+        .try_deposit_for(&from, &user, &h.token, &4_000)
+        .is_err());
+    // Nothing moved on either side.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&from), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
 }

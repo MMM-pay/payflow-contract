@@ -3,8 +3,8 @@
 use super::*;
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _},
-    Address, Env, String, Vec,
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, String, Vec,
 };
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
@@ -35,6 +35,8 @@ fn create_plan_assigns_sequential_ids() {
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     let b = client.create_plan(
         &merchant,
@@ -43,6 +45,8 @@ fn create_plan_assigns_sequential_ids() {
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     assert_eq!(a, 1);
@@ -68,6 +72,8 @@ fn create_plan_stores_fields() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     let plan = client.get_plan(&id);
 
@@ -92,6 +98,8 @@ fn create_plan_stores_the_keeper_tip() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &MAX_KEEPER_BPS,
+        &0,
+        &None,
     );
 
     assert_eq!(client.get_plan(&id).keeper_bps, MAX_KEEPER_BPS);
@@ -110,6 +118,8 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &(MAX_KEEPER_BPS + 1),
+        &0,
+        &None,
     );
 
     assert_eq!(res, Err(Ok(Error::KeeperBpsTooHigh)));
@@ -128,6 +138,8 @@ fn create_plan_rejects_zero_amount() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -144,6 +156,8 @@ fn create_plan_rejects_negative_amount() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -160,6 +174,8 @@ fn create_plan_rejects_sub_minimum_period() {
         &(MIN_PERIOD - 1),
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
 }
@@ -182,6 +198,8 @@ fn set_plan_active_toggles() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     client.set_plan_active(&merchant, &id, &false);
@@ -204,6 +222,8 @@ fn set_plan_active_rejects_non_owner() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     let res = client.try_set_plan_active(&attacker, &id, &false);
@@ -231,6 +251,8 @@ fn create_plan_stores_the_name() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(
         client.get_plan(&id).name,
@@ -252,6 +274,8 @@ fn create_plan_accepts_an_empty_name() {
         &604_800,
         &String::from_str(&env, ""),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
 }
@@ -270,6 +294,8 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &604_800,
         &String::from_str(&env, &at_limit),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
 }
@@ -288,6 +314,8 @@ fn create_plan_rejects_an_overlong_name() {
         &604_800,
         &String::from_str(&env, &too_long),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -300,7 +328,7 @@ fn merchant_plans_pages_are_bounded() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
     }
 
     assert_eq!(client.merchant_plan_count(&merchant), MAX_PAGE + 3);
@@ -450,7 +478,16 @@ fn deactivate_page_turns_off_a_page_of_plans() {
 
     let mut ids = Vec::<u64>::new(&env);
     for _ in 0..7 {
-        ids.push_back(client.create_plan(&merchant, &token, &1_000, &3_600, &name.clone(), &0));
+        ids.push_back(client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name.clone(),
+            &0,
+            &0,
+            &None,
+        ));
     }
 
     assert_eq!(client.deactivate_page(&merchant, &2, &3), 3);
@@ -472,7 +509,7 @@ fn deactivate_page_is_idempotent() {
     let token = Address::generate(&env);
     let name = String::from_str(&env, "Plan");
 
-    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
     assert!(!client.get_plan(&id).active);
@@ -489,7 +526,7 @@ fn deactivate_page_respects_the_page_cap() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
     }
 
     // A huge limit is capped at MAX_PAGE.
@@ -514,8 +551,8 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
 
     let a = Address::generate(&env);
     let b = Address::generate(&env);
-    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0);
-    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0);
+    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0, &0, &None);
 
     client.deactivate_page(&a, &0, &10);
 
@@ -538,6 +575,8 @@ fn deactivate_page_requires_the_merchants_auth() {
         &3_600,
         &String::from_str(&env, "Plan"),
         &0,
+        &0,
+        &None,
     );
 
     // Drop every mocked authorization: the merchant must sign for itself.
@@ -563,6 +602,8 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &604_800,
         &String::from_str(&env, &name),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -584,6 +625,435 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &604_800,
         &String::from_str(&env, &name),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
+}
+
+// ---------------------------------------------------------------------------
+// Payout address and referral share (#31, #32)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_plan_defaults_payout_to_the_merchant() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &0,
+        &None,
+    );
+
+    // "Pay me" is what a plain plan does.
+    assert_eq!(client.get_plan(&id).payout, merchant);
+}
+
+#[test]
+fn create_plan_records_an_explicit_payout() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &0,
+        &Some(treasury.clone()),
+    );
+
+    assert_eq!(client.get_plan(&id).payout, treasury);
+    // The merchant stays the owner regardless of where the money lands.
+    assert_eq!(client.get_plan(&id).merchant, merchant);
+}
+
+#[test]
+fn create_plan_stores_the_referral_share() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &1_337,
+        &None,
+    );
+
+    assert_eq!(client.get_plan(&id).referral_bps, 1_337);
+}
+
+#[test]
+fn create_plan_rejects_a_referral_share_above_the_cap() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let res = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &(MAX_REFERRAL_BPS + 1),
+        &None,
+    );
+
+    assert_eq!(res, Err(Ok(Error::ReferralBpsTooHigh)));
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+
+    // Exactly the cap is accepted.
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &MAX_REFERRAL_BPS,
+        &None,
+    );
+    assert_eq!(client.get_plan(&id).referral_bps, MAX_REFERRAL_BPS);
+}
+
+// ---------------------------------------------------------------------------
+// Two-step plan ownership transfer (#33)
+// ---------------------------------------------------------------------------
+
+/// The acceptance criterion for #33: the index of both merchants is updated.
+#[test]
+fn propose_and_accept_moves_the_plan_between_merchants() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+
+    // Proposing alone changes nothing: the plan stays where it is until the
+    // proposed owner accepts.
+    assert_eq!(client.get_plan(&id).merchant, merchant.clone());
+    assert_eq!(client.merchant_plan_count(&merchant), 1);
+    assert_eq!(client.merchant_plan_count(&new_owner), 0);
+
+    client.accept_plan_owner(&new_owner, &id);
+
+    assert_eq!(client.get_plan(&id).merchant, new_owner.clone());
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.merchant_plans(&merchant, &0, &10).len(), 0);
+    assert_eq!(client.merchant_plan_count(&new_owner), 1);
+    assert_eq!(
+        client.merchant_plans(&new_owner, &0, &10),
+        soroban_sdk::vec![&env, id]
+    );
+}
+
+/// Moving a plan out of the middle of an index must leave every other entry
+/// intact: swap the last entry into the vacated slot, keep both merchants'
+/// plans resolvable, and keep appending correctly afterwards.
+#[test]
+fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+
+    let first = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let middle = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let last = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
+
+    client.propose_plan_owner(&merchant, &middle, &new_owner);
+    client.accept_plan_owner(&new_owner, &middle);
+
+    // Both of the old owner's remaining plans are listed, and none of them is
+    // the transferred one.
+    let remaining = client.merchant_plans(&merchant, &0, &10);
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.contains(first));
+    assert!(remaining.contains(last));
+    assert!(!remaining.contains(middle));
+    // Every entry still resolves to a plan owned by this merchant.
+    for pid in remaining.iter() {
+        assert_eq!(client.get_plan(&pid).merchant, merchant.clone());
+    }
+    assert_eq!(
+        client.merchant_plans(&new_owner, &0, &10),
+        soroban_sdk::vec![&env, middle]
+    );
+
+    // Appending still works after the removal.
+    let fourth = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
+    assert_eq!(client.merchant_plan_count(&merchant), 3);
+    assert!(client.merchant_plans(&merchant, &0, &10).contains(fourth));
+    assert_eq!(client.get_plan(&fourth).merchant, merchant);
+}
+
+/// The acceptance criterion for #33: only the current owner can propose.
+#[test]
+fn only_the_owner_can_propose_a_transfer() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    assert_eq!(
+        client.try_propose_plan_owner(&stranger, &id, &new_owner),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    assert_eq!(
+        client.try_propose_plan_owner(&merchant, &999, &new_owner),
+        Err(Ok(Error::PlanNotFound))
+    );
+    // Nothing was proposed.
+    assert_eq!(
+        client.try_accept_plan_owner(&new_owner, &id),
+        Err(Ok(Error::PendingOwnershipNotFound))
+    );
+}
+
+/// The acceptance criterion for #33: a stranger cannot accept.
+#[test]
+fn only_the_proposed_owner_can_accept() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&stranger, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    // The proposal still stands for the right owner.
+    assert_eq!(client.get_plan(&id).merchant, merchant.clone());
+    assert_eq!(client.try_accept_plan_owner(&new_owner, &id), Ok(Ok(())));
+    assert_eq!(client.get_plan(&id).merchant, new_owner);
+}
+
+#[test]
+fn accept_without_a_proposal_fails() {
+    let (env, client, _admin) = setup();
+    let new_owner = Address::generate(&env);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&new_owner, &1),
+        Err(Ok(Error::PendingOwnershipNotFound))
+    );
+}
+
+/// A proposal is one-shot: after it is accepted, nobody can "accept" it a
+/// second time, so a stale proposal can never move a plan later.
+#[test]
+fn a_transfer_proposal_is_one_shot() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+    client.accept_plan_owner(&new_owner, &id);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&new_owner, &id),
+        Err(Ok(Error::PendingOwnershipNotFound))
+    );
+    assert_eq!(client.get_plan(&id).merchant, new_owner);
+}
+
+/// A later proposal replaces an earlier one: only the most recent proposal
+/// can be accepted, so correcting a mistyped address is possible.
+#[test]
+fn a_new_proposal_replaces_the_old_one() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let wrong = Address::generate(&env);
+    let right = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    client.propose_plan_owner(&merchant, &id, &wrong);
+    client.propose_plan_owner(&merchant, &id, &right);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&wrong, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    client.accept_plan_owner(&right, &id);
+    assert_eq!(client.get_plan(&id).merchant, right);
+}
+
+#[test]
+fn propose_requires_the_merchants_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = env.register(PlanRegistry, (merchant.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let plan = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    // Drop every mocked authorization: the owner must sign the proposal.
+    env.set_auths(&[]);
+    assert!(client
+        .try_propose_plan_owner(&merchant, &plan, &new_owner)
+        .is_err());
+
+    // Nothing was proposed, which the logic check proves independently of
+    // authorization: restore blanket auths and the accept still fails.
+    env.mock_all_auths();
+    assert_eq!(
+        client.try_accept_plan_owner(&new_owner, &plan),
+        Err(Ok(Error::PendingOwnershipNotFound))
+    );
+}
+
+/// The accept is the new owner's signature to give: even the current owner's
+/// signature does not cover it, so a different signer fails.
+#[test]
+fn accept_requires_the_new_owners_signature() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+
+    env.mock_auths(&[MockAuth {
+        address: &merchant,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "accept_plan_owner",
+            args: (&new_owner, &id).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(client.try_accept_plan_owner(&new_owner, &id).is_err());
+    // Nothing moved: the plan is still the merchant's and the proposal stands.
+    assert_eq!(client.get_plan(&id).merchant, merchant);
+    assert_eq!(client.merchant_plan_count(&new_owner), 0);
+}
+
+#[test]
+fn transfer_emits_proposal_and_transfer_events() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+    let first = env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &first.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_ownership_proposed".try_into().unwrap();
+    assert_eq!(name, &expected);
+
+    client.accept_plan_owner(&new_owner, &id);
+    let last = env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_transferred".try_into().unwrap();
+    assert_eq!(name, &expected);
 }

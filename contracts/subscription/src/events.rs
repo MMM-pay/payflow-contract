@@ -20,6 +20,10 @@ pub struct Subscribed {
     pub fee_bps: u32,
     /// The keeper tip frozen into this mandate, for the same reason.
     pub keeper_bps: u32,
+    /// The affiliate that referred this subscriber, if any.
+    pub referrer: Option<Address>,
+    /// The referral share frozen into this mandate, for the same reason.
+    pub referral_bps: u32,
 }
 
 #[contractevent]
@@ -31,12 +35,17 @@ pub struct Charged {
     pub subscriber: Address,
     #[topic]
     pub merchant: Address,
-    /// Merchant share after the protocol fee and the keeper tip.
+    /// Merchant share after the protocol fee, the keeper tip and the referral.
     pub amount: i128,
     pub fee: i128,
     /// Paid to `keeper` out of the merchant share. The subscriber's total debit
-    /// is `amount + fee + tip` exactly as it was before tips existed.
+    /// is unchanged: `amount + fee + tip + referral` equals the plan price.
     pub tip: i128,
+    /// Paid to `referrer` out of the merchant share. Carried in the event so
+    /// affiliate accounting needs no follow-up contract read.
+    pub referral: i128,
+    /// The affiliate that earned the referral, if any.
+    pub referrer: Option<Address>,
     /// Account that settled this charge and received the tip.
     pub keeper: Address,
     pub charges_made: u32,

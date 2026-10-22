@@ -1,4 +1,8 @@
 #![no_std]
+// Contract entry points mirror the CLI's flat argument lists, and the
+// `contractimpl` macro re-emits them with extra parameters on top, so
+// `create_plan` legitimately carries more than seven.
+#![allow(clippy::too_many_arguments)]
 
 mod error;
 mod events;
@@ -8,10 +12,12 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use events::{
+    PlanCreated, PlanOwnershipProposed, PlanStatusChanged, PlanTransferred, ProfileUpdated,
+};
 pub use types::{DataKey, Plan, Profile};
 
-use payflow_shared::MAX_KEEPER_BPS;
+use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -54,11 +60,21 @@ impl PlanRegistry {
 
     /// Publish a new plan. Only the merchant may publish plans in its own name.
     ///
+    /// `payout` is the address each charge pays the merchant's share to; pass
+    /// `None` to pay the merchant itself, or a treasury/multisig address to
+    /// keep revenue somewhere other than the operational key. Plan management
+    /// (deactivation, transfer) always stays with `merchant`.
+    ///
     /// `keeper_bps` is the share of each charge paid to whoever settles it,
     /// taken out of the merchant's share, capped at `MAX_KEEPER_BPS`. It is
     /// part of the plan's immutable terms: a mandate opened against this plan
     /// keeps the tip it was opened with, so raising the tip later cannot take
     /// money from an existing subscriber or merchant.
+    ///
+    /// `referral_bps` is the share of each charge paid to the referrer a
+    /// subscriber names at subscribe time, also taken out of the merchant's
+    /// share and also immutable per mandate, capped at `MAX_REFERRAL_BPS`.
+    /// 0 (the default) disables referrals for this plan.
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -67,6 +83,8 @@ impl PlanRegistry {
         period: u64,
         name: String,
         keeper_bps: u32,
+        referral_bps: u32,
+        payout: Option<Address>,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -82,6 +100,12 @@ impl PlanRegistry {
         if keeper_bps > MAX_KEEPER_BPS {
             return Err(Error::KeeperBpsTooHigh);
         }
+        if referral_bps > MAX_REFERRAL_BPS {
+            return Err(Error::ReferralBpsTooHigh);
+        }
+        // A payout of None means "pay me"; anything else is an explicit
+        // treasury address, which may be the merchant itself.
+        let payout = payout.unwrap_or_else(|| merchant.clone());
 
         let id: u64 = env
             .storage()
@@ -92,12 +116,14 @@ impl PlanRegistry {
         let plan = Plan {
             id,
             merchant: merchant.clone(),
+            payout: payout.clone(),
             name: name.clone(),
             token,
             amount,
             period,
             active: true,
             keeper_bps,
+            referral_bps,
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -106,15 +132,10 @@ impl PlanRegistry {
             .extend_ttl(&DataKey::Plan(id), PERSIST_THRESHOLD, PERSIST_BUMP);
 
         // One entry per position, so publishing a plan costs the same however
-        // many plans the merchant already has.
-        let count_key = DataKey::MerchantPlanCount(merchant.clone());
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        let slot_key = DataKey::MerchantPlan(merchant.clone(), count);
-        let p = env.storage().persistent();
-        p.set(&slot_key, &id);
-        p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-        p.set(&count_key, &(count + 1));
-        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        // many plans the merchant already has. The position is also recorded
+        // per plan so a later ownership transfer can remove it in constant
+        // time.
+        Self::index_push(&env, &merchant, id);
 
         env.storage()
             .instance()
@@ -131,6 +152,8 @@ impl PlanRegistry {
             period: plan.period,
             name,
             keeper_bps,
+            referral_bps,
+            payout,
         }
         .publish(&env);
 
@@ -174,6 +197,92 @@ impl PlanRegistry {
         }
         .publish(&env);
 
+        Ok(())
+    }
+
+    /// Propose handing `plan_id` to `new_owner`. Step one of a two-step
+    /// transfer: nothing changes until the proposed owner accepts, so a
+    /// mistyped address cannot strand a plan.
+    pub fn propose_plan_owner(
+        env: Env,
+        merchant: Address,
+        plan_id: u64,
+        new_owner: Address,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Plan(plan_id))
+            .ok_or(Error::PlanNotFound)?;
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+
+        let key = DataKey::PlanOwnerProposal(plan_id);
+        env.storage().persistent().set(&key, &new_owner);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        PlanOwnershipProposed {
+            merchant,
+            plan_id,
+            new_owner,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Accept a proposed ownership transfer. Step two: only `new_owner` (the
+    /// address the merchant proposed) may accept, and the plan moves between
+    /// the two merchants' plan indexes.
+    ///
+    /// Mandates already open against the plan keep paying the `payout`
+    /// address frozen when their subscriber subscribed; a transfer never
+    /// reprices or redirects an existing subscriber. It only changes who
+    /// manages the plan (deactivation, ending mandates, transferring again)
+    /// and which merchant newly opened mandates are attributed to.
+    pub fn accept_plan_owner(env: Env, new_owner: Address, plan_id: u64) -> Result<(), Error> {
+        new_owner.require_auth();
+
+        let proposal_key = DataKey::PlanOwnerProposal(plan_id);
+        let proposed: Address = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(Error::PendingOwnershipNotFound)?;
+        if proposed != new_owner {
+            return Err(Error::NotPendingOwner);
+        }
+
+        let plan_key = DataKey::Plan(plan_id);
+        let mut plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&plan_key)
+            .ok_or(Error::PlanNotFound)?;
+
+        let old_owner = plan.merchant.clone();
+        Self::index_remove(&env, &old_owner, plan_id);
+        Self::index_push(&env, &new_owner, plan_id);
+
+        plan.merchant = new_owner.clone();
+        env.storage().persistent().set(&plan_key, &plan);
+        env.storage()
+            .persistent()
+            .extend_ttl(&plan_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        // The proposal is one-shot: a second accept must fail.
+        env.storage().persistent().remove(&proposal_key);
+
+        PlanTransferred {
+            merchant: old_owner,
+            plan_id,
+            new_owner,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -319,11 +428,65 @@ impl PlanRegistry {
             .get(&DataKey::NextPlanId)
             .ok_or(Error::NotInitialized)
     }
-
     pub fn admin(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)
+    }
+}
+
+impl PlanRegistry {
+    /// Append `plan_id` to `merchant`'s plan index and record its position,
+    /// so a later transfer can find it in constant time.
+    fn index_push(env: &Env, merchant: &Address, plan_id: u64) {
+        let p = env.storage().persistent();
+        let count_key = DataKey::MerchantPlanCount(merchant.clone());
+        let count: u32 = p.get(&count_key).unwrap_or(0);
+
+        let slot_key = DataKey::MerchantPlan(merchant.clone(), count);
+        p.set(&slot_key, &plan_id);
+        p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.set(&count_key, &(count + 1));
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        let pos_key = DataKey::PlanIndex(plan_id);
+        p.set(&pos_key, &count);
+        p.extend_ttl(&pos_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    /// Remove `plan_id` from `merchant`'s plan index in constant time by
+    /// moving the last entry into the vacated slot. The index is for
+    /// enumeration only, so one position losing chronological order is
+    /// acceptable; every remaining position still lists exactly one live
+    /// plan, and the loop bounds of `merchant_plans` and `deactivate_page`
+    /// are unchanged.
+    fn index_remove(env: &Env, merchant: &Address, plan_id: u64) {
+        let p = env.storage().persistent();
+        let count_key = DataKey::MerchantPlanCount(merchant.clone());
+        let count: u32 = p.get(&count_key).unwrap_or(0);
+        let pos_key = DataKey::PlanIndex(plan_id);
+        let position: u32 = p.get(&pos_key).unwrap_or(count);
+        if position >= count {
+            // Defensive: the plan is not in this merchant's index.
+            return;
+        }
+
+        let last = count - 1;
+        let slot_key = DataKey::MerchantPlan(merchant.clone(), position);
+        if position < last {
+            if let Some(last_id) = p.get::<_, u64>(&DataKey::MerchantPlan(merchant.clone(), last)) {
+                p.set(&slot_key, &last_id);
+                p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                let last_pos_key = DataKey::PlanIndex(last_id);
+                p.set(&last_pos_key, &position);
+                p.extend_ttl(&last_pos_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            }
+        } else {
+            p.remove(&slot_key);
+        }
+        p.set(&count_key, &last);
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.remove(&pos_key);
     }
 }
