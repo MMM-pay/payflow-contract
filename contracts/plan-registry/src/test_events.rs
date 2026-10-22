@@ -96,3 +96,18 @@ fn profile_updated_layout() {
         },
     );
 }
+
+#[test]
+fn plan_successor_set_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_successor_set",
+        super::PlanSuccessorSet::spec_xdr(),
+        &super::PlanSuccessorSet {
+            merchant: address(&env),
+            plan_id: 7,
+            successor_id: 8,
+        },
+    );
+}
