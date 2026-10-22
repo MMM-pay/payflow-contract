@@ -86,6 +86,10 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `plan-registry:deactivate_page(merchant, start, limit)`: deactivates up to
   `MAX_PAGE` of a merchant's plans in one call; only the merchant's own plans
   are touched.
+- `plan-registry:create_plan` takes a `category: Symbol`; `Plan` and
+  `PlanCreated` expose it for discovery. Follow-up issues are needed in
+  `payflow-backend`, `payflow-frontend` and `payflow-docs` to consume the new
+  field and support category filtering.
 - **Test: admin has no path to user funds** — verifies that every admin-
   callable function leaves all user balances unchanged.
 - **Test: fees paid to a contract address** — verifies that the protocol fee

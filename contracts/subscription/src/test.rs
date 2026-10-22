@@ -7,7 +7,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
-    Address, Env, IntoVal, String,
+    Address, Env, IntoVal, String, Symbol,
 };
 
 const MONTH: u64 = 2_592_000;
@@ -91,6 +91,7 @@ impl World<'_> {
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
             &keeper_bps,
+            &Symbol::new(&self.env, ""),
         )
     }
 
@@ -564,6 +565,7 @@ fn zero_fee_pays_merchant_in_full() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &Symbol::new(&env, ""),
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -941,6 +943,7 @@ fn fee_paid_to_address() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &Symbol::new(&env, ""),
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1098,6 +1101,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &Symbol::new(&env, ""),
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);

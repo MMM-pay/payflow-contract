@@ -12,7 +12,7 @@ pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -67,6 +67,7 @@ impl PlanRegistry {
         period: u64,
         name: String,
         keeper_bps: u32,
+        category: Symbol,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -82,7 +83,6 @@ impl PlanRegistry {
         if keeper_bps > MAX_KEEPER_BPS {
             return Err(Error::KeeperBpsTooHigh);
         }
-
         let id: u64 = env
             .storage()
             .instance()
@@ -93,6 +93,7 @@ impl PlanRegistry {
             id,
             merchant: merchant.clone(),
             name: name.clone(),
+            category: category.clone(),
             token,
             amount,
             period,
@@ -131,6 +132,7 @@ impl PlanRegistry {
             period: plan.period,
             name,
             keeper_bps,
+            category,
         }
         .publish(&env);
 

@@ -10,7 +10,7 @@
 //! This crate holds data types only. It has no contract, no entry points, and
 //! no storage keys of its own.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, String, Symbol};
 
 /// Largest keeper tip a plan may set, in basis points of the merchant's share:
 /// 5%. The tip is paid out of the merchant's share and never out of the
@@ -19,8 +19,9 @@ use soroban_sdk::{contracttype, Address, String};
 pub const MAX_KEEPER_BPS: u32 = 500;
 
 /// A merchant-published charge template. A `Plan` is immutable except for its
-/// `active` flag: changing price, period or keeper tip requires publishing a
-/// new plan so existing mandates can never be repriced under a subscriber.
+/// `active` flag: changing price, period, keeper tip or category requires
+/// publishing a new plan so existing mandates cannot be repriced under a
+/// subscriber.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
@@ -29,6 +30,9 @@ pub struct Plan {
     /// Human-readable label shown to subscribers, e.g. "Pro Monthly".
     /// At most MAX_NAME_LEN bytes; may be empty.
     pub name: String,
+    /// Merchant-selected discovery category. Soroban symbols are short and
+    /// restricted to the supported symbol alphabet; this may be empty.
+    pub category: Symbol,
     /// SEP-41 token this plan is denominated in.
     pub token: Address,
     /// Amount charged per period, in the token's smallest unit. This is what

@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, String};
+use soroban_sdk::{contractevent, Address, String, Symbol};
 
 /// Emitted when a merchant publishes a new plan.
 #[contractevent]
@@ -13,6 +13,7 @@ pub struct PlanCreated {
     pub period: u64,
     /// Carried in the event so indexers need no follow-up contract read.
     pub name: String,
+    pub category: Symbol,
     /// Keeper tip frozen into the plan, in basis points of the merchant share.
     pub keeper_bps: u32,
 }
