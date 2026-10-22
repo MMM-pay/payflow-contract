@@ -31,6 +31,25 @@ change the contract interface.
   payflow-backend, payflow-frontend and payflow-docs need to read the new
   field and to map the new error code. Closes #91.
 
+- **subscription:** `upgrade(subscriber, mandate_id, new_plan_id)` moves a
+  mandate onto another plan of the same merchant, denominated in the same
+  token. Moving to a more expensive plan collects the price difference for
+  the part of the current period that is still ahead, prorated and truncated
+  towards zero, so the subscriber never pays more than the exact difference
+  for the time that is left and the contract holds no fractional value.
+  Moving to a cheaper plan collects nothing and refunds nothing: it takes
+  effect at the next charge, because the period already paid for stays paid
+  for. The billing date does not move — `next_charge` is left alone, and the
+  new price applies from that charge. The protocol fee stays frozen at the
+  rate the mandate was opened with, and the keeper tip of the new plan is
+  clamped to `MAX_KEEPER_BPS`; no tip is paid on the upgrade itself, because
+  no charge was settled. A plan that is inactive, in another token or from
+  another merchant is rejected with the new `DifferentToken` (#16) and
+  `DifferentMerchant` (#17) errors. The rounding rule and the reasoning
+  behind it are written up in [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+  payflow-backend, payflow-frontend and payflow-docs need the new
+  `subscription_upgraded` event and the new error codes. Closes #94.
+
 # # [0.2.0] - 2026-10-09
 
 Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/testnet.env).

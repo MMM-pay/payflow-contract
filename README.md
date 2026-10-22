@@ -95,6 +95,11 @@ subscriber pays.
 - A keeper tip is capped at 5% of the merchant's share (`MAX_KEEPER_BPS = 500`)
   and comes out of that share, never out of the subscriber's payment. It is
   frozen into the mandate when it is opened.
+- `upgrade` moves a mandate onto another plan of the same merchant and token.
+  A more expensive plan collects the price difference for the part of the
+  current period that is still ahead, prorated and rounded in the subscriber's
+  favour; a cheaper plan takes effect at the next charge and never refunds
+  anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
 
 ## Design notes
 

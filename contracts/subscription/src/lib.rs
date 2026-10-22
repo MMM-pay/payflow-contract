@@ -11,7 +11,7 @@ mod test;
 pub use error::Error;
 pub use events::{
     Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Refunded,
-    Subscribed,
+    Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
@@ -281,6 +281,136 @@ impl Subscription {
             }
             .publish(&env);
         }
+
+        Ok(())
+    }
+
+    /// Move a mandate onto a different plan.
+    ///
+    /// Moving to a more expensive plan collects the price difference for the
+    /// part of the current period that is still ahead, prorated and rounded
+    /// in the subscriber's favour. Moving to a cheaper plan takes effect at
+    /// the next charge and never refunds anything: the subscriber has
+    /// already paid for the period they are in.
+    ///
+    /// The rules that keep this safe:
+    ///
+    /// - Only the subscriber may call it, and only for their own mandate.
+    /// - The new plan must be active, denominated in the same token (a
+    ///   mandate's token is frozen when it is opened) and belong to the same
+    ///   merchant (the mandate's merchant decides who is paid and who may
+    ///   refund).
+    /// - The amount charged now is the price difference multiplied by the
+    ///   fraction of the current period that is left, truncated towards zero.
+    ///   The subscriber therefore never pays more than the exact difference,
+    ///   and never less than zero.
+    /// - The billing date does not move: the next charge still falls due at
+    ///   `next_charge`, and carries the new plan's price from then on.
+    ///
+    /// See [ADR 0006](../../docs/adr/0006-prorated-upgrade-charging.md) for
+    /// the rounding rule and why it is written this way.
+    pub fn upgrade(
+        env: Env,
+        subscriber: Address,
+        mandate_id: u64,
+        new_plan_id: u64,
+    ) -> Result<(), Error> {
+        subscriber.require_auth();
+
+        let mut mandate = Self::read_mandate(&env, mandate_id)?;
+        if mandate.subscriber != subscriber {
+            return Err(Error::NotSubscriber);
+        }
+
+        let now = env.ledger().timestamp();
+        if !Self::active_at(&mandate, now) {
+            return Err(Error::MandateNotActive);
+        }
+
+        let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
+        let plan = PlanRegistryClient::new(&env, &registry).get_plan(&new_plan_id);
+        if !plan.active {
+            return Err(Error::PlanInactive);
+        }
+        if plan.token != mandate.token {
+            return Err(Error::DifferentToken);
+        }
+        if plan.merchant != mandate.merchant {
+            return Err(Error::DifferentMerchant);
+        }
+
+        let old_plan_id = mandate.plan_id;
+        let old_amount = mandate.amount;
+        let old_period = mandate.period;
+
+        // The part of the current period that is still ahead of us. A mandate
+        // that was never charged has `next_charge` in the past, so nothing is
+        // left of the current period and nothing is prorated: the old price
+        // was never collected.
+        let remaining = mandate.next_charge.saturating_sub(now).min(old_period);
+
+        // The prorated price difference, truncated towards zero. Truncation
+        // is what rounds in the subscriber's favour: the subscriber pays at
+        // most the exact difference for the time that is left.
+        let difference = plan.amount - old_amount;
+        let charged: i128 = if difference > 0 && old_period > 0 {
+            difference
+                .checked_mul(remaining as i128)
+                .ok_or(Error::AmountOverflow)?
+                / old_period as i128
+        } else {
+            // A downgrade collects nothing now: it takes effect at the next
+            // charge and never refunds the difference already paid.
+            0
+        };
+
+        if charged > 0 {
+            // The protocol fee on the difference, at the rate frozen into the
+            // mandate. The keeper tip is not paid here: no charge was
+            // settled, so nobody earned it.
+            let fee = charged
+                .checked_mul(mandate.fee_bps as i128)
+                .ok_or(Error::AmountOverflow)?
+                / BPS_DENOMINATOR;
+            let merchant_gross = charged - fee;
+
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            let vault = VaultClient::new(&env, &vault_addr);
+            vault.debit(
+                &subscriber,
+                &mandate.token,
+                &mandate.merchant,
+                &merchant_gross,
+            );
+            if fee > 0 {
+                let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
+                vault.debit(&subscriber, &mandate.token, &fee_to, &fee);
+            }
+        }
+
+        // The mandate carries the new plan's terms from now on. A downgrade
+        // therefore bills the cheaper price at the next charge, and an
+        // upgrade has already collected the difference for the rest of the
+        // current period.
+        mandate.plan_id = new_plan_id;
+        mandate.amount = plan.amount;
+        mandate.period = plan.period;
+        mandate.keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+        Self::write_mandate(&env, &mandate);
+
+        Upgraded {
+            mandate_id,
+            subscriber,
+            merchant: mandate.merchant,
+            old_plan_id,
+            new_plan_id,
+            old_amount,
+            new_amount: plan.amount,
+            charged,
+            period: plan.period,
+            next_charge: mandate.next_charge,
+        }
+        .publish(&env);
 
         Ok(())
     }

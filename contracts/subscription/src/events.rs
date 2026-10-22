@@ -104,6 +104,37 @@ pub struct Refunded {
     pub refunded_total: i128,
 }
 
+/// Emitted when a subscriber moves a mandate onto a different plan.
+///
+/// `charged` is the prorated difference collected for the part of the
+/// current period that was still ahead; it is zero for a downgrade, which
+/// takes effect at the next charge and never refunds anything. The event
+/// carries the old and the new terms so an indexer can show the change
+/// without a follow-up contract read.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Upgraded {
+    #[topic]
+    pub mandate_id: u64,
+    #[topic]
+    pub subscriber: Address,
+    #[topic]
+    pub merchant: Address,
+    pub old_plan_id: u64,
+    pub new_plan_id: u64,
+    /// The price the mandate paid per period before the upgrade.
+    pub old_amount: i128,
+    /// The price the mandate pays per period from the upgrade on.
+    pub new_amount: i128,
+    /// Difference collected now, prorated and rounded down. Zero for a
+    /// downgrade.
+    pub charged: i128,
+    /// The new plan's period, in seconds.
+    pub period: u64,
+    /// When the next charge falls due. The upgrade does not move it.
+    pub next_charge: u64,
+}
+
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
 /// after this point only; existing mandates keep the fee they were opened with.
 #[contractevent]
