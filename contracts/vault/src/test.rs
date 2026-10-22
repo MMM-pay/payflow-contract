@@ -192,6 +192,8 @@ fn admin_has_no_path_to_user_funds() {
     h.vault.set_token_allowed(&h.token, &true);
     h.vault.set_token_allowed(&h.token, &false);
     h.vault.set_allowlist_enabled(&false);
+    h.vault.set_deposit_cap(&user_a, &h.token, &10_000);
+    h.vault.set_deposit_cap(&user_b, &h.token, &0);
 
     let bal_a_after = h.vault.balance(&user_a, &h.token);
     let bal_b_after = h.vault.balance(&user_b, &h.token);
@@ -598,4 +600,135 @@ fn failing_transfer_reverts_debit_and_leaves_balances_unchanged() {
     assert_eq!(h.vault.balance(&user, &h.token), 3_800);
     assert_eq!(h.test_token.balance(&merchant), 1_200);
     assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
+}
+
+// ----- per-token deposit cap (#104) -----
+//
+// While the protocol is unaudited, the cost of a bug grows with the amount
+// of subscriber funds the vault can hold. The admin can cap the balance a
+// subscriber may keep for one token. A cap of 0 means unlimited, and the
+// cap only gates new deposits: a balance that is already above a newly set
+// cap can still be withdrawn.
+
+#[test]
+fn deposit_cap_defaults_to_unlimited() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 0);
+    h.vault.deposit(&user, &h.token, &10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 10_000);
+}
+
+#[test]
+fn deposit_up_to_the_cap_succeeds() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.set_deposit_cap(&user, &h.token, &5_000);
+
+    h.vault.deposit(&user, &h.token, &5_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 5_000);
+}
+
+#[test]
+fn deposit_above_the_cap_is_rejected_and_moves_no_funds() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.set_deposit_cap(&user, &h.token, &5_000);
+
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &5_001),
+        Err(Ok(Error::DepositCapExceeded))
+    );
+
+    // Nothing moved: no tokens were taken and the balance is unchanged.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn a_deposit_that_would_cross_the_cap_is_rejected() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.set_deposit_cap(&user, &h.token, &5_000);
+
+    h.vault.deposit(&user, &h.token, &4_000);
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_001),
+        Err(Ok(Error::DepositCapExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.token_client.balance(&user), 6_000);
+}
+
+#[test]
+fn a_cap_of_zero_means_unlimited() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.set_deposit_cap(&user, &h.token, &1_000);
+    h.vault.set_deposit_cap(&user, &h.token, &0);
+
+    h.vault.deposit(&user, &h.token, &10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 10_000);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 0);
+}
+
+#[test]
+fn a_balance_above_a_new_cap_can_still_be_withdrawn() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &8_000);
+
+    // The admin caps the balance below what is already held.
+    h.vault.set_deposit_cap(&user, &h.token, &5_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 8_000);
+
+    // The funds are not trapped: the whole balance can still come out.
+    h.vault.withdraw(&user, &h.token, &8_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn a_cap_belongs_to_one_user_and_one_token() {
+    let h = setup();
+    let user_a = funded_user(&h, 10_000);
+    let user_b = funded_user(&h, 10_000);
+    let other_token = Address::generate(&h.env);
+
+    h.vault.set_deposit_cap(&user_a, &h.token, &1_000);
+
+    // Another subscriber is unaffected.
+    h.vault.deposit(&user_b, &h.token, &5_000);
+    assert_eq!(h.vault.balance(&user_b, &h.token), 5_000);
+
+    // The same subscriber's other token is unaffected too.
+    assert_eq!(h.vault.deposit_cap(&user_a, &other_token), 0);
+}
+
+#[test]
+fn set_deposit_cap_requires_admin_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    // Drop the blanket mock: the call must carry the admin's authorization.
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_set_deposit_cap(&user, &h.token, &1_000)
+        .is_err());
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 0);
+}
+
+#[test]
+fn set_deposit_cap_rejects_a_negative_cap() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    assert_eq!(
+        h.vault.try_set_deposit_cap(&user, &h.token, &-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 0);
 }

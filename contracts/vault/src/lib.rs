@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, Withdraw};
+pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
 pub use types::DataKey;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -83,6 +83,52 @@ impl Vault {
         Ok(())
     }
 
+    /// Cap how much a subscriber may hold for one token.
+    ///
+    /// While the protocol is unaudited, the cost of a bug grows with the
+    /// amount of subscriber funds the vault can hold, so the admin can cap
+    /// the balance a subscriber may keep per token. The cap is per
+    /// (user, token): one subscriber's cap never affects another.
+    ///
+    /// A cap of 0 means unlimited, which is the default and what an
+    /// existing deployment runs with until an admin sets a cap.
+    ///
+    /// The cap only gates new deposits. A balance that is already above a
+    /// newly set cap can still be withdrawn, and can still be debited by the
+    /// subscription contract: the cap limits how much can be added, and
+    /// never traps funds.
+    pub fn set_deposit_cap(
+        env: Env,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+
+        if amount < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = DataKey::DepositCap(user.clone(), token.clone());
+        env.storage().persistent().set(&key, &amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        DepositCapSet {
+            user,
+            token,
+            cap: amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The deposit cap for (user, token). Zero means unlimited.
+    pub fn deposit_cap(env: Env, user: Address, token: Address) -> i128 {
+        Self::read_deposit_cap(&env, &user, &token)
+    }
+
     /// Move `amount` of `token` from the subscriber's wallet into the vault.
     pub fn deposit(env: Env, user: Address, token: Address, amount: i128) -> Result<(), Error> {
         user.require_auth();
@@ -98,10 +144,17 @@ impl Vault {
             return Err(Error::TokenNotAllowed);
         }
 
+        let new_balance = Self::read_balance(&env, &user, &token) + amount;
+        // The cap is checked before the transfer, so a rejected deposit moves
+        // no tokens at all.
+        let cap = Self::read_deposit_cap(&env, &user, &token);
+        if cap > 0 && new_balance > cap {
+            return Err(Error::DepositCapExceeded);
+        }
+
         let vault = env.current_contract_address();
         token::TokenClient::new(&env, &token).transfer(&user, &vault, &amount);
 
-        let new_balance = Self::read_balance(&env, &user, &token) + amount;
         Self::write_balance(&env, &user, &token, new_balance);
 
         Deposit {
@@ -240,6 +293,12 @@ impl Vault {
             .persistent()
             .get(&DataKey::TokenAllowed(token.clone()))
             .unwrap_or(false)
+    }
+
+    /// The deposit cap for (user, token). Absent means unlimited.
+    fn read_deposit_cap(env: &Env, user: &Address, token: &Address) -> i128 {
+        let key = DataKey::DepositCap(user.clone(), token.clone());
+        env.storage().persistent().get(&key).unwrap_or(0)
     }
 
     fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {

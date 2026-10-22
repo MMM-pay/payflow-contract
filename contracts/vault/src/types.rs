@@ -13,4 +13,7 @@ pub enum DataKey {
     /// Whether one token may be deposited. Only read while the allowlist is
     /// enabled; absent means not allowed.
     TokenAllowed(Address),
+    /// Maximum balance a subscriber may hold for (user, token). Absent or
+    /// zero means unlimited.
+    DepositCap(Address, Address),
 }

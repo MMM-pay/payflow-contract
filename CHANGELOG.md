@@ -5,6 +5,22 @@ All notable changes to the Payflow contracts. The format follows
 [semantic versioning](https://semver.org/). Before 1.0, a minor version may
 change the contract interface.
 
+## Unreleased
+
+### Added
+
+- **vault:** an optional per-token deposit cap while the protocol is unaudited.
+  The admin can call `set_deposit_cap(user, token, amount)` to cap the balance
+  one subscriber may hold for one token; a cap of `0` means unlimited, which is
+  the default and what an existing deployment runs with. A deposit that would
+  take the balance over the cap is rejected with the new `DepositCapExceeded`
+  (#7) before any token moves. The cap only gates new deposits: a balance
+  that is already above a newly set cap can still be withdrawn and can still be
+  debited by the subscription contract, so funds are never trapped. The new
+  `deposit_cap_set` event (topics `user`, `token`; data `cap`) needs handling
+  in payflow-backend and payflow-frontend, and the new error code needs a
+  message in payflow-docs. Closes #104.
+
 # # [0.2.0] - 2026-10-09
 
 Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/testnet.env).
