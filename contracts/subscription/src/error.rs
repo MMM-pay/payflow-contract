@@ -17,4 +17,6 @@ pub enum Error {
     NotMerchant = 11,
     /// Fee or tip math would overflow `i128` at this amount.
     AmountOverflow = 12,
+    /// The admin has been updated to a new address.
+    AdminUpdated = 13,
 }

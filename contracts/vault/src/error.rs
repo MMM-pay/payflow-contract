@@ -9,4 +9,6 @@ pub enum Error {
     InvalidAmount = 3,
     InsufficientBalance = 4,
     SubscriptionNotSet = 5,
+    /// The admin has been updated to a new address.
+    AdminUpdated = 6,
 }
