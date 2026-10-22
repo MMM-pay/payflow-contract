@@ -463,6 +463,150 @@ fn cancel_twice_is_rejected() {
 }
 
 #[test]
+fn mandate_owner_transfer_updates_indexes_and_future_charges() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let id = w.sub.subscribe(&old_subscriber, &plan_id, &0);
+
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &id, &new_subscriber, &0);
+    assert_eq!(
+        w.sub.get_mandate(&id).subscriber,
+        old_subscriber,
+        "proposal alone must not change mandate ownership"
+    );
+    w.sub.accept_mandate_owner(&new_subscriber, &id);
+
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "mandate_transferred".try_into().unwrap();
+    assert_eq!(name, &expected);
+
+    assert_eq!(w.sub.get_mandate(&id).subscriber, new_subscriber);
+    assert_eq!(w.sub.subscriber_mandate_count(&old_subscriber), 0);
+    assert_eq!(w.sub.subscriber_mandates(&old_subscriber, &0, &50).len(), 0);
+    assert_eq!(w.sub.subscriber_mandate_count(&new_subscriber), 1);
+    assert_eq!(
+        w.sub.subscriber_mandates(&new_subscriber, &0, &50),
+        soroban_sdk::vec![&w.env, id]
+    );
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 1);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &0, &50),
+        soroban_sdk::vec![&w.env, id]
+    );
+    assert_eq!(
+        w.sub.try_cancel(&old_subscriber, &id),
+        Err(Ok(Error::NotSubscriber))
+    );
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.vault.balance(&old_subscriber, &w.token), 100_000);
+    assert_eq!(w.vault.balance(&new_subscriber, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn mandate_owner_transfer_repairs_a_pending_index_position() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let first_new_owner = w.subscriber(100_000);
+    let second_new_owner = w.subscriber(100_000);
+    let first_id = w.sub.subscribe(&old_subscriber, &plan_id, &0);
+    let second_id = w.sub.subscribe(&old_subscriber, &plan_id, &0);
+
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &second_id, &first_new_owner, &1);
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &first_id, &second_new_owner, &0);
+    w.sub.accept_mandate_owner(&second_new_owner, &first_id);
+    w.sub.accept_mandate_owner(&first_new_owner, &second_id);
+
+    assert_eq!(w.sub.subscriber_mandate_count(&old_subscriber), 0);
+    assert_eq!(
+        w.sub.subscriber_mandates(&first_new_owner, &0, &50),
+        soroban_sdk::vec![&w.env, second_id]
+    );
+    assert_eq!(
+        w.sub.subscriber_mandates(&second_new_owner, &0, &50),
+        soroban_sdk::vec![&w.env, first_id]
+    );
+}
+
+#[test]
+fn mandate_owner_transfer_requires_the_correct_signers() {
+    let w = world();
+    let plan_id = w.plan();
+    let subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let wrong_signer = Address::generate(&w.env);
+    let id = w.sub.subscribe(&subscriber, &plan_id, &0);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &wrong_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "propose_mandate_owner",
+            args: (&subscriber, &id, &new_subscriber, &0u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w
+        .sub
+        .try_propose_mandate_owner(&subscriber, &id, &new_subscriber, &0)
+        .is_err());
+
+    w.env.mock_all_auths();
+    w.sub
+        .propose_mandate_owner(&subscriber, &id, &new_subscriber, &0);
+    w.env.mock_auths(&[MockAuth {
+        address: &wrong_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "accept_mandate_owner",
+            args: (&new_subscriber, &id).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w
+        .sub
+        .try_accept_mandate_owner(&new_subscriber, &id)
+        .is_err());
+}
+
+#[test]
+fn mandate_owner_transfer_rejects_invalid_proposals_and_positions() {
+    let w = world();
+    let plan_id = w.plan();
+    let subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let id = w.sub.subscribe(&subscriber, &plan_id, &0);
+
+    assert_eq!(
+        w.sub
+            .try_propose_mandate_owner(&subscriber, &id, &new_subscriber, &1),
+        Err(Ok(Error::InvalidSubscriberIndex))
+    );
+    assert_eq!(
+        w.sub.try_accept_mandate_owner(&new_subscriber, &id),
+        Err(Ok(Error::NoPendingTransfer))
+    );
+
+    w.sub
+        .propose_mandate_owner(&subscriber, &id, &new_subscriber, &0);
+    let other_candidate = w.subscriber(100_000);
+    assert_eq!(
+        w.sub.try_accept_mandate_owner(&other_candidate, &id),
+        Err(Ok(Error::NotProposedOwner))
+    );
+}
+
+#[test]
 fn pause_suspends_billing_and_resume_restores_it() {
     let w = world();
     let plan_id = w.plan();

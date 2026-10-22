@@ -71,8 +71,12 @@ pub enum DataKey {
     Mandate(u64),
     /// Number of mandates a subscriber has opened.
     SubscriberMandateCount(Address),
-    /// The n-th mandate a subscriber opened (0-based).
+    /// The mandate at this subscriber's current index position (0-based).
     SubscriberMandate(Address, u32),
+    /// Proposed new owner for a mandate awaiting acceptance.
+    PendingMandateOwner(u64),
+    /// Subscriber index position captured with the pending ownership proposal.
+    PendingSubscriberPosition(u64),
     /// Number of mandates opened against a merchant's plans.
     MerchantMandateCount(Address),
     /// The n-th mandate opened against a merchant's plans (0-based).
