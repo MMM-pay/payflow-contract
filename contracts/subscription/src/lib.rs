@@ -37,6 +37,12 @@ pub const MAX_FEE_BPS: u32 = 1_000;
 /// so a page of 50 leaves room for the entries the caller reads alongside it.
 pub const MAX_PAGE: u32 = 50;
 
+/// How far ahead of the current ledger timestamp billing may be scheduled
+/// with `subscribe_at`: one year, in seconds. Far ahead enough to set up an
+/// annual subscription in advance, close enough that a mandate cannot be
+/// scheduled so far out that the subscriber forgets it exists.
+pub const MAX_START_OFFSET: u64 = 365 * 24 * 60 * 60;
+
 /// Billing engine for pull-based recurring payments.
 ///
 /// Classic Stellar has no pull-payment primitive: a payment must be pushed by
@@ -88,7 +94,37 @@ impl Subscription {
         plan_id: u64,
         max_charges: u32,
     ) -> Result<u64, Error> {
+        let now = env.ledger().timestamp();
+        Self::subscribe_at(env, subscriber, plan_id, max_charges, now)
+    }
+
+    /// Open a mandate whose first charge falls due at `start` rather than
+    /// now, so a subscriber can set up billing ahead of time.
+    ///
+    /// `start` must be the current ledger timestamp or later, and no more
+    /// than `MAX_START_OFFSET` (one year) after it: a mandate may be
+    /// scheduled in advance, but neither backdated nor locked away in the
+    /// distant future. Everything else is identical to `subscribe` — the
+    /// plan's terms are copied into the mandate and never re-read — and
+    /// `Subscribed` carries `start` as `next_charge`, so indexers learn when
+    /// billing begins from the event alone. `subscribe` is
+    /// `subscribe_at(..., now)`.
+    ///
+    /// Requires `subscriber`'s authorization, like `subscribe`.
+    pub fn subscribe_at(
+        env: Env,
+        subscriber: Address,
+        plan_id: u64,
+        max_charges: u32,
+        start: u64,
+    ) -> Result<u64, Error> {
         subscriber.require_auth();
+
+        // `start - now` only after the past check, so it cannot underflow.
+        let now = env.ledger().timestamp();
+        if start < now || start - now > MAX_START_OFFSET {
+            return Err(Error::InvalidStart);
+        }
 
         let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
         let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
@@ -114,7 +150,6 @@ impl Subscription {
         // passed to this deployment does not enforce the cap.
         let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
 
-        let now = env.ledger().timestamp();
         let mandate = Mandate {
             id,
             subscriber: subscriber.clone(),
@@ -123,7 +158,7 @@ impl Subscription {
             token: plan.token.clone(),
             amount: plan.amount,
             period: plan.period,
-            next_charge: now,
+            next_charge: start,
             last_charge: 0,
             charges_made: 0,
             max_charges,
@@ -160,7 +195,7 @@ impl Subscription {
             plan_id,
             amount: plan.amount,
             period: plan.period,
-            next_charge: now,
+            next_charge: start,
             max_charges,
             fee_bps,
             keeper_bps,
@@ -252,6 +287,7 @@ impl Subscription {
             mandate_id,
             subscriber: mandate.subscriber.clone(),
             merchant: mandate.merchant.clone(),
+            token: mandate.token.clone(),
             amount: merchant_amount,
             fee,
             tip,

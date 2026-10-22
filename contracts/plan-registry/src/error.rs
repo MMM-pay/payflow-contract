@@ -19,4 +19,6 @@ pub enum Error {
     ProfileUrlTooLong = 10,
     /// `create_plan` was given a keeper tip above MAX_KEEPER_BPS.
     KeeperBpsTooHigh = 11,
+    /// `create_plan` was given a terms URI longer than MAX_TERMS_LEN bytes.
+    UriTooLong = 12,
 }

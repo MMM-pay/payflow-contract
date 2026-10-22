@@ -32,6 +32,10 @@ pub const MAX_NAME_LEN: u32 = 64;
 /// capped here so storage and UI rendering stay bounded.
 pub const MAX_URL_LEN: u32 = 256;
 
+/// Maximum plan terms URI length in bytes. Like the profile URL it is
+/// self-declared, capped so one plan cannot bloat persistent storage.
+pub const MAX_TERMS_LEN: u32 = 200;
+
 /// Largest page `merchant_plans` returns in one call. Each id is read from its
 /// own storage entry, and a transaction may touch at most 100 entries.
 pub const MAX_PAGE: u32 = 50;
@@ -59,6 +63,17 @@ impl PlanRegistry {
     /// part of the plan's immutable terms: a mandate opened against this plan
     /// keeps the tip it was opened with, so raising the tip later cannot take
     /// money from an existing subscriber or merchant.
+    ///
+    /// `terms_uri` links to the plan's description and terms of service, so a
+    /// subscriber can read what they are agreeing to before opening a
+    /// mandate. It may be empty, is capped at `MAX_TERMS_LEN` bytes, and is
+    /// self-declared by the merchant: the contract does not fetch or verify it.
+    //
+    // The flat argument list is the contract's public interface: `stellar
+    // contract invoke -- create_plan --merchant ... --terms_uri ...` maps one
+    // flag per parameter, so grouping these into a struct would be a breaking
+    // wire change for every caller rather than a style improvement.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -67,6 +82,7 @@ impl PlanRegistry {
         period: u64,
         name: String,
         keeper_bps: u32,
+        terms_uri: String,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -81,6 +97,9 @@ impl PlanRegistry {
         }
         if keeper_bps > MAX_KEEPER_BPS {
             return Err(Error::KeeperBpsTooHigh);
+        }
+        if terms_uri.len() > MAX_TERMS_LEN {
+            return Err(Error::UriTooLong);
         }
 
         let id: u64 = env
@@ -98,6 +117,7 @@ impl PlanRegistry {
             period,
             active: true,
             keeper_bps,
+            terms_uri: terms_uri.clone(),
         };
 
         env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -131,6 +151,7 @@ impl PlanRegistry {
             period: plan.period,
             name,
             keeper_bps,
+            terms_uri,
         }
         .publish(&env);
 

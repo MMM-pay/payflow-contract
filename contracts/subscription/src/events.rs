@@ -31,6 +31,10 @@ pub struct Charged {
     pub subscriber: Address,
     #[topic]
     pub merchant: Address,
+    /// SEP-41 token that `amount`, `fee` and `tip` are denominated in. Without
+    /// it an indexer must join on the mandate to total revenue per token, and
+    /// cannot do so from events alone.
+    pub token: Address,
     /// Merchant share after the protocol fee and the keeper tip.
     pub amount: i128,
     pub fee: i128,
