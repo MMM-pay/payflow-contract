@@ -25,3 +25,14 @@ pub struct PlanStatusChanged {
     pub plan_id: u64,
     pub active: bool,
 }
+
+/// Emitted when a merchant sets or updates its self-declared profile. The
+/// profile is not verified by the contract.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileUpdated {
+    #[topic]
+    pub merchant: Address,
+    pub name: String,
+    pub url: String,
+}
