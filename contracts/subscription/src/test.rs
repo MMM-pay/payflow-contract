@@ -121,6 +121,7 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.merchant, w.merchant);
     assert_eq!(m.amount, PRICE);
     assert_eq!(m.period, MONTH);
+    assert_eq!(m.created_at, w.env.ledger().timestamp());
     assert_eq!(m.charges_made, 0);
     assert_eq!(m.status, MandateStatus::Active);
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
@@ -199,7 +200,28 @@ fn first_charge_is_due_immediately_and_splits_fee() {
 
     let m = w.sub.get_mandate(&id);
     assert_eq!(m.charges_made, 1);
+    assert_eq!(m.created_at, 1_000_000);
     assert_eq!(m.next_charge, w.env.ledger().timestamp() + MONTH);
+}
+
+#[test]
+fn subscribe_requires_the_subscriber_to_authorize() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let other_signer = Address::generate(&w.env);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &other_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe",
+            args: (&user, &plan_id, &0).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w.sub.try_subscribe(&user, &plan_id, &0).is_err());
 }
 
 #[test]

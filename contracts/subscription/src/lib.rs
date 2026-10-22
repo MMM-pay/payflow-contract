@@ -123,6 +123,7 @@ impl Subscription {
             token: plan.token.clone(),
             amount: plan.amount,
             period: plan.period,
+            created_at: now,
             next_charge: now,
             last_charge: 0,
             charges_made: 0,

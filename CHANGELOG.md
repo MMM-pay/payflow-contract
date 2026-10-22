@@ -108,6 +108,11 @@ request.
 
 ### Changed
 
+- **Breaking:** `Mandate` gains `created_at`, set when `subscribe` opens it and
+  returned by `get_mandate`. Existing deployments must be redeployed because
+  stored mandates do not contain the new field. This also requires downstream
+  updates in `payflow-backend`, `payflow-frontend` and `payflow-docs`; follow-up
+  issues should be linked in the pull request.
 - **Breaking:** `charge` takes the settling `keeper: Address` and requires its
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.
