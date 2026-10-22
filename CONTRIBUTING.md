@@ -1,6 +1,6 @@
 # Contributing to Payflow Contracts
 
-## Before you start
+# # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
 Issues carry a complexity label that maps to the Drips Wave point value.
