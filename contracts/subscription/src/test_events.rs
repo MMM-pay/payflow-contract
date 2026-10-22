@@ -161,3 +161,21 @@ fn fee_changed_layout() {
         },
     );
 }
+
+#[test]
+fn refunded_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "refunded",
+        super::Refunded::spec_xdr(),
+        &super::Refunded {
+            mandate_id: 11,
+            subscriber: a.clone(),
+            merchant: a,
+            amount: 400,
+            refunded_total: 900,
+        },
+    );
+}
