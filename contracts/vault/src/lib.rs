@@ -6,6 +6,8 @@ mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_events;
 
 pub use error::Error;
 pub use events::{Debit, Deposit, Withdraw};

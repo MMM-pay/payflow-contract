@@ -67,6 +67,22 @@ not `test_charge_3`.
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
 
+### Event snapshots
+
+Each contract event has a committed XDR snapshot under
+`contracts/<contract>/test_snapshots/events/`. To update snapshots after an
+intentional event layout change, run:
+
+```bash
+UPDATE_SNAPSHOTS=1 cargo test --all
+```
+
+Review every changed snapshot in the diff before committing. Each snapshot
+contains the emitted event XDR and generated event-spec XDR; together they pin
+topic symbols, field names, types, order and topic/data locations. Intended
+event changes also ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`, whose indexers and clients may need coordinated updates.
+
 ## Commits
 
 Conventional commits, one logical change per commit:

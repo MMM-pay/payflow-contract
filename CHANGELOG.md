@@ -93,6 +93,9 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   cannot emit misleading `Deposit` events. Off by default (testnet keeps
   accepting every SEP-41 token), and withdrawals are never checked, so
   allowlisting can never trap funds.
+- Snapshot tests pin the XDR layouts of every plan-registry, vault and
+  subscription event. No interface changed.
+
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
