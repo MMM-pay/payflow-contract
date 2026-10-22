@@ -327,18 +327,23 @@ fn subscriber_pays_the_same_total_with_or_without_a_tip() {
 }
 
 #[test]
-fn second_charge_before_period_elapses_is_rejected() {
+fn second_charge_is_rejected_before_due_and_succeeds_at_due_time() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     let id = w.sub.subscribe(&user, &plan_id, &0);
 
     w.sub.charge(&w.keeper, &id);
+    let next_charge = w.sub.get_mandate(&id).next_charge;
+
+    w.env.ledger().set_timestamp(next_charge - 1);
     assert!(!w.sub.is_due(&id));
     assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
 
-    w.advance(MONTH - 1);
-    assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+    w.env.ledger().set_timestamp(next_charge);
+    assert!(w.sub.is_due(&id));
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
 }
 
 #[test]
