@@ -13,6 +13,8 @@ pub struct PlanCreated {
     pub period: u64,
     /// Carried in the event so indexers need no follow-up contract read.
     pub name: String,
+    /// Short summary of what the plan includes. May be empty.
+    pub description: String,
     /// Keeper tip frozen into the plan, in basis points of the merchant share.
     pub keeper_bps: u32,
 }

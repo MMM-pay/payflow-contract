@@ -26,4 +26,7 @@ pub enum Error {
     /// The replacement plan is denominated in a different token than the plan
     /// it replaces, so the pointer would be meaningless.
     SuccessorTokenMismatch = 14,
+    /// `create_plan` was given a description longer than
+    /// MAX_DESCRIPTION_LEN bytes.
+    DescriptionTooLong = 15,
 }

@@ -18,6 +18,11 @@ use soroban_sdk::{contracttype, Address, String};
 /// what a subscriber pays.
 pub const MAX_KEEPER_BPS: u32 = 500;
 
+/// Largest plan description, in bytes. A description is a short, plain
+/// summary of what the plan includes ("monthly consults, unlimited
+/// follow-ups"). At most MAX_DESCRIPTION_LEN bytes; may be empty.
+pub const MAX_DESCRIPTION_LEN: u32 = 280;
+
 /// A merchant-published charge template. A `Plan` is immutable except for its
 /// `active` flag and its `successor_id` pointer: changing price, period or
 /// keeper tip requires publishing a new plan so existing mandates can never be
@@ -30,6 +35,10 @@ pub struct Plan {
     /// Human-readable label shown to subscribers, e.g. "Pro Monthly".
     /// At most MAX_NAME_LEN bytes; may be empty.
     pub name: String,
+    /// Short, plain summary of what the plan includes, shown to
+    /// subscribers next to the name. At most MAX_DESCRIPTION_LEN bytes;
+    /// may be empty.
+    pub description: String,
     /// SEP-41 token this plan is denominated in.
     pub token: Address,
     /// Amount charged per period, in the token's smallest unit. This is what

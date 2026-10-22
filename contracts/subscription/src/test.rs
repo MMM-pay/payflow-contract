@@ -92,6 +92,7 @@ impl World<'_> {
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
+            &String::from_str(&self.env, ""),
             &keeper_bps,
         )
     }
@@ -104,6 +105,7 @@ impl World<'_> {
             &amount,
             &period,
             &String::from_str(&self.env, "Custom Plan"),
+            &String::from_str(&self.env, ""),
             &0,
         )
     }
@@ -605,6 +607,7 @@ fn zero_fee_pays_merchant_in_full() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -982,6 +985,7 @@ fn fee_paid_to_address() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -1348,6 +1352,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         &PRICE,
         &MONTH,
         &String::from_str(&w.env, "Other Token Plan"),
+        &String::from_str(&w.env, ""),
         &0,
     );
 
@@ -1605,6 +1610,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -1689,6 +1695,7 @@ impl FailingTokenWorld<'_> {
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
+            &String::from_str(&self.env, ""),
             &keeper_bps,
         )
     }

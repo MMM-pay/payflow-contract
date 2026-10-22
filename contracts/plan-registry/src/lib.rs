@@ -28,6 +28,10 @@ pub const MIN_PERIOD: u64 = 60;
 /// persistent storage or break list rendering with an unbounded label.
 pub const MAX_NAME_LEN: u32 = 64;
 
+/// Maximum plan description length in bytes. Bounded so a merchant cannot
+/// bloat persistent storage or break list rendering with a long blurb.
+pub const MAX_DESCRIPTION_LEN: u32 = payflow_shared::MAX_DESCRIPTION_LEN;
+
 /// Maximum profile URL length in bytes. Self-declared and unbounded in theory,
 /// capped here so storage and UI rendering stay bounded.
 pub const MAX_URL_LEN: u32 = 256;
@@ -40,6 +44,7 @@ pub const MAX_PAGE: u32 = 50;
 pub struct PlanRegistry;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl PlanRegistry {
     /// Runs once, in the same transaction that deploys the contract. With a
     /// separate `initialize` call, anyone watching the ledger could call it
@@ -59,6 +64,7 @@ impl PlanRegistry {
     /// part of the plan's immutable terms: a mandate opened against this plan
     /// keeps the tip it was opened with, so raising the tip later cannot take
     /// money from an existing subscriber or merchant.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -66,6 +72,7 @@ impl PlanRegistry {
         amount: i128,
         period: u64,
         name: String,
+        description: String,
         keeper_bps: u32,
     ) -> Result<u64, Error> {
         merchant.require_auth();
@@ -75,6 +82,9 @@ impl PlanRegistry {
         }
         if name.len() > MAX_NAME_LEN {
             return Err(Error::NameTooLong);
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(Error::DescriptionTooLong);
         }
         if period < MIN_PERIOD {
             return Err(Error::InvalidPeriod);
@@ -93,6 +103,7 @@ impl PlanRegistry {
             id,
             merchant: merchant.clone(),
             name: name.clone(),
+            description: description.clone(),
             token,
             amount,
             period,
@@ -131,6 +142,7 @@ impl PlanRegistry {
             amount: plan.amount,
             period: plan.period,
             name,
+            description,
             keeper_bps,
         }
         .publish(&env);

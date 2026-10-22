@@ -21,6 +21,16 @@ change the contract interface.
   in payflow-backend and payflow-frontend, and the new error code needs a
   message in payflow-docs. Closes #104.
 
+- **plan-registry:** a short plan description. `Plan` gains a `description`
+  field (at most 280 bytes, may be empty) and `create_plan` takes it as a new
+  argument after `name`, so a subscriber can see what a plan includes without
+  leaving the app. The `plan_created` event carries the description too, so
+  indexers and apps need no follow-up contract read. A description longer than
+  the limit is rejected with the new `DescriptionTooLong` error (#15), and a
+  description at the limit is accepted. This is an interface change:
+  payflow-backend, payflow-frontend and payflow-docs need to read the new
+  field and to map the new error code. Closes #91.
+
 # # [0.2.0] - 2026-10-09
 
 Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/testnet.env).
