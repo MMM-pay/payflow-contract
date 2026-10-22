@@ -187,6 +187,27 @@ fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
     found
 }
 
+fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
+    let mut found = None;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::U64(value) = entry.val {
+                    found = Some(value);
+                }
+            }
+        }
+    }
+    found
+}
+
 #[test]
 fn subscribe_event_carries_the_spend_cap() {
     let w = world();
@@ -338,6 +359,39 @@ fn keeper_tip_is_paid_from_the_merchant_share() {
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
     // The tip rate is frozen into the mandate, like the fee.
     assert_eq!(w.sub.get_mandate(&id).keeper_bps, KEEPER_BPS);
+}
+
+#[test]
+fn charge_result_matches_charged_event_and_reports_completion() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1);
+
+    let result = w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(
+        last_event_field_i128(&w.env, "amount"),
+        Some(result.merchant_amount)
+    );
+    assert_eq!(last_event_field_i128(&w.env, "fee"), Some(result.fee));
+    assert_eq!(
+        event_field_u32(&w.env, "charges_made"),
+        Some(result.charges_made)
+    );
+    assert_eq!(
+        last_event_field_u64(&w.env, "next_charge"),
+        Some(result.next_charge)
+    );
+    assert!(result.completed);
+
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "mandate_completed".try_into().unwrap();
+    assert_eq!(name, &expected);
 }
 
 /// The acceptance criterion for the tip: a tip changes how the plan's price is

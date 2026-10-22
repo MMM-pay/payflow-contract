@@ -14,7 +14,7 @@ pub use events::{
     Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
-pub use types::{DataKey, Mandate, MandateStatus, Plan};
+pub use types::{ChargeResult, DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::MAX_KEEPER_BPS;
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
@@ -191,7 +191,7 @@ impl Subscription {
     /// `next_charge + period`. A keeper outage therefore delays billing instead
     /// of accumulating a backlog that could drain a vault in one burst. The
     /// tradeoff is slow forward drift, which favours the subscriber.
-    pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<(), Error> {
+    pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<ChargeResult, Error> {
         keeper.require_auth();
 
         let mut mandate = Self::read_mandate(&env, mandate_id)?;
@@ -210,7 +210,11 @@ impl Subscription {
 
         // The mandate's own fee and tip, both frozen when the subscriber
         // opened it. Neither is read from the plan or the config here.
-        let fee = mandate.amount * (mandate.fee_bps as i128) / BPS_DENOMINATOR;
+        let fee = mandate
+            .amount
+            .checked_mul(mandate.fee_bps as i128)
+            .ok_or(Error::AmountOverflow)?
+            / BPS_DENOMINATOR;
         let merchant_gross = mandate.amount - fee;
 
         // Tip is a share of the merchant's own money, capped again here so a
@@ -221,6 +225,14 @@ impl Subscription {
             .ok_or(Error::AmountOverflow)?
             / BPS_DENOMINATOR;
         let merchant_amount = merchant_gross - tip;
+        let charges_made = mandate
+            .charges_made
+            .checked_add(1)
+            .ok_or(Error::AmountOverflow)?;
+        let next_charge = now
+            .checked_add(mandate.period)
+            .ok_or(Error::AmountOverflow)?;
+        let completed = mandate.max_charges != 0 && charges_made >= mandate.max_charges;
 
         let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
         let vault = VaultClient::new(&env, &vault_addr);
@@ -249,11 +261,10 @@ impl Subscription {
             mandate.paused_until = 0;
         }
 
-        mandate.charges_made += 1;
+        mandate.charges_made = charges_made;
         mandate.last_charge = now;
-        mandate.next_charge = now + mandate.period;
+        mandate.next_charge = next_charge;
 
-        let completed = mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges;
         if completed {
             mandate.status = MandateStatus::Completed;
         }
@@ -282,7 +293,13 @@ impl Subscription {
             .publish(&env);
         }
 
-        Ok(())
+        Ok(ChargeResult {
+            merchant_amount,
+            fee,
+            charges_made,
+            next_charge,
+            completed,
+        })
     }
 
     /// Move a mandate onto a different plan.

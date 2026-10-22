@@ -1,5 +1,17 @@
 use soroban_sdk::{contracttype, Address};
 
+/// Values from a settled charge. `merchant_amount` matches `Charged.amount`:
+/// the merchant's share after the protocol fee and keeper tip.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeResult {
+    pub merchant_amount: i128,
+    pub fee: i128,
+    pub charges_made: u32,
+    pub next_charge: u64,
+    pub completed: bool,
+}
+
 /// The registry's `Plan`, imported from the shared crate rather than copied.
 /// A field added to or removed from the registry's plan therefore changes the
 /// type this contract decodes, and the subscription build fails instead of

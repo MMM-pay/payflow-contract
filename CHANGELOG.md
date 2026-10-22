@@ -50,6 +50,15 @@ change the contract interface.
   payflow-backend, payflow-frontend and payflow-docs need the new
   `subscription_upgraded` event and the new error codes. Closes #94.
 
+### Changed
+
+- **subscription:** `charge(keeper, mandate_id)` now returns a `ChargeResult`
+  containing the merchant amount, protocol fee, charge count, next charge time
+  and completion flag. The return values match the corresponding `Charged`
+  event fields, so callers do not need an extra contract read. This contract
+  interface change needs handling in payflow-backend, payflow-frontend and
+  payflow-docs. Closes #89.
+
 # # [0.2.0] - 2026-10-09
 
 Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/testnet.env).
