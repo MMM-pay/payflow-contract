@@ -86,6 +86,24 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `plan-registry:deactivate_page(merchant, start, limit)`: deactivates up to
   `MAX_PAGE` of a merchant's plans in one call; only the merchant's own plans
   are touched.
+- `vault:withdraw_all(user, token) -> i128`: withdraw the whole balance in one
+  call, so leaving the protocol cannot race a charge settling in between (a
+  plain `withdraw` of a stale balance fails with `InsufficientBalance`). An
+  empty balance returns 0 without a token transfer; otherwise it emits the
+  existing `Withdraw` event.
+- `subscription:subscribe_at(subscriber, plan_id, max_charges, start)`:
+  schedule the first charge at `start` instead of immediately, so billing can
+  be set up ahead of time. A `start` before the current ledger timestamp, or
+  more than `MAX_START_OFFSET` (one year, 31_536_000 s) after it, is rejected
+  with the new error `InvalidStart` (13). `Subscribed` carries `start` as
+  `next_charge`. `subscribe` is unchanged: `subscribe_at(..., now)`.
+- `plan-registry:create_plan` takes `terms_uri`, a link to the plan's
+  description and terms of service (at most `MAX_TERMS_LEN` = 200 bytes, may
+  be empty, self-declared). Plans carry it in `Plan.terms_uri` and in
+  `PlanCreated`, with the new error `UriTooLong` (12).
+- `subscription:Charged` gains `token`, the SEP-41 token the `amount`, `fee`
+  and `tip` are denominated in, so event-only indexers can total revenue per
+  token without joining back to the mandate.
 - **Test: admin has no path to user funds** — verifies that every admin-
   callable function leaves all user balances unchanged.
 - **Test: fees paid to a contract address** — verifies that the protocol fee
@@ -106,10 +124,12 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   permissionless `charge`), linked from README.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s `keeper` argument and
-the new `tip`/`keeper`/`keeper_bps` event fields) ripple into
+`ProfileUpdated`, `create_plan`'s `keeper_bps` and `terms_uri`, `charge`'s
+`keeper` argument, the new `tip`/`keeper`/`keeper_bps` event fields,
+`Charged.token`, `Subscribed.next_charge` as a scheduled start, and the new
+entry points `subscribe_at` and `withdraw_all`) ripple into
 `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
-consume the new fields and pass the keeper argument are tracked in the pull
+consume the new fields and pass the new arguments are tracked in the pull
 request.
 
 ### Changed
@@ -122,10 +142,11 @@ request.
 - **Breaking:** `charge` takes the settling `keeper: Address` and requires its
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.
-- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
-  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
-  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
-  and `Mandate` values do not decode into the new shape.
+- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` and then
+  `terms_uri` as its last arguments, and `Plan`, `Mandate`, `PlanCreated`,
+  `Subscribed` and `Charged` gain fields. Existing testnet deployments must be
+  redeployed: stored `Plan` and `Mandate` values do not decode into the new
+  shape, and `Charged`/`PlanCreated` event layouts changed.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -144,6 +165,20 @@ request.
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
   is transferred to the `fee_to` address when a mandate is charged.
+- **New tests for scheduled starts** — `subscribe_at` sets
+  `Subscribed.next_charge` to the start, charging before it fails with
+  `NotDue`, past and more-than-a-year starts are rejected with `InvalidStart`
+  (the one-year boundary is accepted), and a different signer cannot open a
+  mandate for a subscriber.
+- **New tests for `withdraw_all`** — returns the whole balance after a charge
+  reduced it, an empty balance returns 0 with no transfer and no event, and a
+  different signer is rejected.
+- **New tests for `terms_uri`** — stored, accepted empty, accepted at the
+  200-byte limit, rejected beyond it (including multibyte URIs measured in
+  bytes), and carried in `PlanCreated`.
+- **New test: `charged_event_carries_the_token`** — decodes the `Charged`
+  event and finds the token on the wire.
+- 90 → 108 tests.
 
 ## [0.1.0] - 2026-09-02
 

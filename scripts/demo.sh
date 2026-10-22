@@ -22,9 +22,8 @@ MERCHANT="$(stellar keys address pf-demo-merchant)"
 SUBSCRIBER="$(stellar keys address pf-demo-subscriber)"
 
 echo "==> merchant publishes a named 1 XLM / 60s plan with a 1% keeper tip"
-PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \
-  -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 10000000 --period 60 \
-  --name "Demo Monthly" --keeper_bps 100 2>/dev/null | tail -1)"
+PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \  --create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 10000000 --period 60 \
+  --name "Demo Monthly" --keeper_bps 100 --terms_uri "" 2>/dev/null | tail -1)"
 
 echo "==> subscriber funds the vault with 5 XLM"
 stellar contract invoke --id "$VAULT" --source pf-demo-subscriber --network "$NETWORK" \

@@ -15,6 +15,9 @@ pub struct PlanCreated {
     pub name: String,
     /// Keeper tip frozen into the plan, in basis points of the merchant share.
     pub keeper_bps: u32,
+    /// Link to the plan's terms, carried in the event so frontends need no
+    /// follow-up contract read. At most 200 bytes; may be empty.
+    pub terms_uri: String,
 }
 
 /// Emitted when a merchant activates or deactivates a plan.

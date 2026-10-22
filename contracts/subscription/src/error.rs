@@ -17,4 +17,7 @@ pub enum Error {
     NotMerchant = 11,
     /// Fee or tip math would overflow `i128` at this amount.
     AmountOverflow = 12,
+    /// `subscribe_at` was given a `start` before the current ledger timestamp
+    /// or more than `MAX_START_OFFSET` (one year) after it.
+    InvalidStart = 13,
 }

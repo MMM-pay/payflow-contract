@@ -42,4 +42,9 @@ pub struct Plan {
     /// points of the merchant's share. 0 means the merchant keeps it all.
     /// At most `MAX_KEEPER_BPS`; the registry rejects anything higher.
     pub keeper_bps: u32,
+    /// Link to the plan's description and terms of service, shown to
+    /// subscribers before they open a mandate. At most `MAX_TERMS_LEN`
+    /// (200) bytes; may be empty. Self-declared by the merchant, like the
+    /// profile URL: the contract does not verify it.
+    pub terms_uri: String,
 }
