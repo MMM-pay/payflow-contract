@@ -8,7 +8,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
-    Address, Env, IntoVal, String,
+    Address, Env, FromVal, IntoVal, String,
 };
 
 const MONTH: u64 = 2_592_000;
@@ -150,6 +150,23 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.charges_made, 0);
     assert_eq!(m.status, MandateStatus::Active);
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
+}
+
+#[test]
+fn next_mandate_id_matches_the_next_subscription() {
+    let w = world();
+    let plan_id = w.plan();
+    let first_user = w.subscriber(100_000);
+    let second_user = w.subscriber(100_000);
+
+    assert_eq!(w.sub.next_mandate_id(), 1);
+
+    let first_id = w.sub.subscribe(&first_user, &plan_id, &0);
+    let next_id = w.sub.next_mandate_id();
+    assert_eq!(next_id, first_id + 1);
+
+    let second_id = w.sub.subscribe(&second_user, &plan_id, &0);
+    assert_eq!(second_id, next_id);
 }
 
 /// Pull a u32 field out of the data map of any emitted contract event.
@@ -2137,4 +2154,119 @@ fn upgrade_event_carries_the_old_and_the_new_terms() {
     assert_eq!(last_event_field_i128(&w.env, "old_amount"), Some(PRICE));
     assert_eq!(last_event_field_i128(&w.env, "new_amount"), Some(PRICE * 2));
     assert_eq!(last_event_field_i128(&w.env, "charged"), Some(5_000));
+}
+
+#[test]
+fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // Helper to find the latest MandateUpdated snapshot event for a given mandate_id
+    let find_latest_snapshot = |env: &Env, target_id: u64| -> Option<Mandate> {
+        let mut snapshot = None;
+        for event in env.events().all().events() {
+            let ContractEventBody::V0(body) = &event.body;
+            if body.topics.len() < 2 {
+                continue;
+            }
+            let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() != "mandate_updated" {
+                continue;
+            }
+            if let ScVal::U64(id) = body.topics[1] {
+                if id == target_id {
+                    let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+                        continue;
+                    };
+                    for entry in entries.iter() {
+                        let ScVal::Symbol(ScSymbol(field)) = &entry.key else {
+                            continue;
+                        };
+                        if field.to_utf8_string_lossy() == "mandate" {
+                            snapshot = Some(Mandate::from_val(env, &entry.val));
+                        }
+                    }
+                }
+            }
+        }
+        snapshot
+    };
+
+    // 1. Subscribe
+    let id = w.sub.subscribe(&user, &plan_id, &2);
+    let snap1 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on subscribe");
+    assert_eq!(snap1, w.sub.get_mandate(&id));
+    assert_eq!(snap1.status, MandateStatus::Active);
+    assert_eq!(snap1.charges_made, 0);
+
+    // 2. Pause
+    w.sub.set_paused(&user, &id, &true);
+    let snap2 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on pause");
+    assert_eq!(snap2, w.sub.get_mandate(&id));
+    assert_eq!(snap2.status, MandateStatus::Paused);
+
+    // 3. Resume
+    w.sub.set_paused(&user, &id, &false);
+    let snap3 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on resume");
+    assert_eq!(snap3, w.sub.get_mandate(&id));
+    assert_eq!(snap3.status, MandateStatus::Active);
+
+    // 4. Pause until
+    let future_time = 1_000_000 + 10_000;
+    w.sub.pause_until(&user, &id, &future_time);
+    let snap_pu = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on pause_until");
+    assert_eq!(snap_pu, w.sub.get_mandate(&id));
+    assert_eq!(snap_pu.status, MandateStatus::Paused);
+    assert_eq!(snap_pu.paused_until, future_time);
+
+    // Resume from pause_until and advance time so charge is due
+    w.sub.set_paused(&user, &id, &false);
+    w.env.ledger().set_timestamp(future_time);
+
+    // 5. Charge
+    w.sub.charge(&w.keeper, &id);
+    let snap4 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on charge");
+    assert_eq!(snap4, w.sub.get_mandate(&id));
+    assert_eq!(snap4.charges_made, 1);
+    assert_eq!(snap4.status, MandateStatus::Active);
+
+    // 6. Upgrade
+    let dearer_plan = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer_plan);
+    let snap_up = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on upgrade");
+    assert_eq!(snap_up, w.sub.get_mandate(&id));
+    assert_eq!(snap_up.plan_id, dearer_plan);
+    assert_eq!(snap_up.amount, PRICE * 2);
+
+    // 7. Refund
+    w.minter.mint(&w.merchant, &10_000);
+    w.sub.refund(&w.merchant, &id, &500);
+    let snap_ref = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on refund");
+    assert_eq!(snap_ref, w.sub.get_mandate(&id));
+    assert_eq!(snap_ref.refunded, 500);
+
+    // 8. Cancel (subscriber)
+    w.sub.cancel(&user, &id);
+    let snap5 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on cancel");
+    assert_eq!(snap5, w.sub.get_mandate(&id));
+    assert_eq!(snap5.status, MandateStatus::Cancelled);
+
+    // 9. End mandate (merchant) - test on a separate mandate
+    let id2 = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.end_mandate(&w.merchant, &id2);
+    let snap6 = find_latest_snapshot(&w.env, id2).expect("MandateUpdated emitted on end_mandate");
+    assert_eq!(snap6, w.sub.get_mandate(&id2));
+    assert_eq!(snap6.status, MandateStatus::Cancelled);
+
+    // 10. Complete mandate on final charge
+    let id3 = w.sub.subscribe(&user, &plan_id, &1);
+    w.sub.charge(&w.keeper, &id3);
+    let snap7 =
+        find_latest_snapshot(&w.env, id3).expect("MandateUpdated emitted on mandate completion");
+    assert_eq!(snap7, w.sub.get_mandate(&id3));
+    assert_eq!(snap7.charges_made, 1);
+    assert_eq!(snap7.status, MandateStatus::Completed);
 }
