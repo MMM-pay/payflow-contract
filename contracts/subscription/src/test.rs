@@ -84,10 +84,20 @@ impl World<'_> {
     }
 
     fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
+        self.plan_priced_with_keeper(PRICE, keeper_bps)
+    }
+
+    /// A plan at an arbitrary price, so rounding at the stroop boundary can be
+    /// exercised without changing the shared `PRICE` used by every other test.
+    fn plan_priced(&self, price: i128) -> u64 {
+        self.plan_priced_with_keeper(price, 0)
+    }
+
+    fn plan_priced_with_keeper(&self, price: i128, keeper_bps: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
             &self.token,
-            &PRICE,
+            &price,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
             &keeper_bps,
@@ -600,6 +610,186 @@ fn constructor_records_its_configuration() {
 fn unknown_mandate_errors() {
     let w = world();
     assert_eq!(w.sub.try_get_mandate(&999), Err(Ok(Error::MandateNotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// Charge quotes
+// ---------------------------------------------------------------------------
+
+/// Acceptance criterion: a quote and the charge that follows agree on the fee
+/// and merchant amount for a price where basis-point rounding actually bites.
+/// 99 stroops at 100 bps is 0.99 stroops, truncated to a zero fee.
+#[test]
+fn quote_matches_charge_for_a_price_that_rounds() {
+    let w = world();
+    let plan_id = w.plan_priced(99);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let quote = w.sub.quote_charge(&id);
+    assert_eq!(
+        quote,
+        ChargeQuote {
+            amount: 99,
+            fee: 0,
+            merchant_amount: 99,
+            due_at: w.env.ledger().timestamp(),
+            chargeable: true,
+        }
+    );
+
+    w.sub.charge(&w.keeper, &id);
+
+    // Settlement moved exactly the integers the quote promised.
+    assert_eq!(w.token_client.balance(&w.merchant), quote.merchant_amount);
+    assert_eq!(w.token_client.balance(&w.fee_to), quote.fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - quote.amount);
+
+    // The same quote now reflects the new schedule.
+    let after = w.sub.quote_charge(&id);
+    assert_eq!(after.amount, quote.amount);
+    assert_eq!(after.fee, quote.fee);
+    assert_eq!(after.merchant_amount, quote.merchant_amount);
+    assert_eq!(after.due_at, w.env.ledger().timestamp() + MONTH);
+    assert!(!after.chargeable);
+}
+
+/// The merchant amount a quote reports is what the merchant actually receives,
+/// so it excludes the keeper tip even though the subscriber pays `amount`.
+#[test]
+fn quote_merchant_amount_excludes_the_keeper_tip() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let quote = w.sub.quote_charge(&id);
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let tip = (PRICE - fee) * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+
+    assert_eq!(quote.amount, PRICE);
+    assert_eq!(quote.fee, fee);
+    assert_eq!(quote.merchant_amount, PRICE - fee - tip);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&w.merchant), quote.merchant_amount);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&w.fee_to), quote.fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - quote.amount);
+}
+
+#[test]
+fn quote_unknown_mandate_errors() {
+    let w = world();
+    assert_eq!(
+        w.sub.try_quote_charge(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn quote_never_changes_state() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    let mandate_before = w.sub.get_mandate(&id);
+    let balances_before = (
+        w.token_client.balance(&w.merchant),
+        w.token_client.balance(&w.fee_to),
+        w.token_client.balance(&w.keeper),
+        w.vault.balance(&user, &w.token),
+    );
+    let events_before = w.env.events().all().events().len();
+
+    for _ in 0..3 {
+        w.sub.quote_charge(&id);
+    }
+
+    assert_eq!(w.sub.get_mandate(&id), mandate_before);
+    assert_eq!(
+        (
+            w.token_client.balance(&w.merchant),
+            w.token_client.balance(&w.fee_to),
+            w.token_client.balance(&w.keeper),
+            w.vault.balance(&user, &w.token),
+        ),
+        balances_before
+    );
+    assert_eq!(w.env.events().all().events().len(), events_before);
+}
+
+/// `chargeable` must agree with `is_due` in every status, not just the happy
+/// path. Vault balance is intentionally not part of either check.
+#[test]
+fn quote_chargeable_mirrors_is_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // Active and due.
+    let capped = w.sub.subscribe(&user, &plan_id, &1);
+    assert!(w.sub.is_due(&capped));
+    assert!(w.sub.quote_charge(&capped).chargeable);
+    w.sub.charge(&w.keeper, &capped);
+    // Completed by the charge cap.
+    assert_eq!(w.sub.get_mandate(&capped).status, MandateStatus::Completed);
+    assert!(!w.sub.is_due(&capped));
+    assert!(!w.sub.quote_charge(&capped).chargeable);
+
+    // Paused.
+    let paused = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.set_paused(&user, &paused, &true);
+    assert!(!w.sub.is_due(&paused));
+    assert!(!w.sub.quote_charge(&paused).chargeable);
+
+    // Cancelled.
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.cancel(&user, &cancelled);
+    assert!(!w.sub.is_due(&cancelled));
+    assert!(!w.sub.quote_charge(&cancelled).chargeable);
+
+    // Active but waiting for the next period.
+    let waiting = w.sub.subscribe(&user, &plan_id, &0);
+    w.sub.charge(&w.keeper, &waiting);
+    assert!(!w.sub.is_due(&waiting));
+    assert!(!w.sub.quote_charge(&waiting).chargeable);
+
+    w.advance(MONTH);
+    assert!(w.sub.is_due(&waiting));
+    assert!(w.sub.quote_charge(&waiting).chargeable);
+}
+
+/// A quote is a pure read, so it must work with no authorization at all.
+#[test]
+fn quote_needs_no_authorization() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    w.env.mock_auths(&[]);
+    assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
+}
+
+/// A price large enough to overflow the fee multiplication is reported as
+/// `AmountOverflow` by both quote and charge instead of panicking.
+#[test]
+fn quote_and_charge_report_fee_overflow() {
+    let w = world();
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = w.subscriber(1_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    assert_eq!(w.sub.try_quote_charge(&id), Err(Ok(Error::AmountOverflow)));
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+    // The failed charge left the mandate untouched.
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ pub use events::{
     Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, PauseChanged, Subscribed,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
-pub use types::{DataKey, Mandate, MandateStatus, Plan};
+pub use types::{ChargeQuote, DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::MAX_KEEPER_BPS;
 use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
@@ -206,18 +206,10 @@ impl Subscription {
         }
 
         // The mandate's own fee and tip, both frozen when the subscriber
-        // opened it. Neither is read from the plan or the config here.
-        let fee = mandate.amount * (mandate.fee_bps as i128) / BPS_DENOMINATOR;
-        let merchant_gross = mandate.amount - fee;
-
-        // Tip is a share of the merchant's own money, capped again here so a
-        // mandate can never pay out more than MAX_KEEPER_BPS of that share.
-        let tip_bps = mandate.keeper_bps.min(MAX_KEEPER_BPS);
-        let tip = merchant_gross
-            .checked_mul(tip_bps as i128)
-            .ok_or(Error::AmountOverflow)?
-            / BPS_DENOMINATOR;
-        let merchant_amount = merchant_gross - tip;
+        // opened it. Neither is read from the plan or the config here. This is
+        // the same helper `quote_charge` uses, so the quote and the settlement
+        // cannot drift apart.
+        let (fee, tip, merchant_amount) = Self::fee_split(&mandate)?;
 
         let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
         let vault = VaultClient::new(&env, &vault_addr);
@@ -272,6 +264,31 @@ impl Subscription {
         }
 
         Ok(())
+    }
+
+    /// Read-only preview of what `charge` would pay right now.
+    ///
+    /// `amount` is the subscriber's total debit, `fee` the protocol share and
+    /// `merchant_amount` the merchant's net share after both the fee and the
+    /// keeper tip. `due_at` is the mandate's next charge timestamp, and
+    /// `chargeable` mirrors `is_due`: active status, cap not reached, and the
+    /// ledger time has reached `due_at`. Like `is_due`, it does not check the
+    /// vault balance. Quoting reads storage but never writes it.
+    ///
+    /// The split comes from the same private helper `charge` uses, so a client
+    /// can display the exact integers settlement will move rather than
+    /// reimplementing the rounding.
+    pub fn quote_charge(env: Env, mandate_id: u64) -> Result<ChargeQuote, Error> {
+        let mandate = Self::read_mandate(&env, mandate_id)?;
+        let (fee, _tip, merchant_amount) = Self::fee_split(&mandate)?;
+
+        Ok(ChargeQuote {
+            amount: mandate.amount,
+            fee,
+            merchant_amount,
+            due_at: mandate.next_charge,
+            chargeable: Self::is_chargeable(&mandate, env.ledger().timestamp()),
+        })
     }
 
     /// Terminate a mandate permanently. Only the subscriber may do this, and it
@@ -402,13 +419,7 @@ impl Subscription {
     /// check vault balance; a funded-ness check is the caller's job.
     pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
         let m = Self::read_mandate(&env, mandate_id)?;
-        if m.status != MandateStatus::Active {
-            return Ok(false);
-        }
-        if m.max_charges != 0 && m.charges_made >= m.max_charges {
-            return Ok(false);
-        }
-        Ok(env.ledger().timestamp() >= m.next_charge)
+        Ok(Self::is_chargeable(&m, env.ledger().timestamp()))
     }
 
     /// How many mandates `subscriber` has opened, in any state.
@@ -472,6 +483,46 @@ impl Subscription {
             .persistent()
             .get(&DataKey::Mandate(id))
             .ok_or(Error::MandateNotFound)
+    }
+
+    /// Split a mandate's frozen price into the protocol fee, the keeper tip and
+    /// the merchant's net share.
+    ///
+    /// Both `charge` and `quote_charge` call this, so the numbers a client
+    /// quotes are the numbers settlement moves. All arithmetic is integer
+    /// basis points and truncated the same way in both paths. `checked_mul`
+    /// returns `AmountOverflow` rather than panicking for a price large enough
+    /// to overflow `i128`.
+    fn fee_split(mandate: &Mandate) -> Result<(i128, i128, i128), Error> {
+        let fee = mandate
+            .amount
+            .checked_mul(mandate.fee_bps as i128)
+            .ok_or(Error::AmountOverflow)?
+            / BPS_DENOMINATOR;
+        let merchant_gross = mandate.amount - fee;
+
+        // The tip is a share of the merchant's own money, capped again here so
+        // a mandate can never pay out more than MAX_KEEPER_BPS of that share.
+        let tip_bps = mandate.keeper_bps.min(MAX_KEEPER_BPS);
+        let tip = merchant_gross
+            .checked_mul(tip_bps as i128)
+            .ok_or(Error::AmountOverflow)?
+            / BPS_DENOMINATOR;
+
+        Ok((fee, tip, merchant_gross - tip))
+    }
+
+    /// True when `charge` would pass its status, cap and timing checks. Shared
+    /// by `charge`, `is_due` and `quote_charge` so the three cannot disagree.
+    /// Vault balance is deliberately not part of this check.
+    fn is_chargeable(mandate: &Mandate, now: u64) -> bool {
+        if mandate.status != MandateStatus::Active {
+            return false;
+        }
+        if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
+            return false;
+        }
+        now >= mandate.next_charge
     }
 
     fn write_mandate(env: &Env, mandate: &Mandate) {
