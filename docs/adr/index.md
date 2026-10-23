@@ -12,3 +12,4 @@ choice changes. They are linked from [README.md](../../README.md).
 | [0003](./0003-constructors-not-initialize.md) | Constructors instead of `initialize` |
 | [0004](./0004-per-position-indexes.md) | Per-position indexes |
 | [0005](./0005-permissionless-charge.md) | Permissionless `charge` |
+| [0006](./0006-prorated-upgrade-charging.md) | Prorated upgrade charging |
