@@ -47,4 +47,11 @@ pub enum Error {
     /// upgrade: the mandate's merchant decides who is paid and who may
     /// refund.
     DifferentMerchant = 17,
+    /// The seat count is zero, or exceeds the plan's `max_seats`.
+    InvalidSeats = 18,
+    /// The seat count was supplied for a plan that is not seat-based, or was
+    /// omitted for one that is.
+    SeatsNotApplicable = 19,
+    /// `price * seats` overflows `i128`.
+    SeatsOverflow = 20,
 }
