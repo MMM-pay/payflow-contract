@@ -63,18 +63,6 @@ change the contract interface.
   payflow-backend, payflow-frontend and payflow-docs need the new
   `subscription_upgraded` event and the new error codes. Closes #94.
 
-- **vault:** the subscription contract can charge the shortfall through the
-  token allowance when a subscriber's vault balance is short. A subscriber
-  opts in per (user, token) with the new `set_allowance_fallback` entry point;
-  when `charge` finds the vault balance below the amount due, it pulls the
-  remaining shortfall from the subscriber's wallet with `transfer_from` against
-  the SEP-41 allowance granted to the vault, capped at the mandate's amount and
-  rejected if the allowance has expired. Opt-in is off by default, so existing
-  behaviour is unchanged. The new `AllowanceFallbackSet` event and the new
-  `AllowanceExceeded` and `AllowanceExpired` error codes need handling in
-  payflow-backend, payflow-frontend and payflow-docs. Closes the vault-shortfall
-  issue.
-
 ### Changed
 
 - **contracts:** document every public item across all crates and enforce
@@ -219,4 +207,83 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   through the real `charge` path in the subscription contract.
 - **Test: token transfer failure behaviour** — adds `payflow-test-token`, a
   test-only token contract that can be configured to fail transfers globally or
-  for targeted 
+  for targeted recipient addresses. Verifies in `payflow-vault` and
+  `payflow-subscription` that failing transfers revert transactions completely
+  (deposits, withdrawals, debits, and charges across merchant, fee, and tip
+  debits) and keep vault internal balances and token holdings consistent.
+- `docs/adr/`: five architecture decision records (vault/billing split,
+  `now + period` scheduling, constructors, per-position indexes,
+  permissionless `charge`), linked from README.
+
+Interface changes (`set_profile`, `profile`, `deactivate_page`,
+`PlanSuccessorSet`, `set_successor`, `Plan.successor_id`, `create_plan`'s
+`keeper_bps`, `charge`'s `keeper` argument and the new `tip`/`keeper`/
+`keeper_bps` event fields) ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`: follow-up issues to consume the new fields and pass the keeper
+argument are tracked in the pull request.
+
+### Changed
+
+- **Breaking:** `Mandate` gains `paused_until` (the self-lifting pause
+  schedule, 0 for none) and `refunded` (the running total the merchant has
+  refunded). Existing deployments must be redeployed because stored mandates
+  do not contain the new fields. This also requires downstream updates in
+  `payflow-backend`, `payflow-frontend` and `payflow-docs`.
+- **Breaking:** `Mandate` gains `created_at`, set when `subscribe` opens it and
+  returned by `get_mandate`. Existing deployments must be redeployed because
+  stored mandates do not contain the new field. This also requires downstream
+  updates in `payflow-backend`, `payflow-frontend` and `payflow-docs`; follow-up
+  issues should be linked in the pull request.
+- **Breaking:** `charge` takes the settling `keeper: Address` and requires its
+  authorization; it no longer settles without a signature. Any address may
+  still act as keeper.
+- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
+  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
+  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
+  and `Mandate` values do not decode into the new shape.
+- **Breaking:** `Plan` gains `successor_id` (0 = the plan has no successor),
+  returned by `get_plan` and written by `set_successor`. Existing testnet
+  deployments must be redeployed: stored `Plan` values do not decode into the
+  new shape. This also requires downstream updates in `payflow-backend`,
+  `payflow-frontend` and `payflow-docs`; follow-up issues should be linked in the
+  pull request.
+- **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+  take `start` and `limit` and return at most 50 ids per call.
+- **Breaking:** `initialize` is replaced by `__constructor` in all three
+  contracts.
+- `rust-toolchain.toml` names the `wasm32v1-none` target that
+  `stellar contract build` uses.
+
+### Tests
+
+- 42 → 63 tests, covering paging limits, entry footprint limits, merchant
+  ending and constructor configuration.
+- **New tests for this unreleased set:** scheduled pauses (no charge before
+  `until`, self-resume with only the keeper's signature, manual resume,
+  extension, rejected past dates and foreign signers), `committed_per_period`
+  (mixed-period hand calculations, exclusion of paused/cancelled/completed
+  mandates, per-subscriber and per-token isolation), refunds (over-refund
+  rejected, cap grows with charges, works on cancelled mandates, merchant
+  signature required, event links the refund to the mandate) and the vault
+  allowlist (off by default, unlisted deposits rejected, removal blocks
+  deposits but not withdrawals, admin auth required, no funds moved).
+- **Keeper tip tests:** the tip is paid from the merchant's share, the
+  subscriber pays the same total with or without it, a missing or wrong signer
+  cannot settle or collect, and the registry rejects a tip above the cap.
+- **New test: `admin_has_no_path_to_user_funds`** — asserts that `set_subscription`
+  does not change any user balances.
+- **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
+  is transferred to the `fee_to` address when a mandate is charged.
+- **New test: `set_successor`** — the replacement is stored on the retired plan
+  through `get_plan`, self-successor, unknown-successor and cross-merchant
+  pointers are rejected, a different token is rejected, and the merchant must
+  sign.
+
+## [0.1.0] - 2026-09-02
+
+First testnet deployment: plan registry, vault and subscription contracts with
+permissionless `charge`, spend caps, pause and cancel, and a capped protocol
+fee.
+
+[0.2.0]: https://github.com/MMM-pay/payflow-contract/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/MMM-pay/payflow-contract/releases/tag/v0.1.0
