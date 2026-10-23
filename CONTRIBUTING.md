@@ -1,6 +1,6 @@
 # Contributing to Payflow Contracts
 
-## Before you start
+# # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
 Issues carry a complexity label that maps to the Drips Wave point value.
@@ -33,7 +33,17 @@ A PR cannot merge unless all CI jobs pass:
 | `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
-Run all four locally before pushing.
+Install [just](https://just.systems/) to run the same four checks locally:
+
+```bash
+just check
+```
+
+The `check` recipe runs formatting, clippy, tests, and the wasm build. You can
+also run `just build` by itself. For deployment and the end-to-end smoke test,
+use `just deploy <network> <identity>` and `just demo <network>` respectively.
+Deployment defaults to the `testnet` network and the `payflow-deployer`
+identity; the demo defaults to `testnet`.
 
 ## Code standards
 
