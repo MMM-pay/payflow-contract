@@ -38,3 +38,14 @@ pub struct ProfileUpdated {
     pub name: String,
     pub url: String,
 }
+
+/// Emitted when a merchant renames a plan.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanRenamed {
+    #[topic]
+    pub merchant: Address,
+    #[topic]
+    pub plan_id: u64,
+    pub name: String,
+}

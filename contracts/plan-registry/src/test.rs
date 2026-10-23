@@ -587,3 +587,114 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
 }
+
+#[test]
+fn set_plan_name_happy_path() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Pro Monthly");
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Demo Monthly"),
+        &0,
+    );
+
+    client.set_plan_name(&merchant, &id, &name);
+    assert_eq!(client.get_plan(&id).name, name);
+}
+
+#[test]
+fn set_plan_name_rejects_non_owner() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Demo Monthly"),
+        &0,
+    );
+
+    let res = client.try_set_plan_name(&attacker, &id, &String::from_str(&env, "New Name"));
+    assert_eq!(res, Err(Ok(Error::NotPlanOwner)));
+}
+
+#[test]
+fn set_plan_name_rejects_overlong_name() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Demo Monthly"),
+        &0,
+    );
+
+    let too_long = "x".repeat(MAX_NAME_LEN as usize + 1);
+    let res = client.try_set_plan_name(&merchant, &id, &String::from_str(&env, &too_long));
+    assert_eq!(res, Err(Ok(Error::PlanNameTooLong)));
+}
+
+#[test]
+fn set_plan_name_accepts_name_at_length_limit() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Demo Monthly"),
+        &0,
+    );
+
+    let at_limit = "x".repeat(MAX_NAME_LEN as usize);
+    client.set_plan_name(&merchant, &id, &String::from_str(&env, &at_limit));
+    assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
+}
+
+#[test]
+fn set_plan_name_emits_plan_renamed() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Pro Monthly");
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Demo Monthly"),
+        &0,
+    );
+
+    // Verify PlanCreated was emitted during create_plan
+    let after_create = env.events().all().events().len();
+    assert_eq!(after_create, 1, "PlanCreated should have been emitted");
+
+    client.set_plan_name(&merchant, &id, &name);
+
+    // Verify PlanRenamed was emitted - check the last event
+    let all_events = env.events().all();
+    let last = all_events.events().last().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(event_name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_renamed".try_into().unwrap();
+    assert_eq!(event_name, &expected);
+
+    // Verify topics: merchant, plan_id, name
+    assert_eq!(body.topics.len(), 3);
+}

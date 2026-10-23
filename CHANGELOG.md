@@ -52,6 +52,13 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ## Unreleased
 
+### Added
+- `plan-registry:set_plan_name(merchant, plan_id, name)`: a merchant can rename
+  any of its plans. The name is bounded by `MAX_NAME_LEN` bytes (64); longer
+  names are rejected with `PlanNameTooLong`. Only the plan's merchant may rename
+  it. Emits `PlanRenamed { merchant, plan_id, name }` so indexers and the UI can
+  update immediately.
+
 ### Security
 
 - **Settlement no longer depends on one operator.** A plan may set

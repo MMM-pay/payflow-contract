@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use events::{PlanCreated, PlanRenamed, PlanStatusChanged, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
@@ -171,6 +171,51 @@ impl PlanRegistry {
             merchant,
             plan_id,
             active,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Set the name of a plan. Only the plan's merchant may rename it.
+    /// The name is bounded by `MAX_NAME_LEN` bytes; longer names are rejected.
+    /// Emits `PlanRenamed` so indexers and the UI can update immediately.
+    pub fn set_plan_name(
+        env: Env,
+        merchant: Address,
+        plan_id: u64,
+        name: String,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        if name.len() > MAX_NAME_LEN {
+            return Err(Error::PlanNameTooLong);
+        }
+
+        let mut plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Plan(plan_id))
+            .ok_or(Error::PlanNotFound)?;
+
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+
+        plan.name = name.clone();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Plan(plan_id), &plan);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Plan(plan_id),
+            PERSIST_THRESHOLD,
+            PERSIST_BUMP,
+        );
+
+        PlanRenamed {
+            merchant,
+            plan_id,
+            name,
         }
         .publish(&env);
 
