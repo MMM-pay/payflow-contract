@@ -984,7 +984,7 @@ mod contract {
     /// Update the admin address. Only the current admin may call this.
     /// The new admin takes effect immediately; the old admin loses authority.
     pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-        let current_admin: Address = self::admin(env.clone())?;
+        let current_admin: Address = Self::admin(env.clone())?;
         current_admin.require_auth();
 
         env.storage()

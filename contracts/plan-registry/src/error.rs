@@ -31,4 +31,12 @@ pub enum Error {
     KeeperBpsTooHigh = 11,
     /// The admin has been updated to a new address.
     AdminUpdated = 12,
+    /// Description too long.
+    DescriptionTooLong = 13,
+    /// A plan cannot be its own successor.
+    SelfSuccessor = 14,
+    /// Successor plan not found.
+    SuccessorNotFound = 15,
+    /// Successor uses a different token.
+    SuccessorTokenMismatch = 16,
 }

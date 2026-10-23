@@ -19,4 +19,8 @@ pub enum Error {
     SubscriptionNotSet = 5,
     /// The admin has been updated to a new address.
     AdminUpdated = 6,
+    /// Deposit cap exceeded.
+    DepositCapExceeded = 7,
+    /// Token not allowed.
+    TokenNotAllowed = 8,
 }
