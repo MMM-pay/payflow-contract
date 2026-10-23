@@ -10,6 +10,9 @@
   <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
   </a>
+  <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
+    <img alt="Coverage" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push&amp;job=coverage&amp;label=coverage"/>
+  </a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.96-orange"/>
   <img alt="soroban-sdk" src="https://img.shields.io/badge/soroban--sdk-26-blue"/>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green"/>
@@ -95,6 +98,11 @@ subscriber pays.
 - A keeper tip is capped at 5% of the merchant's share (`MAX_KEEPER_BPS = 500`)
   and comes out of that share, never out of the subscriber's payment. It is
   frozen into the mandate when it is opened.
+- `upgrade` moves a mandate onto another plan of the same merchant and token.
+  A more expensive plan collects the price difference for the part of the
+  current period that is still ahead, prorated and rounded in the subscriber's
+  favour; a cheaper plan takes effect at the next charge and never refunds
+  anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
 
 ## Design notes
 
@@ -110,7 +118,7 @@ costs the same whether the merchant has one subscriber or a million, and nobody
 can block a merchant by opening throwaway mandates until a list outgrows the
 ledger's entry size limit.
 
-**Paged reads.** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+**Paged reads.** `merchant_plans`, `token_plans`, `merchant_mandates` and `subscriber_mandates`
 take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
@@ -186,6 +194,50 @@ Smoke-test a live deployment end to end:
 
 ```bash
 ./scripts/demo.sh testnet   # reads deployments/testnet.env
+```
+
+## TypeScript clients
+
+Install the generated clients from npm:
+
+```bash
+npm install @mmm-pay/contracts @stellar/stellar-sdk
+```
+
+Use the generated client with the testnet RPC to read contract state:
+
+```ts
+import { Networks } from "@stellar/stellar-sdk";
+import { PlanRegistryClient } from "@mmm-pay/contracts";
+
+const registry = new PlanRegistryClient({
+  contractId: "YOUR_PLAN_REGISTRY_ID",
+  networkPassphrase: Networks.TESTNET,
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+
+const transaction = await registry.next_plan_id();
+await transaction.simulate();
+const nextPlanId = transaction.result.unwrap();
+```
+
+The package also exports `VaultClient` and `SubscriptionClient`, with
+contract-specific types under `PlanRegistryTypes`, `VaultTypes` and
+`SubscriptionTypes`. Mutating methods return transactions that integrators
+must authorize and submit with the Stellar SDK.
+
+CI builds and verifies the bindings on contract changes. Publishing a GitHub
+release publishes the matching version to npm; the repository needs an
+`NPM_TOKEN` secret. The manual **TypeScript bindings testnet smoke** workflow
+checks the live registry's `next_plan_id` read without a signing key.
+
+To regenerate and check the package locally after changing a contract:
+
+```bash
+stellar contract build
+./scripts/generate-bindings.sh
+npm ci --prefix bindings
+npm test --prefix bindings
 ```
 
 ## Repository layout

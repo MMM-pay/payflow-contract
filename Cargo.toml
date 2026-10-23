@@ -10,6 +10,7 @@ repository = "https://github.com/MMM-pay/payflow-contract"
 
 [workspace.dependencies]
 soroban-sdk = "29"
+payflow-common = { path = "contracts/common" }
 
 [profile.release]
 opt-level = "z"
