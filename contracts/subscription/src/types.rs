@@ -84,6 +84,11 @@ pub struct Mandate {
     /// merchant can never refund more than it has collected, so this counter
     /// is the hard cap `refund` enforces.
     pub refunded: i128,
+    /// Maximum continuous pause length in seconds, frozen at subscribe time
+    /// from the plan's `max_pause_secs`. 0 means unlimited. Mandates opened
+    /// before this field existed decode to 0 and are therefore unlimited, so
+    /// they are unaffected.
+    pub max_pause_secs: u64,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
 }

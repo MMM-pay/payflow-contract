@@ -4,6 +4,11 @@ use soroban_sdk::{contracttype, Address, String};
 
 /// `Plan` is defined once in `payflow-shared` and used by both this contract
 /// and the subscription contract that decodes it, so the two cannot drift.
+///
+/// Note: the `max_pause_secs` field (0 = unlimited) is part of `Plan` in
+/// `payflow-shared`; this crate re-exports that definition, so no local
+/// change to the struct is required here. The subscription contract's mirror
+/// of `Plan` must be updated in lockstep with `payflow-shared`.
 pub use payflow_shared::Plan;
 
 /// A merchant's self-declared profile, shown to subscribers alongside the

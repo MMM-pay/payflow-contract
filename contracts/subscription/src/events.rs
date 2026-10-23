@@ -106,6 +106,23 @@ pub struct PauseChanged {
     pub paused: bool,
 }
 
+/// Emitted when a mandate's pause exceeds its merchant-set maximum and the
+/// mandate is cancelled by `expire_pause`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseExpired {
+    /// ID of the expired mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber.
+    #[topic]
+    pub subscriber: Address,
+    /// Maximum pause length in seconds that was exceeded.
+    pub max_pause_secs: u64,
+    /// Timestamp at which the pause began.
+    pub paused_at: u64,
+}
+
 /// Emitted when a mandate reaches its maximum allowed charges and completes.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -47,4 +47,10 @@ pub enum Error {
     /// upgrade: the mandate's merchant decides who is paid and who may
     /// refund.
     DifferentMerchant = 17,
+    /// The pause has lasted longer than the maximum pause length frozen into
+    /// the mandate, so it can be expired.
+    PauseNotExpired = 18,
+    /// The pause has exceeded its maximum length and must be expired with
+    /// `expire_pause`, not resumed or extended.
+    PauseExpired = 19,
 }
