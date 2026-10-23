@@ -3,8 +3,8 @@
 use super::*;
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _},
-    Address, Env, String, Vec,
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, String, Vec,
 };
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
@@ -14,6 +14,15 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     let id = env.register(PlanRegistry, (admin.clone(),));
     let client = PlanRegistryClient::new(&env, &id);
     (env, client, admin)
+}
+
+#[test]
+fn version_matches_package_version() {
+    let (env, client, _) = setup();
+    assert_eq!(
+        client.version(),
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -34,6 +43,7 @@ fn create_plan_assigns_sequential_ids() {
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     let b = client.create_plan(
@@ -42,6 +52,7 @@ fn create_plan_assigns_sequential_ids() {
         &2_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -67,6 +78,7 @@ fn create_plan_stores_fields() {
         &5_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     let plan = client.get_plan(&id);
@@ -91,6 +103,7 @@ fn create_plan_stores_the_keeper_tip() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &MAX_KEEPER_BPS,
     );
 
@@ -109,6 +122,7 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &(MAX_KEEPER_BPS + 1),
     );
 
@@ -127,6 +141,7 @@ fn create_plan_rejects_zero_amount() {
         &0,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -143,6 +158,7 @@ fn create_plan_rejects_negative_amount() {
         &-1,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -159,6 +175,7 @@ fn create_plan_rejects_sub_minimum_period() {
         &1_000,
         &(MIN_PERIOD - 1),
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
@@ -181,6 +198,7 @@ fn set_plan_active_toggles() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -203,6 +221,7 @@ fn set_plan_active_rejects_non_owner() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -230,6 +249,7 @@ fn create_plan_stores_the_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(
@@ -251,6 +271,7 @@ fn create_plan_accepts_an_empty_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, ""),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
@@ -269,6 +290,7 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &at_limit),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
@@ -287,6 +309,7 @@ fn create_plan_rejects_an_overlong_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, &too_long),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
@@ -300,7 +323,15 @@ fn merchant_plans_pages_are_bounded() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
     }
 
     assert_eq!(client.merchant_plan_count(&merchant), MAX_PAGE + 3);
@@ -450,7 +481,15 @@ fn deactivate_page_turns_off_a_page_of_plans() {
 
     let mut ids = Vec::<u64>::new(&env);
     for _ in 0..7 {
-        ids.push_back(client.create_plan(&merchant, &token, &1_000, &3_600, &name.clone(), &0));
+        ids.push_back(client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name.clone(),
+            &String::from_str(&env, ""),
+            &0,
+        ));
     }
 
     assert_eq!(client.deactivate_page(&merchant, &2, &3), 3);
@@ -472,7 +511,15 @@ fn deactivate_page_is_idempotent() {
     let token = Address::generate(&env);
     let name = String::from_str(&env, "Plan");
 
-    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
     assert!(!client.get_plan(&id).active);
@@ -489,7 +536,15 @@ fn deactivate_page_respects_the_page_cap() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
     }
 
     // A huge limit is capped at MAX_PAGE.
@@ -514,8 +569,24 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
 
     let a = Address::generate(&env);
     let b = Address::generate(&env);
-    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0);
-    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0);
+    let a_id = client.create_plan(
+        &a,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let b_id = client.create_plan(
+        &b,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
 
     client.deactivate_page(&a, &0, &10);
 
@@ -537,6 +608,7 @@ fn deactivate_page_requires_the_merchants_auth() {
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -562,6 +634,7 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
@@ -583,6 +656,7 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));

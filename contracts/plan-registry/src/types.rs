@@ -1,3 +1,5 @@
+//! Data types and storage keys for the plan registry contract.
+
 use soroban_sdk::{contracttype, Address, String};
 
 /// `Plan` is defined once in `payflow-shared` and used by both this contract
@@ -10,6 +12,7 @@ pub use payflow_shared::Plan;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
+    /// Account address of the merchant.
     pub merchant: Address,
     /// Display name, e.g. "Acme Corp". At most MAX_NAME_LEN bytes.
     pub name: String,
@@ -17,11 +20,15 @@ pub struct Profile {
     pub url: String,
 }
 
+/// Storage keys used to partition instance and persistent storage for the plan registry.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// Contract administrator address.
     Admin,
+    /// Counter storing the next sequential plan ID to be allocated.
     NextPlanId,
+    /// A published plan record stored by its unique ID.
     Plan(u64),
     /// Number of plans a merchant has published.
     MerchantPlanCount(Address),
@@ -29,4 +36,8 @@ pub enum DataKey {
     MerchantPlan(Address, u32),
     /// A merchant's self-declared profile.
     Profile(Address),
+    /// Number of plans priced in a given token.
+    TokenPlanCount(Address),
+    /// The n-th plan priced in a given token (0-based).
+    TokenPlan(Address, u32),
 }
