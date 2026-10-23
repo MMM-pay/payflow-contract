@@ -3,8 +3,8 @@
 use super::*;
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _},
-    Address, Env, String, Vec,
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, String, Vec,
 };
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
@@ -14,6 +14,15 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     let id = env.register(PlanRegistry, (admin.clone(),));
     let client = PlanRegistryClient::new(&env, &id);
     (env, client, admin)
+}
+
+#[test]
+fn version_matches_package_version() {
+    let (env, client, _) = setup();
+    assert_eq!(
+        client.version(),
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -34,6 +43,7 @@ fn create_plan_assigns_sequential_ids() {
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     let b = client.create_plan(
@@ -42,6 +52,7 @@ fn create_plan_assigns_sequential_ids() {
         &2_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -67,6 +78,7 @@ fn create_plan_stores_fields() {
         &5_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     let plan = client.get_plan(&id);
@@ -91,6 +103,7 @@ fn create_plan_stores_the_keeper_tip() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &MAX_KEEPER_BPS,
     );
 
@@ -109,6 +122,7 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &(MAX_KEEPER_BPS + 1),
     );
 
@@ -127,6 +141,7 @@ fn create_plan_rejects_zero_amount() {
         &0,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -143,6 +158,7 @@ fn create_plan_rejects_negative_amount() {
         &-1,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
@@ -159,6 +175,7 @@ fn create_plan_rejects_sub_minimum_period() {
         &1_000,
         &(MIN_PERIOD - 1),
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
@@ -181,6 +198,7 @@ fn set_plan_active_toggles() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -203,6 +221,7 @@ fn set_plan_active_rejects_non_owner() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -230,6 +249,7 @@ fn create_plan_stores_the_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(
@@ -251,6 +271,7 @@ fn create_plan_accepts_an_empty_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, ""),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
@@ -269,6 +290,7 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &at_limit),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
@@ -287,6 +309,7 @@ fn create_plan_rejects_an_overlong_name() {
         &1_000,
         &604_800,
         &String::from_str(&env, &too_long),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
@@ -300,7 +323,15 @@ fn merchant_plans_pages_are_bounded() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
     }
 
     assert_eq!(client.merchant_plan_count(&merchant), MAX_PAGE + 3);
@@ -450,7 +481,15 @@ fn deactivate_page_turns_off_a_page_of_plans() {
 
     let mut ids = Vec::<u64>::new(&env);
     for _ in 0..7 {
-        ids.push_back(client.create_plan(&merchant, &token, &1_000, &3_600, &name.clone(), &0));
+        ids.push_back(client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name.clone(),
+            &String::from_str(&env, ""),
+            &0,
+        ));
     }
 
     assert_eq!(client.deactivate_page(&merchant, &2, &3), 3);
@@ -472,7 +511,15 @@ fn deactivate_page_is_idempotent() {
     let token = Address::generate(&env);
     let name = String::from_str(&env, "Plan");
 
-    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
     assert!(!client.get_plan(&id).active);
@@ -489,7 +536,15 @@ fn deactivate_page_respects_the_page_cap() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
     }
 
     // A huge limit is capped at MAX_PAGE.
@@ -514,8 +569,24 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
 
     let a = Address::generate(&env);
     let b = Address::generate(&env);
-    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0);
-    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0);
+    let a_id = client.create_plan(
+        &a,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let b_id = client.create_plan(
+        &b,
+        &token,
+        &1_000,
+        &3_600,
+        &name,
+        &String::from_str(&env, ""),
+        &0,
+    );
 
     client.deactivate_page(&a, &0, &10);
 
@@ -537,6 +608,7 @@ fn deactivate_page_requires_the_merchants_auth() {
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
 
@@ -562,6 +634,7 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
@@ -583,7 +656,423 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
+        &String::from_str(&env, ""),
         &0,
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
+}
+
+// ---------------------------------------------------------------------------
+// Point a retired plan at its replacement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_successor_stores_the_replacement() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let old_id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let new_id = client.create_plan(
+        &merchant,
+        &token,
+        &2_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    // A freshly published plan has no successor yet.
+    assert_eq!(client.get_plan(&new_id).successor_id, 0);
+
+    client.set_successor(&merchant, &old_id, &new_id);
+
+    assert_eq!(client.get_plan(&old_id).successor_id, new_id);
+    // The replacement itself does not point back at the plan it replaces.
+    assert_eq!(client.get_plan(&new_id).successor_id, 0);
+}
+
+#[test]
+fn set_successor_rejects_a_plan_that_is_its_own_successor() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    let res = client.try_set_successor(&merchant, &id, &id);
+    assert_eq!(res, Err(Ok(Error::SelfSuccessor)));
+    // The pointer was not written.
+    assert_eq!(client.get_plan(&id).successor_id, 0);
+}
+
+#[test]
+fn set_successor_rejects_an_unknown_successor() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    let res = client.try_set_successor(&merchant, &id, &999);
+    assert_eq!(res, Err(Ok(Error::SuccessorNotFound)));
+    assert_eq!(client.get_plan(&id).successor_id, 0);
+}
+
+#[test]
+fn set_successor_rejects_a_plan_of_another_merchant() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let other_id = client.create_plan(
+        &other,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Other Plan"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    // The merchant may only point at plans it owns itself.
+    let res = client.try_set_successor(&merchant, &id, &other_id);
+    assert_eq!(res, Err(Ok(Error::NotPlanOwner)));
+    assert_eq!(client.get_plan(&id).successor_id, 0);
+}
+
+#[test]
+fn set_successor_rejects_a_different_token() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let other_token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let other_id = client.create_plan(
+        &merchant,
+        &other_token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    // A replacement denominated in another asset would reprice differently and
+    // is not a valid successor.
+    let res = client.try_set_successor(&merchant, &id, &other_id);
+    assert_eq!(res, Err(Ok(Error::SuccessorTokenMismatch)));
+    assert_eq!(client.get_plan(&id).successor_id, 0);
+}
+
+#[test]
+fn set_successor_requires_the_merchants_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let merchant = Address::generate(&env);
+    let id = env.register(PlanRegistry, (merchant.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let token = Address::generate(&env);
+    let plan_id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let replacement_id = client.create_plan(
+        &merchant,
+        &token,
+        &2_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    // The merchant signs the call itself, and the signature must cover the
+    // exact invocation: the plan and the replacement it points at.
+    env.mock_auths(&[MockAuth {
+        address: &merchant,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_successor",
+            args: (&merchant, &plan_id, &replacement_id).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_successor(&merchant, &plan_id, &replacement_id);
+    assert_eq!(client.get_plan(&plan_id).successor_id, replacement_id);
+
+    // A different signer cannot stand in for the merchant.
+    let other_signer = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &other_signer,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_successor",
+            args: (&merchant, &plan_id, &replacement_id).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client
+        .try_set_successor(&merchant, &plan_id, &replacement_id)
+        .is_err());
+}
+
+#[test]
+fn set_successor_emits_plan_successor_set() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let old_id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let new_id = client.create_plan(
+        &merchant,
+        &token,
+        &2_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    client.set_successor(&merchant, &old_id, &new_id);
+    assert_eq!(env.events().all().events().len(), 1);
+
+    let last = env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(event_name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_successor_set".try_into().unwrap();
+    assert_eq!(event_name, &expected);
+}
+
+// ----- plan description (#91) -----
+//
+// A plan used to carry a name only, so a subscriber had to leave the app to
+// find out what the plan includes. The description is a short, plain summary
+// bounded at MAX_DESCRIPTION_LEN bytes; it may be empty.
+
+#[test]
+fn create_plan_stores_the_description() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let description = String::from_str(&env, "Monthly consults, unlimited follow-ups");
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &description,
+        &0,
+    );
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.description, description);
+    assert_eq!(plan.name, String::from_str(&env, "Pro Monthly"));
+}
+
+#[test]
+fn an_empty_description_is_allowed() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    assert_eq!(client.get_plan(&id).description, String::from_str(&env, ""));
+}
+
+#[test]
+fn a_description_at_the_limit_is_accepted() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let at_limit = String::from_str(&env, &"x".repeat(MAX_DESCRIPTION_LEN as usize));
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &at_limit,
+        &0,
+    );
+
+    assert_eq!(client.get_plan(&id).description, at_limit);
+}
+
+#[test]
+fn create_plan_rejects_an_overlong_description() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let too_long = String::from_str(&env, &"x".repeat(MAX_DESCRIPTION_LEN as usize + 1));
+    let res = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &too_long,
+        &0,
+    );
+    assert_eq!(res, Err(Ok(Error::DescriptionTooLong)));
+}
+
+// ---------------------------------------------------------------------------
+// Per-token plan index
+// ---------------------------------------------------------------------------
+
+#[test]
+fn token_plans_empty_for_unknown_token() {
+    let (env, client, _admin) = setup();
+    let stranger_token = Address::generate(&env);
+    assert_eq!(client.token_plans(&stranger_token, &0, &10).len(), 0);
+    assert_eq!(client.token_plan_count(&stranger_token), 0);
+}
+
+#[test]
+fn create_plan_indexes_by_token() {
+    let (env, client, _admin) = setup();
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+    let token_usdc = Address::generate(&env);
+    let token_xlm = Address::generate(&env);
+
+    let plan_1 = client.create_plan(
+        &merchant_a,
+        &token_usdc,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "USDC Plan 1"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let plan_2 = client.create_plan(
+        &merchant_b,
+        &token_usdc,
+        &2_000,
+        &604_800,
+        &String::from_str(&env, "USDC Plan 2"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+    let plan_3 = client.create_plan(
+        &merchant_a,
+        &token_xlm,
+        &5_000,
+        &604_800,
+        &String::from_str(&env, "XLM Plan 1"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    assert_eq!(client.token_plan_count(&token_usdc), 2);
+    assert_eq!(
+        client.token_plans(&token_usdc, &0, &10),
+        soroban_sdk::vec![&env, plan_1, plan_2]
+    );
+
+    assert_eq!(client.token_plan_count(&token_xlm), 1);
+    assert_eq!(
+        client.token_plans(&token_xlm, &0, &10),
+        soroban_sdk::vec![&env, plan_3]
+    );
+}
+
+#[test]
+fn token_plans_pages_are_bounded() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+
+    for _ in 0..(MAX_PAGE + 3) {
+        client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name,
+            &String::from_str(&env, ""),
+            &0,
+        );
+    }
+
+    assert_eq!(client.token_plan_count(&token), MAX_PAGE + 3);
+    assert_eq!(client.token_plans(&token, &0, &u32::MAX).len(), MAX_PAGE);
+    assert_eq!(
+        client.token_plans(&token, &MAX_PAGE, &10),
+        soroban_sdk::vec![
+            &env,
+            u64::from(MAX_PAGE) + 1,
+            u64::from(MAX_PAGE) + 2,
+            u64::from(MAX_PAGE) + 3
+        ]
+    );
+    assert_eq!(client.token_plans(&token, &u32::MAX, &u32::MAX).len(), 0);
 }
