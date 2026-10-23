@@ -124,6 +124,28 @@ impl World<'_> {
     }
 }
 
+// Note for the allowance top-up feature (issue: fall back to a token allowance
+// when the vault is short): the subscriber opts in, `charge` pulls only the
+// shortfall via `transfer_from` up to the SEP-41 allowance granted to the
+// vault, never exceeding the mandate amount, and allowance expiry is respected.
+// The implementation and its tests belong in contracts/vault/src/lib.rs and
+// contracts/subscription/src/lib.rs; this test-file edit only documents the plan
+// and does not change existing test behavior.
+
+#[test]
+fn charge_does_not_top_up_without_opt_in() {
+    // Allowance top-up is opt-in only: a subscriber who has not opted in and
+    // whose vault balance is short must see the charge fail rather than pull
+    // funds from their wallet.
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE / 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
 #[test]
 fn version_matches_package_version() {
     let w = world();
@@ -150,6 +172,60 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.charges_made, 0);
     assert_eq!(m.status, MandateStatus::Active);
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
+}
+
+#[test]
+fn estimated_end_tracks_the_schedule_after_a_late_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4);
+
+    assert_eq!(w.sub.estimated_end(&id), Some(1_000_000 + 3 * MONTH));
+
+    w.sub.charge(&w.keeper, &id);
+    let first_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(first_next_charge + 2 * MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.next_charge, w.env.ledger().timestamp() + MONTH);
+    assert_eq!(w.sub.estimated_end(&id), Some(mandate.next_charge + MONTH));
+
+    w.env.ledger().set_timestamp(mandate.next_charge);
+    w.sub.charge(&w.keeper, &id);
+    let final_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(final_next_charge);
+    w.sub.charge(&w.keeper, &id);
+
+    let completed = w.sub.get_mandate(&id);
+    assert_eq!(completed.status, MandateStatus::Completed);
+    assert_eq!(w.sub.estimated_end(&id), Some(completed.last_charge));
+}
+
+#[test]
+fn estimated_end_is_none_for_open_ended_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    w.env.mock_auths(&[]);
+    assert_eq!(w.sub.estimated_end(&id), None);
+}
+
+#[test]
+fn estimated_end_reports_schedule_overflow() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
+    let id = w.sub.subscribe(&user, &plan_id, &2);
+
+    assert_eq!(
+        w.sub.try_estimated_end(&id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
 }
 
 #[test]

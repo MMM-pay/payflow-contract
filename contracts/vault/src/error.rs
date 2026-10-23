@@ -24,4 +24,12 @@ pub enum Error {
     /// the cap the admin set. A cap of 0 means unlimited, so this error only
     /// fires while a cap is in force. Withdrawals are never blocked.
     DepositCapExceeded = 7,
+    /// The subscriber has not opted in to allowance top-up for this mandate.
+    /// Allowance fallback is disabled by default and must be enabled per subscriber.
+    AllowanceNotEnabled = 8,
+    /// The shortfall could not be covered by the SEP-41 allowance granted to the vault,
+    /// either because the allowance is too small or the subscriber never granted one.
+    AllowanceInsufficient = 9,
+    /// The SEP-41 allowance granted to the vault has expired (its expiration ledger has passed).
+    AllowanceExpired = 10,
 }
