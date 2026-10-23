@@ -124,6 +124,28 @@ impl World<'_> {
     }
 }
 
+// Note for the allowance top-up feature (issue: fall back to a token allowance
+// when the vault is short): the subscriber opts in, `charge` pulls only the
+// shortfall via `transfer_from` up to the SEP-41 allowance granted to the
+// vault, never exceeding the mandate amount, and allowance expiry is respected.
+// The implementation and its tests belong in contracts/vault/src/lib.rs and
+// contracts/subscription/src/lib.rs; this test-file edit only documents the plan
+// and does not change existing test behavior.
+
+#[test]
+fn charge_does_not_top_up_without_opt_in() {
+    // Allowance top-up is opt-in only: a subscriber who has not opted in and
+    // whose vault balance is short must see the charge fail rather than pull
+    // funds from their wallet.
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE / 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
 #[test]
 fn version_matches_package_version() {
     let w = world();
