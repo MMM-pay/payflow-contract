@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable"
+channel = "1.96.0"
 # `stellar contract build` targets wasm32v1-none, the target Soroban expects.
 targets = ["wasm32v1-none"]
