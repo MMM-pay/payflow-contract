@@ -39,4 +39,6 @@ pub enum Error {
     /// `create_plan` was given a description longer than
     /// MAX_DESCRIPTION_LEN bytes.
     DescriptionTooLong = 15,
+    /// `set_plan_name` was given a name longer than MAX_NAME_LEN bytes.
+    PlanNameTooLong = 16,
 }

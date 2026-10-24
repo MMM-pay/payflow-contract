@@ -8,6 +8,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;
@@ -18,6 +22,8 @@ mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_events;
 
 pub use error::Error;
 pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
@@ -357,6 +363,25 @@ mod contract {
                 .instance()
                 .get(&DataKey::Subscription)
                 .ok_or(Error::SubscriptionNotSet)
+        }
+
+        /// Hand the admin role to another address. Only the current admin may
+        /// call this, and the new admin takes effect immediately: the old one
+        /// keeps no authority. A deployment whose admin key is lost or
+        /// rotated is otherwise stuck with it for the life of the contract.
+        ///
+        /// # Auth
+        /// Requires authorization from the current admin.
+        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            let current: Address = Self::admin(env.clone())?;
+            current.require_auth();
+
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
         }
 
         /// Admin address configured for this vault.

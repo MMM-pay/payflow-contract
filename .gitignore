@@ -4,4 +4,5 @@ target/
 *.wasm
 .DS_Store
 .stellar/
-test_snapshots/
+contracts/*/test_snapshots/*
+!contracts/*/test_snapshots/events/

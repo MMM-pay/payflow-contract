@@ -7,6 +7,7 @@ use soroban_sdk::{
     token::{StellarAssetClient, TokenClient},
     Address, Env, IntoVal, String,
 };
+use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 
 struct Harness<'a> {
     env: Env,
@@ -92,6 +93,43 @@ fn deposit_rejects_non_positive() {
         h.vault.try_deposit(&user, &h.token, &-5),
         Err(Ok(Error::InvalidAmount))
     );
+}
+
+#[test]
+fn deposit_auth_tree_is_exact() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(
+        auths[0].1.function,
+        AuthorizedFunction::Contract((
+            h.vault_id.clone(),
+            Symbol::new(&h.env, "deposit"),
+            (user.clone(), h.token.clone(), 1_000i128).into_val(&h.env),
+        ))
+    );
+}
+
+#[test]
+fn deposit_rejects_wrong_signer() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let intruder = Address::generate(&h.env);
+    h.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &intruder,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "deposit",
+            args: (user.clone(), h.token.clone(), 1_000i128).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_deposit(&user, &h.token, &1_000).is_err());
 }
 
 #[test]
@@ -800,4 +838,65 @@ fn debits_stop_after_subscription_contract_is_replaced() {
     h.vault.debit(&user, &h.token, &merchant, &1_000);
     assert_eq!(h.vault.balance(&user, &h.token), 3_000);
     assert_eq!(h.token_client.balance(&merchant), 2_000);
+}
+
+#[test]
+fn update_admin_hands_the_role_over() {
+    let h = setup();
+    let next = Address::generate(&h.env);
+
+    h.vault.update_admin(&next);
+    assert_eq!(h.vault.admin(), next);
+}
+
+#[test]
+fn update_admin_requires_the_current_admins_auth() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_update_admin(&next).is_err());
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn deposit_requires_the_user_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    // Drop the blanket mock: the depositor must sign for its own funds.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_deposit(&user, &h.token, &1_000).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+}
+
+#[test]
+fn withdraw_requires_the_user_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_withdraw(&user, &h.token, &1_000).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn debit_requires_the_subscription_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+    // Only the configured subscription contract may debit a balance.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_debit(&user, &h.token, &merchant, &500).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn set_subscription_requires_admin_auth() {
+    let h = setup();
+    let other = Address::generate(&h.env);
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_set_subscription(&other).is_err());
+    assert_eq!(h.vault.subscription(), h.subscription);
 }

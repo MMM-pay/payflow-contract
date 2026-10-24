@@ -240,6 +240,15 @@ npm ci --prefix bindings
 npm test --prefix bindings
 ```
 
+Verify that a deployment runs the WASM built from this source:
+
+```bash
+./scripts/verify.sh testnet # fetches IDs from deployments/testnet.env
+```
+
+The verifier builds the contracts, fetches each deployed WASM, and compares
+SHA-256 hashes. It exits non-zero if any deployed contract differs.
+
 ## Repository layout
 
 ```
@@ -250,6 +259,7 @@ contracts/
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test
+  verify.sh        compare deployed WASMs with source
 deployments/
   testnet.env      ids of the live testnet suite
 ```
