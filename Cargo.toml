@@ -5,11 +5,13 @@ members = ["contracts/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.91.0"
 license = "Apache-2.0"
 repository = "https://github.com/MMM-pay/payflow-contract"
 
 [workspace.dependencies]
 soroban-sdk = "29"
+payflow-common = { path = "contracts/common" }
 
 [profile.release]
 opt-level = "z"

@@ -1,0 +1,15 @@
+[package]
+name = "payflow-common"
+version = "0.1.0"
+edition = "2021"
+license = { workspace = true }
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
