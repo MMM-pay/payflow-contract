@@ -4,6 +4,10 @@ use soroban_sdk::{contracttype, Address, String};
 
 /// `Plan` is defined once in `payflow-shared` and used by both this contract
 /// and the subscription contract that decodes it, so the two cannot drift.
+///
+/// Seat-based plans: `per_seat` marks a plan whose price is multiplied by the
+/// number of seats chosen at subscribe time, bounded by `max_seats`. Non-seat
+/// plans keep `per_seat == false` and `max_seats == 0`.
 pub use payflow_shared::Plan;
 
 /// A merchant's self-declared profile, shown to subscribers alongside the

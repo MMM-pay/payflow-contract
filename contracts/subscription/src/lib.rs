@@ -6,6 +6,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;
@@ -18,14 +22,16 @@ mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_events;
 
 pub use error::Error;
 pub use events::{
     Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, MandateUpdated, PauseChanged,
-    Refunded, Subscribed, Upgraded,
+    Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
-pub use types::{ChargeResult, DataKey, Mandate, MandateStatus, Plan};
+pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::MAX_KEEPER_BPS;
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
@@ -127,8 +133,13 @@ mod contract {
             subscriber: Address,
             plan_id: u64,
             max_charges: u32,
+            max_total: i128,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
+
+            if max_total < 0 {
+                return Err(Error::InvalidMaxTotal);
+            }
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
             let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
@@ -172,6 +183,9 @@ mod contract {
                 keeper_bps,
                 paused_until: 0,
                 refunded: 0,
+                seats: 1,
+                max_total,
+                total_spent: 0,
                 status: MandateStatus::Active,
             };
 
@@ -207,6 +221,7 @@ mod contract {
                 subscriber,
                 merchant: plan.merchant,
                 plan_id,
+                max_total,
                 amount: plan.amount,
                 period: plan.period,
                 next_charge: now,
@@ -265,24 +280,18 @@ mod contract {
             if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
                 return Err(Error::MaxChargesReached);
             }
+            // A charge that would cross the total-spend cap is not settled at
+            // all: a partial debit would bill the subscriber for something the
+            // merchant never agreed to deliver.
+            let next_total = mandate
+                .total_spent
+                .checked_add(mandate.amount)
+                .ok_or(Error::AmountOverflow)?;
+            if mandate.max_total != 0 && next_total > mandate.max_total {
+                return Err(Error::MaxChargesReached);
+            }
 
-            // The mandate's own fee and tip, both frozen when the subscriber
-            // opened it. Neither is read from the plan or the config here.
-            let fee = mandate
-                .amount
-                .checked_mul(mandate.fee_bps as i128)
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-            let merchant_gross = mandate.amount - fee;
-
-            // Tip is a share of the merchant's own money, capped again here so a
-            // mandate can never pay out more than MAX_KEEPER_BPS of that share.
-            let tip_bps = mandate.keeper_bps.min(MAX_KEEPER_BPS);
-            let tip = merchant_gross
-                .checked_mul(tip_bps as i128)
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-            let merchant_amount = merchant_gross - tip;
+            let (fee, tip, merchant_amount) = Self::fee_split(&mandate)?;
             let charges_made = mandate
                 .charges_made
                 .checked_add(1)
@@ -290,7 +299,8 @@ mod contract {
             let next_charge = now
                 .checked_add(mandate.period)
                 .ok_or(Error::AmountOverflow)?;
-            let completed = mandate.max_charges != 0 && charges_made >= mandate.max_charges;
+            let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
+                || (mandate.max_total != 0 && next_total >= mandate.max_total);
 
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
             let vault = VaultClient::new(&env, &vault_addr);
@@ -320,6 +330,7 @@ mod contract {
             }
 
             mandate.charges_made = charges_made;
+            mandate.total_spent = next_total;
             mandate.last_charge = now;
             mandate.next_charge = next_charge;
 
@@ -804,6 +815,68 @@ mod contract {
             Ok(())
         }
 
+        /// Change the seat count on an active mandate.
+        ///
+        /// Seat-based plans price by the number of users on a team. This function
+        /// lets the subscriber grow or shrink the seat count; the new count takes
+        /// effect from the next charge so no proration is needed. Only the
+        /// subscriber may call it, the mandate must be active (not cancelled or
+        /// completed), and `seats` must be at least 1.
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`SeatsChanged`].
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::NotSubscriber`] if the caller is not the subscriber,
+        /// [`Error::MandateNotActive`] if the mandate is cancelled or completed, or
+        /// [`Error::InvalidSeats`] if `seats` is zero.
+        pub fn set_seats(
+            env: Env,
+            subscriber: Address,
+            mandate_id: u64,
+            seats: u32,
+        ) -> Result<(), Error> {
+            subscriber.require_auth();
+
+            if seats == 0 {
+                return Err(Error::InvalidSeats);
+            }
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.subscriber != subscriber {
+                return Err(Error::NotSubscriber);
+            }
+            if mandate.status == MandateStatus::Cancelled
+                || mandate.status == MandateStatus::Completed
+            {
+                return Err(Error::MandateNotActive);
+            }
+
+            let old_seats = mandate.seats;
+            mandate.seats = seats;
+            Self::write_mandate(&env, &mandate);
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            SeatsChanged {
+                mandate_id,
+                subscriber,
+                old_seats,
+                new_seats: seats,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
         /// Change the protocol fee for mandates opened from now on.
         ///
         /// Safe to call at any time: every open mandate carries the fee it was
@@ -853,6 +926,38 @@ mod contract {
             Self::read_mandate(&env, mandate_id)
         }
 
+        /// Estimate when the mandate's final capped charge is scheduled.
+        ///
+        /// The estimate follows the current schedule, including any drift from
+        /// late charges. Returns `None` for an open-ended mandate and its actual
+        /// final charge time once the cap has been reached.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist, or
+        /// [`Error::ScheduleOverflow`] if the remaining schedule overflows `u64`.
+        pub fn estimated_end(env: Env, mandate_id: u64) -> Result<Option<u64>, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.max_charges == 0 {
+                return Ok(None);
+            }
+
+            let remaining_charges = mandate.max_charges.saturating_sub(mandate.charges_made);
+            if remaining_charges == 0 {
+                return Ok(Some(mandate.last_charge));
+            }
+
+            let remaining_periods = u64::from(remaining_charges - 1);
+            let offset = remaining_periods
+                .checked_mul(mandate.period)
+                .ok_or(Error::ScheduleOverflow)?;
+            let estimated_end = mandate
+                .next_charge
+                .checked_add(offset)
+                .ok_or(Error::ScheduleOverflow)?;
+
+            Ok(Some(estimated_end))
+        }
+
         /// True when `charge` would succeed on timing and status grounds. Does not
         /// check vault balance; a funded-ness check is the caller's job.
         pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
@@ -863,7 +968,41 @@ mod contract {
             if m.max_charges != 0 && m.charges_made >= m.max_charges {
                 return Ok(false);
             }
+            if m.max_total != 0 && m.total_spent.saturating_add(m.amount) > m.max_total {
+                return Ok(false);
+            }
             Ok(env.ledger().timestamp() >= m.next_charge)
+        }
+
+        /// Read-only preview of what `charge` would pay right now.
+        ///
+        /// `amount` is the subscriber's total debit, `fee` the protocol share
+        /// and `merchant_amount` the merchant's net share after both the fee
+        /// and the keeper tip. `due_at` is the mandate's next charge
+        /// timestamp, and `chargeable` mirrors `is_due`: active status, cap
+        /// not reached, and the ledger time has reached `due_at`. Like
+        /// `is_due`, it does not check the vault balance. Quoting reads
+        /// storage but never writes it.
+        ///
+        /// The split comes from the same private helper `charge` uses, so a
+        /// client can display the exact integers settlement will move rather
+        /// than reimplementing the rounding.
+        pub fn quote_charge(env: Env, mandate_id: u64) -> Result<ChargeQuote, Error> {
+            let m = Self::read_mandate(&env, mandate_id)?;
+            let (fee, _tip, merchant_amount) = Self::fee_split(&m)?;
+            let now = env.ledger().timestamp();
+            let chargeable = Self::active_at(&m, now)
+                && (m.max_charges == 0 || m.charges_made < m.max_charges)
+                && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
+                && now >= m.next_charge;
+
+            Ok(ChargeQuote {
+                amount: m.amount,
+                fee,
+                merchant_amount,
+                due_at: m.next_charge,
+                chargeable,
+            })
         }
 
         /// Total committed spend of `subscriber` in `token` per `period_secs`,
@@ -965,6 +1104,25 @@ mod contract {
                 .ok_or(Error::NotInitialized)
         }
 
+        /// Hand the admin role to another address. Only the current admin may
+        /// call this, and the new admin takes effect immediately: the old one
+        /// keeps no authority. A deployment whose admin key is lost or
+        /// rotated is otherwise stuck with it for the life of the contract.
+        ///
+        /// # Auth
+        /// Requires authorization from the current admin.
+        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            let current: Address = Self::admin(env.clone())?;
+            current.require_auth();
+
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
+        }
+
         /// Address of the contract administrator.
         pub fn admin(env: Env) -> Result<Address, Error> {
             Self::cfg_address(&env, DataKey::Admin)
@@ -986,6 +1144,28 @@ mod contract {
         /// paused until a date resumes by itself once that date passes; a pause
         /// without a date (`paused_until == 0`) stays in force until `set_paused`
         /// resumes it manually.
+        /// The protocol fee, the keeper tip and the merchant's net share for
+        /// one charge of `m`, all from the rates frozen into the mandate when
+        /// the subscriber opened it. `charge` and `quote_charge` both call
+        /// this, so a quote can never round differently from settlement.
+        fn fee_split(m: &Mandate) -> Result<(i128, i128, i128), Error> {
+            let fee = m
+                .amount
+                .checked_mul(m.fee_bps as i128)
+                .ok_or(Error::AmountOverflow)?
+                / BPS_DENOMINATOR;
+            let merchant_gross = m.amount - fee;
+
+            // Tip is a share of the merchant's own money, capped again here so
+            // a mandate can never pay out more than MAX_KEEPER_BPS of it.
+            let tip_bps = m.keeper_bps.min(MAX_KEEPER_BPS);
+            let tip = merchant_gross
+                .checked_mul(tip_bps as i128)
+                .ok_or(Error::AmountOverflow)?
+                / BPS_DENOMINATOR;
+            Ok((fee, tip, merchant_gross - tip))
+        }
+
         fn active_at(m: &Mandate, now: u64) -> bool {
             match m.status {
                 MandateStatus::Active => true,
