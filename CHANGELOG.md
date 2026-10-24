@@ -9,6 +9,27 @@ change the contract interface.
 
 ### Added
 
+- `subscription:quote_charge(mandate_id)` returns a read-only
+  `ChargeQuote { amount, fee, merchant_amount, due_at, chargeable }`, so clients
+  no longer have to reimplement the contract's integer fee split. `charge` and
+  `quote_charge` share one private split helper, so the quote cannot drift from
+  settlement; `chargeable` shares the `is_due` check. Quoting an unknown mandate
+  returns `MandateNotFound`, and quoting never writes storage or emits an
+  event. `merchant_amount` is net of both the protocol fee and the keeper tip,
+  and `chargeable` does not consider the vault balance.
+Interface changes (`quote_charge`/`ChargeQuote`, `set_profile`, `profile`,
+`deactivate_page`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
+`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
+into `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues
+to consume the new fields, call `quote_charge` instead of recomputing the split,
+and pass the keeper argument are tracked in the pull request.
+- **`quote_charge` tests** — the quote matches `charge` for a price that
+  rounds (99 stroops at 100 bps), excludes the keeper tip from
+  `merchant_amount`, returns `MandateNotFound` for an unknown mandate, never
+  changes storage/balances/events, mirrors `is_due` across active, paused,
+  cancelled and completed mandates, needs no authorization, and reports
+  `AmountOverflow` instead of panicking on an extreme price.
+
 ### Security
 
 - **contracts:** add `#![forbid(unsafe_code)]` to every contract crate
@@ -190,14 +211,31 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Added
 
-- `subscription:quote_charge(mandate_id)` returns a read-only
-  `ChargeQuote { amount, fee, merchant_amount, due_at, chargeable }`, so clients
-  no longer have to reimplement the contract's integer fee split. `charge` and
-  `quote_charge` share one private split helper, so the quote cannot drift from
-  settlement; `chargeable` shares the `is_due` check. Quoting an unknown mandate
-  returns `MandateNotFound`, and quoting never writes storage or emits an
-  event. `merchant_amount` is net of both the protocol fee and the keeper tip,
-  and `chargeable` does not consider the vault balance.
+- `subscription:pause_until(subscriber, mandate_id, until)`: a pause that
+  lifts by itself. The mandate is paused like `set_paused` does, but once the
+  ledger clock reaches `until`, `charge` and `is_due` treat it as Active again
+  without any transaction from the subscriber. `next_charge` is pushed to at
+  least `until`. New error `InvalidUntil` (13). Manual resume via
+  `set_paused(false)` still works while a date is set.
+- `subscription:committed_per_period(subscriber, token, period_secs)`: the
+  subscriber's total committed spend per period, normalising mandates with
+  different billing periods to the period the caller asks about. Cancelled,
+  completed and still-paused mandates are excluded; at most `MAX_PAGE`
+  mandates are read so the call stays inside the ledger footprint limit.
+- `subscription:refund(merchant, mandate_id, amount)`: a merchant returns
+  money from its own wallet straight to the subscriber's wallet, with the
+  refund recorded on the mandate and emitted as `Refunded`, so disputes can be
+  settled from chain data. Total refunds are capped at what the merchant
+  actually collected for that mandate (price minus the frozen fee and tip, per
+  settled charge), and refunds keep working on cancelled mandates. New errors
+  `RefundExceedsReceived` (14) and `InvalidAmount` (15).
+- `vault:set_allowlist_enabled(bool)`, `vault:set_token_allowed(token, bool)`
+  and the views `allowlist_enabled` / `token_allowed`: an admin token
+  allowlist. When enabled, `deposit` rejects tokens the admin has not vouched
+  for with the new error `TokenNotAllowed` (6), so a malicious token contract
+  cannot emit misleading `Deposit` events. Off by default (testnet keeps
+  accepting every SEP-41 token), and withdrawals are never checked, so
+  allowlisting can never trap funds.
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
@@ -240,12 +278,12 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   `now + period` scheduling, constructors, per-position indexes,
   permissionless `charge`), linked from README.
 
-Interface changes (`quote_charge`/`ChargeQuote`, `set_profile`, `profile`,
-`deactivate_page`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
-`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
-into `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues
-to consume the new fields, call `quote_charge` instead of recomputing the split,
-and pass the keeper argument are tracked in the pull request.
+Interface changes (`set_profile`, `profile`, `deactivate_page`,
+`PlanSuccessorSet`, `set_successor`, `Plan.successor_id`, `create_plan`'s
+`keeper_bps`, `charge`'s `keeper` argument and the new `tip`/`keeper`/
+`keeper_bps` event fields) ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`: follow-up issues to consume the new fields and pass the keeper
+argument are tracked in the pull request.
 
 ### Changed
 
@@ -299,12 +337,10 @@ and pass the keeper argument are tracked in the pull request.
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
   is transferred to the `fee_to` address when a mandate is charged.
-- **`quote_charge` tests** — the quote matches `charge` for a price that
-  rounds (99 stroops at 100 bps), excludes the keeper tip from
-  `merchant_amount`, returns `MandateNotFound` for an unknown mandate, never
-  changes storage/balances/events, mirrors `is_due` across active, paused,
-  cancelled and completed mandates, needs no authorization, and reports
-  `AmountOverflow` instead of panicking on an extreme price.
+- **New test: `set_successor`** — the replacement is stored on the retired plan
+  through `get_plan`, self-successor, unknown-successor and cross-merchant
+  pointers are rejected, a different token is rejected, and the merchant must
+  sign.
 
 ## [0.1.0] - 2026-09-02
 

@@ -111,6 +111,7 @@ pub struct ChargeQuote {
     pub chargeable: bool,
 }
 
+/// Storage keys used by the subscription contract.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
