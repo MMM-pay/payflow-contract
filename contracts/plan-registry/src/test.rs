@@ -1,4 +1,5 @@
 #![cfg(test)]
+extern crate std;
 
 use super::*;
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
@@ -64,6 +65,96 @@ fn create_plan_assigns_sequential_ids() {
     );
     assert_eq!(client.merchant_plan_count(&merchant), 2);
     assert_eq!(client.next_plan_id(), 3);
+}
+
+#[test]
+fn create_plan_authorizes_exact_merchant_tree() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(PlanRegistry, (admin.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Pro Monthly");
+    let desc = String::from_str(&env, "");
+
+    env.mock_auths(&[MockAuth {
+        address: &merchant,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create_plan",
+            args: (
+                &merchant,
+                &token,
+                &1_000_i128,
+                &604_800_u64,
+                &name,
+                &desc,
+                &0_u32,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.create_plan(&merchant, &token, &1_000, &604_800, &name, &desc, &0);
+    assert_eq!(
+        env.auths(),
+        std::vec![(
+            merchant.clone(),
+            soroban_sdk::testutils::AuthorizedInvocation {
+                function: soroban_sdk::testutils::AuthorizedFunction::Contract((
+                    client.address.clone(),
+                    soroban_sdk::Symbol::new(&env, "create_plan"),
+                    (
+                        &merchant,
+                        &token,
+                        &1_000_i128,
+                        &604_800_u64,
+                        &name,
+                        &desc,
+                        &0_u32
+                    )
+                        .into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+}
+
+#[test]
+fn create_plan_rejects_a_wrong_signer() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(PlanRegistry, (admin.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let merchant = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Pro Monthly");
+    let desc = String::from_str(&env, "");
+
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create_plan",
+            args: (
+                &merchant,
+                &token,
+                &1_000_i128,
+                &604_800_u64,
+                &name,
+                &desc,
+                &0_u32,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client
+        .try_create_plan(&merchant, &token, &1_000, &604_800, &name, &desc, &0)
+        .is_err());
 }
 
 #[test]
@@ -207,6 +298,65 @@ fn set_plan_active_toggles() {
 
     client.set_plan_active(&merchant, &id, &true);
     assert!(client.get_plan(&id).active);
+}
+
+#[test]
+fn set_plan_active_authorizes_exact_merchant_tree() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(PlanRegistry, (admin.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    env.mock_all_auths();
+    let plan = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &merchant,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_plan_active",
+            args: (&merchant, &plan, &false).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_plan_active(&merchant, &plan, &false);
+    assert_eq!(
+        env.auths(),
+        std::vec![(
+            merchant.clone(),
+            soroban_sdk::testutils::AuthorizedInvocation {
+                function: soroban_sdk::testutils::AuthorizedFunction::Contract((
+                    client.address.clone(),
+                    soroban_sdk::Symbol::new(&env, "set_plan_active"),
+                    (&merchant, &plan, &false).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert!(!client.get_plan(&plan).active);
+
+    // A different signer cannot toggle the merchant's plan.
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_plan_active",
+            args: (&merchant, &plan, &true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_set_plan_active(&merchant, &plan, &true).is_err());
 }
 
 #[test]

@@ -184,6 +184,87 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
 }
 
+/// Acceptance check for the auth-tree issue: `subscribe` must require exactly
+/// the subscriber's authorization for `subscribe(subscriber, plan_id, max_charges)`,
+/// and nothing else.
+#[test]
+fn subscribe_auth_tree_is_exactly_the_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe",
+            args: (&user, &plan_id, &0u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+    // env.auths() reports the last invocation only, so read it before get_mandate.
+    let auths = w.env.auths();
+    assert_eq!(w.sub.get_mandate(&id).subscriber, user);
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+}
+
+#[test]
+fn estimated_end_tracks_the_schedule_after_a_late_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4);
+
+    assert_eq!(w.sub.estimated_end(&id), Some(1_000_000 + 3 * MONTH));
+
+    w.sub.charge(&w.keeper, &id);
+    let first_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(first_next_charge + 2 * MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.next_charge, w.env.ledger().timestamp() + MONTH);
+    assert_eq!(w.sub.estimated_end(&id), Some(mandate.next_charge + MONTH));
+
+    w.env.ledger().set_timestamp(mandate.next_charge);
+    w.sub.charge(&w.keeper, &id);
+    let final_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(final_next_charge);
+    w.sub.charge(&w.keeper, &id);
+
+    let completed = w.sub.get_mandate(&id);
+    assert_eq!(completed.status, MandateStatus::Completed);
+    assert_eq!(w.sub.estimated_end(&id), Some(completed.last_charge));
+}
+
+#[test]
+fn estimated_end_is_none_for_open_ended_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0);
+
+    w.env.mock_auths(&[]);
+    assert_eq!(w.sub.estimated_end(&id), None);
+}
+
+#[test]
+fn estimated_end_reports_schedule_overflow() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
+    let id = w.sub.subscribe(&user, &plan_id, &2);
+
+    assert_eq!(
+        w.sub.try_estimated_end(&id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+}
+
 #[test]
 fn next_mandate_id_matches_the_next_subscription() {
     let w = world();

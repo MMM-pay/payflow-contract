@@ -6,6 +6,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;
@@ -22,7 +26,7 @@ mod test;
 pub use error::Error;
 pub use events::{
     Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, MandateUpdated, PauseChanged,
-    Refunded, Subscribed, Upgraded,
+    Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeQuote, DataKey, Mandate, MandateStatus, Plan};
@@ -172,6 +176,7 @@ mod contract {
                 keeper_bps,
                 paused_until: 0,
                 refunded: 0,
+                seats: 1,
                 status: MandateStatus::Active,
             };
 
@@ -757,6 +762,68 @@ mod contract {
             Ok(())
         }
 
+        /// Change the seat count on an active mandate.
+        ///
+        /// Seat-based plans price by the number of users on a team. This function
+        /// lets the subscriber grow or shrink the seat count; the new count takes
+        /// effect from the next charge so no proration is needed. Only the
+        /// subscriber may call it, the mandate must be active (not cancelled or
+        /// completed), and `seats` must be at least 1.
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`SeatsChanged`].
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::NotSubscriber`] if the caller is not the subscriber,
+        /// [`Error::MandateNotActive`] if the mandate is cancelled or completed, or
+        /// [`Error::InvalidSeats`] if `seats` is zero.
+        pub fn set_seats(
+            env: Env,
+            subscriber: Address,
+            mandate_id: u64,
+            seats: u32,
+        ) -> Result<(), Error> {
+            subscriber.require_auth();
+
+            if seats == 0 {
+                return Err(Error::InvalidSeats);
+            }
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.subscriber != subscriber {
+                return Err(Error::NotSubscriber);
+            }
+            if mandate.status == MandateStatus::Cancelled
+                || mandate.status == MandateStatus::Completed
+            {
+                return Err(Error::MandateNotActive);
+            }
+
+            let old_seats = mandate.seats;
+            mandate.seats = seats;
+            Self::write_mandate(&env, &mandate);
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            SeatsChanged {
+                mandate_id,
+                subscriber,
+                old_seats,
+                new_seats: seats,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
         /// Change the protocol fee for mandates opened from now on.
         ///
         /// Safe to call at any time: every open mandate carries the fee it was
@@ -804,6 +871,38 @@ mod contract {
         /// Look up a mandate by its unique ID.
         pub fn get_mandate(env: Env, mandate_id: u64) -> Result<Mandate, Error> {
             Self::read_mandate(&env, mandate_id)
+        }
+
+        /// Estimate when the mandate's final capped charge is scheduled.
+        ///
+        /// The estimate follows the current schedule, including any drift from
+        /// late charges. Returns `None` for an open-ended mandate and its actual
+        /// final charge time once the cap has been reached.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist, or
+        /// [`Error::ScheduleOverflow`] if the remaining schedule overflows `u64`.
+        pub fn estimated_end(env: Env, mandate_id: u64) -> Result<Option<u64>, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.max_charges == 0 {
+                return Ok(None);
+            }
+
+            let remaining_charges = mandate.max_charges.saturating_sub(mandate.charges_made);
+            if remaining_charges == 0 {
+                return Ok(Some(mandate.last_charge));
+            }
+
+            let remaining_periods = u64::from(remaining_charges - 1);
+            let offset = remaining_periods
+                .checked_mul(mandate.period)
+                .ok_or(Error::ScheduleOverflow)?;
+            let estimated_end = mandate
+                .next_charge
+                .checked_add(offset)
+                .ok_or(Error::ScheduleOverflow)?;
+
+            Ok(Some(estimated_end))
         }
 
         /// True when `charge` would succeed on timing and status grounds. Does not
