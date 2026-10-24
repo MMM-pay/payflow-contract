@@ -9,6 +9,100 @@ change the contract interface.
 
 ### Added
 
+- `subscription:due_mandates(merchant, start, limit)` returns due mandate ids
+  from one bounded page of the merchant index.
+`due_mandates`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
+`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
+into `payflow-backend`, `payflow-frontend` and `payflow-docs`. The PR should list
+follow-up issues for consumers of `due_mandates`, the new fields, and keeper
+arguments.
+
+- `subscription:cancel_page(subscriber, start, limit)` lets a subscriber cancel
+  up to 50 mandates at once, skipping mandates already cancelled or completed.
+  `payflow-backend`, `payflow-frontend` and `payflow-docs` need follow-up issues
+  to expose and document the new operation.
+
+- `subscription:subscribe` accepts `max_total` (0 = uncapped). Mandates track
+  settled spend and complete without a debit when the next full charge would
+  exceed the cap; the existing `max_charges` limit continues to apply, and
+  either limit may complete a mandate first. `Subscribed` includes `max_total`.
+The `subscribe` argument and `Mandate`/`Subscribed` fields also change for
+`max_total` and `total_spent`. These interface changes ripple into
+`payflow-backend`, `payflow-frontend` and `payflow-docs`; create and link
+follow-up issues in the pull request.
+
+- **Breaking:** `subscribe` gains `max_total`, `Mandate` gains `max_total` and
+  `total_spent`, and `Subscribed` gains `max_total`. Existing deployments must
+  be redeployed because stored mandates do not contain the new fields. Follow-up
+  issues for `payflow-backend`, `payflow-frontend` and `payflow-docs` should be
+  linked in the pull request.
+
+- `plan-registry:set_plan_name(merchant, plan_id, name)`: a merchant can rename
+  any of its plans. The name is bounded by `MAX_NAME_LEN` bytes (64); longer
+  names are rejected with `PlanNameTooLong`. Only the plan's merchant may rename
+  it. Emits `PlanRenamed { merchant, plan_id, name }` so indexers and the UI can
+  update immediately.
+
+- `subscription:quote_charge(mandate_id)` returns a read-only
+  `ChargeQuote { amount, fee, merchant_amount, due_at, chargeable }`, so clients
+  no longer have to reimplement the contract's integer fee split. `charge` and
+  `quote_charge` share one private split helper, so the quote cannot drift from
+  settlement; `chargeable` shares the `is_due` check. Quoting an unknown mandate
+  returns `MandateNotFound`, and quoting never writes storage or emits an
+  event. `merchant_amount` is net of both the protocol fee and the keeper tip,
+  and `chargeable` does not consider the vault balance.
+Interface changes (`quote_charge`/`ChargeQuote`, `set_profile`, `profile`,
+`deactivate_page`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
+`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
+into `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues
+to consume the new fields, call `quote_charge` instead of recomputing the split,
+and pass the keeper argument are tracked in the pull request.
+- **`quote_charge` tests** — the quote matches `charge` for a price that
+  rounds (99 stroops at 100 bps), excludes the keeper tip from
+  `merchant_amount`, returns `MandateNotFound` for an unknown mandate, never
+  changes storage/balances/events, mirrors `is_due` across active, paused,
+  cancelled and completed mandates, needs no authorization, and reports
+  `AmountOverflow` instead of panicking on an extreme price.
+
+### Security
+
+- **contracts:** add `#![forbid(unsafe_code)]` to every contract crate
+  (`plan-registry`, `vault`, `subscription`). Any attempt to introduce an
+  `unsafe` block now fails the build immediately. No interface or event changes.
+  Closes #97.
+
+- **subscription:** `set_seats(subscriber, mandate_id, seats)` lets the
+  subscriber change the seat count on an active mandate. The new count is stored
+  in `Mandate.seats` and takes effect from the next charge; no proration is
+  applied. Only the subscriber may call it, the mandate must be active (not
+  cancelled or completed), and `seats` must be at least 1, otherwise the call
+  fails with the new `InvalidSeats` error (code 18). Emits the new `SeatsChanged`
+  event (topics `mandate_id`, `subscriber`; data `old_seats`, `new_seats`) and a
+  `MandateUpdated` snapshot. `Mandate` gains the `seats` field (0 for flat-rate
+  mandates that were opened before this change or that do not use seat-based
+  pricing). This is an interface change: `payflow-backend`, `payflow-frontend`
+  and `payflow-docs` need to read the new `Mandate.seats` field, handle the new
+  `seats_changed` event, and map the new error code. Closes #93.
+
+### Changed
+
+- **subscription:** `Mandate` gains a `seats: u32` field, defaulting to `0` for
+  mandates that are not seat-based or opened before this change. This is a
+  breaking storage change: existing deployed mandates do not contain the new
+  field and will fail to decode on deployments that have not been redeployed.
+  `payflow-backend`, `payflow-frontend` and `payflow-docs` need downstream
+  updates.
+
+- **tests:** the subscription, vault and plan-registry suites will assert the
+  exact `env.auths()` tree for every state-changing function, and each mutating
+  function gains a negative test using `mock_auths` with the wrong signer. No
+  interface, event or error changes. Closes the auth-tree test issue.
+
+- **contracts:** expose `version()` on the subscription, plan-registry and vault
+  contracts so clients can identify the deployed crate version. This interface
+  addition needs handling in payflow-backend, payflow-frontend and payflow-docs.
+  Closes #66.
+
 - **vault:** an optional per-token deposit cap while the protocol is unaudited.
   The admin can call `set_deposit_cap(user, token, amount)` to cap the balance
   one subscriber may hold for one token; a cap of `0` means unlimited, which is
@@ -31,6 +125,25 @@ change the contract interface.
   payflow-backend, payflow-frontend and payflow-docs need to read the new
   field and to map the new error code. Closes #91.
 
+- **plan-registry:** list plans by token. A per-token index is maintained
+  with the same per-position layout as the per-merchant index, exposing
+  `token_plans(token, start, limit)` and `token_plan_count(token)` so apps
+  and storefronts can list all plans priced in a given asset without an
+  off-chain indexer. Writing to the index adds constant cost to `create_plan`.
+  This is an interface addition: payflow-backend, payflow-frontend and
+  payflow-docs can query the new read endpoints. Closes #106.
+
+- **subscription:** `subscribe_many(subscriber, plan_ids, max_charges)` opens
+  one mandate per plan id in a single transaction, for bundles such as an app
+  plus a support plan. The subscriber authorizes the batch once. At most 5 plans
+  may be passed per call, and an empty batch is rejected. The call is all or
+  nothing: if any plan is inactive or missing, no mandate is created and no
+  state changes. Each resulting mandate is subscribed exactly as `subscribe`
+  would, with its own price, period and frozen fee. This is an interface
+  addition: payflow-backend and payflow-frontend need the new entry point and
+  the `BatchTooLarge` error, and payflow-docs need the new error code.
+  Closes #95.
+
 - **subscription:** `upgrade(subscriber, mandate_id, new_plan_id)` moves a
   mandate onto another plan of the same merchant, denominated in the same
   token. Moving to a more expensive plan collects the price difference for
@@ -49,6 +162,27 @@ change the contract interface.
   behind it are written up in [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
   payflow-backend, payflow-frontend and payflow-docs need the new
   `subscription_upgraded` event and the new error codes. Closes #94.
+
+- **subscription:** `estimated_end(mandate_id)` returns the projected final
+  charge timestamp for capped mandates using the current `next_charge` schedule,
+  including drift after late charges. It returns `None` for open-ended mandates
+  and the actual final charge timestamp after completion. This read interface
+  addition needs handling in payflow-backend, payflow-frontend and payflow-docs;
+  payflow-docs also needs a message for the new `ScheduleOverflow` error. Closes
+  #105.
+
+### Changed
+
+- **contracts:** document every public item across all crates and enforce
+  `#![deny(missing_docs)]` so new undocumented public items fail `cargo doc`.
+  No interface or event changes. Closes #64.
+
+- **subscription:** `charge(keeper, mandate_id)` now returns a `ChargeResult`
+  containing the merchant amount, protocol fee, charge count, next charge time
+  and completion flag. The return values match the corresponding `Charged`
+  event fields, so callers do not need an extra contract read. This contract
+  interface change needs handling in payflow-backend, payflow-frontend and
+  payflow-docs. Closes #89.
 
 # # [0.2.0] - 2026-10-09
 
@@ -97,6 +231,15 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ## Unreleased
 
+### Added
+
+- Generated TypeScript clients for the plan registry, vault and subscription
+  contracts are published together as `@mmm-pay/contracts` on tagged releases.
+  CI verifies the generated package, and a manual testnet smoke workflow calls
+  the registry's read-only `next_plan_id` method. Follow-up adoption issues in
+  `payflow-frontend`, `payflow-backend` and `payflow-docs` should replace
+  handwritten wrappers and document the package as appropriate.
+
 ### Security
 
 - **Settlement no longer depends on one operator.** A plan may set
@@ -138,6 +281,9 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   cannot emit misleading `Deposit` events. Off by default (testnet keeps
   accepting every SEP-41 token), and withdrawals are never checked, so
   allowlisting can never trap funds.
+- Snapshot tests pin the XDR layouts of every plan-registry, vault and
+  subscription event. No interface changed.
+
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
@@ -145,8 +291,6 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `subscription:charge(keeper, mandate_id)` pays the plan's tip to `keeper` out
   of the merchant's share. Mandates store `keeper_bps` alongside `fee_bps`;
   `Charged` gains `tip` and `keeper`, and `Subscribed` gains `keeper_bps`.
-- `subscription:due_mandates(merchant, start, limit)` returns due mandate ids
-  from one bounded page of the merchant index.
 - `contracts/shared`: the `Plan` type and `MAX_KEEPER_BPS` are defined once and
   used by both the registry and the subscription contract, so the interface
   between them cannot drift.
@@ -174,83 +318,4 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   through the real `charge` path in the subscription contract.
 - **Test: token transfer failure behaviour** — adds `payflow-test-token`, a
   test-only token contract that can be configured to fail transfers globally or
-  for targeted recipient addresses. Verifies in `payflow-vault` and
-  `payflow-subscription` that failing transfers revert transactions completely
-  (deposits, withdrawals, debits, and charges across merchant, fee, and tip
-  debits) and keep vault internal balances and token holdings consistent.
-- `docs/adr/`: five architecture decision records (vault/billing split,
-  `now + period` scheduling, constructors, per-position indexes,
-  permissionless `charge`), linked from README.
-
-Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`due_mandates`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
-`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
-into `payflow-backend`, `payflow-frontend` and `payflow-docs`. The PR should list
-follow-up issues for consumers of `due_mandates`, the new fields, and keeper
-arguments.
-
-### Changed
-
-- **Breaking:** `Mandate` gains `paused_until` (the self-lifting pause
-  schedule, 0 for none) and `refunded` (the running total the merchant has
-  refunded). Existing deployments must be redeployed because stored mandates
-  do not contain the new fields. This also requires downstream updates in
-  `payflow-backend`, `payflow-frontend` and `payflow-docs`.
-- **Breaking:** `Mandate` gains `created_at`, set when `subscribe` opens it and
-  returned by `get_mandate`. Existing deployments must be redeployed because
-  stored mandates do not contain the new field. This also requires downstream
-  updates in `payflow-backend`, `payflow-frontend` and `payflow-docs`; follow-up
-  issues should be linked in the pull request.
-- **Breaking:** `charge` takes the settling `keeper: Address` and requires its
-  authorization; it no longer settles without a signature. Any address may
-  still act as keeper.
-- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
-  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
-  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
-  and `Mandate` values do not decode into the new shape.
-- **Breaking:** `Plan` gains `successor_id` (0 = the plan has no successor),
-  returned by `get_plan` and written by `set_successor`. Existing testnet
-  deployments must be redeployed: stored `Plan` values do not decode into the
-  new shape. This also requires downstream updates in `payflow-backend`,
-  `payflow-frontend` and `payflow-docs`; follow-up issues should be linked in the
-  pull request.
-- **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
-  take `start` and `limit` and return at most 50 ids per call.
-- **Breaking:** `initialize` is replaced by `__constructor` in all three
-  contracts.
-- `rust-toolchain.toml` names the `wasm32v1-none` target that
-  `stellar contract build` uses.
-
-### Tests
-
-- 42 → 63 tests, covering paging limits, entry footprint limits, merchant
-  ending and constructor configuration.
-- **New tests for this unreleased set:** scheduled pauses (no charge before
-  `until`, self-resume with only the keeper's signature, manual resume,
-  extension, rejected past dates and foreign signers), `committed_per_period`
-  (mixed-period hand calculations, exclusion of paused/cancelled/completed
-  mandates, per-subscriber and per-token isolation), refunds (over-refund
-  rejected, cap grows with charges, works on cancelled mandates, merchant
-  signature required, event links the refund to the mandate) and the vault
-  allowlist (off by default, unlisted deposits rejected, removal blocks
-  deposits but not withdrawals, admin auth required, no funds moved).
-- **Keeper tip tests:** the tip is paid from the merchant's share, the
-  subscriber pays the same total with or without it, a missing or wrong signer
-  cannot settle or collect, and the registry rejects a tip above the cap.
-- **New test: `admin_has_no_path_to_user_funds`** — asserts that `set_subscription`
-  does not change any user balances.
-- **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
-  is transferred to the `fee_to` address when a mandate is charged.
-- **New test: `set_successor`** — the replacement is stored on the retired plan
-  through `get_plan`, self-successor, unknown-successor and cross-merchant
-  pointers are rejected, a different token is rejected, and the merchant must
-  sign.
-
-## [0.1.0] - 2026-09-02
-
-First testnet deployment: plan registry, vault and subscription contracts with
-permissionless `charge`, spend caps, pause and cancel, and a capped protocol
-fee.
-
-[0.2.0]: https://github.com/MMM-pay/payflow-contract/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/MMM-pay/payflow-contract/releases/tag/v0.1.0
+  for targeted 

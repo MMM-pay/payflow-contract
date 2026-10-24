@@ -1,0 +1,3 @@
+# Event snapshots are compared byte for byte by the layout tests, so they
+# must not be checked out with CRLF on Windows.
+*.xdr text eol=lf

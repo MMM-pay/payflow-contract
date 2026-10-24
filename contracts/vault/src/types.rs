@@ -1,8 +1,12 @@
+//! Storage keys for the vault contract.
+
 use soroban_sdk::{contracttype, Address};
 
+/// Keys used to partition the vault's instance and persistent storage.
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// The admin address authorized to update configuration.
     Admin,
     /// The single subscription contract permitted to call `debit`.
     Subscription,
