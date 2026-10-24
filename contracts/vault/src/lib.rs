@@ -8,6 +8,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;
@@ -359,19 +363,16 @@ mod contract {
                 .ok_or(Error::SubscriptionNotSet)
         }
 
-        /// Admin address configured for this vault.
-        pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
-        }
-        #[allow(dead_code)]
-        /// Update the admin address. Only the current admin may call this.
-        /// The new admin takes effect immediately; the old admin loses authority.
+        /// Hand the admin role to another address. Only the current admin may
+        /// call this, and the new admin takes effect immediately: the old one
+        /// keeps no authority. A deployment whose admin key is lost or
+        /// rotated is otherwise stuck with it for the life of the contract.
+        ///
+        /// # Auth
+        /// Requires authorization from the current admin.
         pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-            let current_admin: Address = Vault::admin(env.clone())?;
-            current_admin.require_auth();
+            let current: Address = Self::admin(env.clone())?;
+            current.require_auth();
 
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             env.storage()
@@ -379,6 +380,14 @@ mod contract {
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
 
             Ok(())
+        }
+
+        /// Admin address configured for this vault.
+        pub fn admin(env: Env) -> Result<Address, Error> {
+            env.storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)
         }
     }
 

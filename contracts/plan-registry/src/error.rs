@@ -29,14 +29,16 @@ pub enum Error {
     ProfileUrlTooLong = 10,
     /// `create_plan` was given a keeper tip above MAX_KEEPER_BPS.
     KeeperBpsTooHigh = 11,
-    /// The admin has been updated to a new address.
-    AdminUpdated = 12,
-    /// Description too long.
-    DescriptionTooLong = 13,
+    /// `set_successor` was given a plan that does not exist.
+    SuccessorNotFound = 12,
     /// A plan cannot be its own successor.
-    SelfSuccessor = 14,
-    /// Successor plan not found.
-    SuccessorNotFound = 15,
-    /// Successor uses a different token.
-    SuccessorTokenMismatch = 16,
+    SelfSuccessor = 13,
+    /// The replacement plan is denominated in a different token than the plan
+    /// it replaces, so the pointer would be meaningless.
+    SuccessorTokenMismatch = 14,
+    /// `create_plan` was given a description longer than
+    /// MAX_DESCRIPTION_LEN bytes.
+    DescriptionTooLong = 15,
+    /// `set_plan_name` was given a name longer than MAX_NAME_LEN bytes.
+    PlanNameTooLong = 16,
 }

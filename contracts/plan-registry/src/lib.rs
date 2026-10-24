@@ -5,6 +5,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;
@@ -17,7 +21,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
+pub use events::{PlanCreated, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
@@ -193,6 +197,60 @@ mod contract {
             .publish(&env);
 
             Ok(id)
+        }
+
+        /// Rename a plan. Only the plan's own merchant may do this, and only
+        /// the label changes: price, period, token and status are frozen once
+        /// a plan is published, because subscribers' mandates are priced from
+        /// them.
+        ///
+        /// # Errors
+        /// [`Error::PlanNameTooLong`] if `name` exceeds [`MAX_NAME_LEN`],
+        /// [`Error::PlanNotFound`] if no such plan exists, and
+        /// [`Error::NotPlanOwner`] if `merchant` does not own it.
+        ///
+        /// # Auth
+        /// Requires authorization from `merchant`.
+        ///
+        /// # Events
+        /// Emits [`PlanRenamed`].
+        pub fn set_plan_name(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            name: String,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+
+            if name.len() > MAX_NAME_LEN {
+                return Err(Error::PlanNameTooLong);
+            }
+
+            let key = DataKey::Plan(plan_id);
+            let mut plan: Plan = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(Error::PlanNotFound)?;
+
+            if plan.merchant != merchant {
+                return Err(Error::NotPlanOwner);
+            }
+
+            plan.name = name.clone();
+            env.storage().persistent().set(&key, &plan);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanRenamed {
+                merchant,
+                plan_id,
+                name,
+            }
+            .publish(&env);
+
+            Ok(())
         }
 
         /// Activate or deactivate a plan. Deactivating stops new subscriptions but
@@ -514,19 +572,16 @@ mod contract {
                 .ok_or(Error::NotInitialized)
         }
 
-        /// Address of the contract administrator.
-        pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
-        }
-        #[allow(dead_code)]
-        /// Update the admin address. Only the current admin may call this.
-        /// The new admin takes effect immediately; the old admin loses authority.
+        /// Hand the admin role to another address. Only the current admin may
+        /// call this, and the new admin takes effect immediately: the old one
+        /// keeps no authority. A deployment whose admin key is lost or
+        /// rotated is otherwise stuck with it for the life of the contract.
+        ///
+        /// # Auth
+        /// Requires authorization from the current admin.
         pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-            let current_admin: Address = PlanRegistry::admin(env.clone())?;
-            current_admin.require_auth();
+            let current: Address = Self::admin(env.clone())?;
+            current.require_auth();
 
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             env.storage()
@@ -534,6 +589,14 @@ mod contract {
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
 
             Ok(())
+        }
+
+        /// Address of the contract administrator.
+        pub fn admin(env: Env) -> Result<Address, Error> {
+            env.storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)
         }
     }
 }
