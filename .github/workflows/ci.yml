@@ -37,16 +37,93 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
-  build:
-    name: build-wasm
+  coverage:
+    name: coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup target add wasm32v1-none
+      - run: rustup component add llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --locked
       - uses: Swatinem/rust-cache@v2
+      - run: cargo llvm-cov --workspace --html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html
+          if-no-files-found: error
+
+  deny:
+    name: dependency-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check advisories bans licenses
+
+  build:
+    name: build-wasm-${{ matrix.build }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        build: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32v1-none
       - uses: stellar/stellar-cli@v27.0.0
       - run: stellar contract build
       - uses: actions/upload-artifact@v4
         with:
-          name: wasm
+          name: wasm-${{ matrix.build }}
           path: target/wasm32v1-none/release/*.wasm
+
+  verify-wasm:
+    name: verify-wasm-reproducibility
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-1
+          path: wasm-1
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-2
+          path: wasm-2
+      - name: Compare wasm SHA-256 hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t files_1 < <(find wasm-1 -type f -name '*.wasm' -printf '%P\n' | sort)
+          mapfile -t files_2 < <(find wasm-2 -type f -name '*.wasm' -printf '%P\n' | sort)
+          if ((${#files_1[@]} == 0)); then
+            echo "No wasm files found in build 1" >&2
+            exit 1
+          fi
+          if [[ "${files_1[*]}" != "${files_2[*]}" ]]; then
+            echo "Wasm file sets differ between builds" >&2
+            printf 'Build 1: %s\nBuild 2: %s\n' "${files_1[*]}" "${files_2[*]}" >&2
+            exit 1
+          fi
+
+          mismatch=0
+          {
+            echo '### Reproducible wasm build (SHA-256)'
+            echo '| Artifact | Build 1 | Build 2 |'
+            echo '| --- | --- | --- |'
+            for file in "${files_1[@]}"; do
+              hash_1=$(sha256sum "wasm-1/$file" | cut -d ' ' -f 1)
+              hash_2=$(sha256sum "wasm-2/$file" | cut -d ' ' -f 1)
+              printf '| `%s` | `%s` | `%s` |\n' "$file" "$hash_1" "$hash_2"
+              if [[ "$hash_1" != "$hash_2" ]]; then
+                mismatch=1
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if ((mismatch)); then
+            echo "Wasm builds are not reproducible" >&2
+            exit 1
+          fi

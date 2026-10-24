@@ -6,6 +6,7 @@
 //! and must be restored before use.
 
 #![no_std]
+#![deny(missing_docs)]
 
 use soroban_sdk::{Env, IntoVal, Val};
 
