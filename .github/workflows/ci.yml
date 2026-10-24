@@ -37,6 +37,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --locked
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo llvm-cov --workspace --html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html
+          if-no-files-found: error
+
+  deny:
+    name: dependency-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check advisories bans licenses
+
   build:
     name: build-wasm
     runs-on: ubuntu-latest

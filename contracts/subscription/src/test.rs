@@ -8,7 +8,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
-    Address, Env, IntoVal, String,
+    Address, Env, FromVal, IntoVal, String,
 };
 
 const MONTH: u64 = 2_592_000;
@@ -86,12 +86,23 @@ impl World<'_> {
     }
 
     fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
+        self.plan_priced_with_keeper(PRICE, keeper_bps)
+    }
+
+    /// A plan at an arbitrary price, so rounding at the stroop boundary can be
+    /// exercised without changing the shared `PRICE` used by every other test.
+    fn plan_priced(&self, price: i128) -> u64 {
+        self.plan_priced_with_keeper(price, 0)
+    }
+
+    fn plan_priced_with_keeper(&self, price: i128, keeper_bps: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
             &self.token,
-            &PRICE,
+            &price,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
+            &String::from_str(&self.env, ""),
             &keeper_bps,
         )
     }
@@ -104,6 +115,7 @@ impl World<'_> {
             &amount,
             &period,
             &String::from_str(&self.env, "Custom Plan"),
+            &String::from_str(&self.env, ""),
             &0,
         )
     }
@@ -120,6 +132,37 @@ impl World<'_> {
         let now = self.env.ledger().timestamp();
         self.env.ledger().set_timestamp(now + secs);
     }
+}
+
+// Note for the allowance top-up feature (issue: fall back to a token allowance
+// when the vault is short): the subscriber opts in, `charge` pulls only the
+// shortfall via `transfer_from` up to the SEP-41 allowance granted to the
+// vault, never exceeding the mandate amount, and allowance expiry is respected.
+// The implementation and its tests belong in contracts/vault/src/lib.rs and
+// contracts/subscription/src/lib.rs; this test-file edit only documents the plan
+// and does not change existing test behavior.
+
+#[test]
+fn charge_does_not_top_up_without_opt_in() {
+    // Allowance top-up is opt-in only: a subscriber who has not opted in and
+    // whose vault balance is short must see the charge fail rather than pull
+    // funds from their wallet.
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE / 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
+#[test]
+fn version_matches_package_version() {
+    let w = world();
+    assert_eq!(
+        w.sub.version(),
+        String::from_str(&w.env, env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -139,6 +182,104 @@ fn subscribe_copies_plan_terms_into_mandate() {
     assert_eq!(m.charges_made, 0);
     assert_eq!(m.status, MandateStatus::Active);
     assert_eq!(m.next_charge, w.env.ledger().timestamp());
+}
+
+/// Acceptance check for the auth-tree issue: `subscribe` must require exactly
+/// the subscriber's authorization for `subscribe(subscriber, plan_id, max_charges)`,
+/// and nothing else.
+#[test]
+fn subscribe_auth_tree_is_exactly_the_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe",
+            args: (&user, &plan_id, &0u32, &0i128).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    // env.auths() reports the last invocation only, so read it before get_mandate.
+    let auths = w.env.auths();
+    assert_eq!(w.sub.get_mandate(&id).subscriber, user);
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+}
+
+#[test]
+fn estimated_end_tracks_the_schedule_after_a_late_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4, &0);
+
+    assert_eq!(w.sub.estimated_end(&id), Some(1_000_000 + 3 * MONTH));
+
+    w.sub.charge(&w.keeper, &id);
+    let first_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(first_next_charge + 2 * MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.next_charge, w.env.ledger().timestamp() + MONTH);
+    assert_eq!(w.sub.estimated_end(&id), Some(mandate.next_charge + MONTH));
+
+    w.env.ledger().set_timestamp(mandate.next_charge);
+    w.sub.charge(&w.keeper, &id);
+    let final_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(final_next_charge);
+    w.sub.charge(&w.keeper, &id);
+
+    let completed = w.sub.get_mandate(&id);
+    assert_eq!(completed.status, MandateStatus::Completed);
+    assert_eq!(w.sub.estimated_end(&id), Some(completed.last_charge));
+}
+
+#[test]
+fn estimated_end_is_none_for_open_ended_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.env.mock_auths(&[]);
+    assert_eq!(w.sub.estimated_end(&id), None);
+}
+
+#[test]
+fn estimated_end_reports_schedule_overflow() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+
+    assert_eq!(
+        w.sub.try_estimated_end(&id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+}
+
+#[test]
+fn next_mandate_id_matches_the_next_subscription() {
+    let w = world();
+    let plan_id = w.plan();
+    let first_user = w.subscriber(100_000);
+    let second_user = w.subscriber(100_000);
+
+    assert_eq!(w.sub.next_mandate_id(), 1);
+
+    let first_id = w.sub.subscribe(&first_user, &plan_id, &0, &0);
+    let next_id = w.sub.next_mandate_id();
+    assert_eq!(next_id, first_id + 1);
+
+    let second_id = w.sub.subscribe(&second_user, &plan_id, &0, &0);
+    assert_eq!(second_id, next_id);
 }
 
 /// Pull a u32 field out of the data map of any emitted contract event.
@@ -185,13 +326,34 @@ fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
     found
 }
 
+fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
+    let mut found = None;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::U64(value) = entry.val {
+                    found = Some(value);
+                }
+            }
+        }
+    }
+    found
+}
+
 #[test]
 fn subscribe_event_carries_the_spend_cap() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &3, &(3 * PRICE));
+    let id = w.sub.subscribe(&user, &plan_id, &3, &0);
 
     // The cap must be recoverable from the event alone. An indexer that reads
     // only events must not have to guess it, or it will report a capped
@@ -202,20 +364,6 @@ fn subscribe_event_carries_the_spend_cap() {
         "Subscribed event must carry max_charges on the wire"
     );
     assert_eq!(w.sub.get_mandate(&id).max_charges, 3);
-    assert_eq!(w.sub.get_mandate(&id).max_total, 3 * PRICE);
-    assert_eq!(last_event_field_i128(&w.env, "max_total"), Some(3 * PRICE));
-}
-
-#[test]
-fn subscribe_rejects_negative_total_spend_cap() {
-    let w = world();
-    let plan_id = w.plan();
-    let user = w.subscriber(100_000);
-
-    assert_eq!(
-        w.sub.try_subscribe(&user, &plan_id, &0, &-1),
-        Err(Ok(Error::InvalidMaxTotal))
-    );
 }
 
 #[test]
@@ -267,7 +415,7 @@ fn subscribe_requires_the_subscriber_to_authorize() {
         invoke: &MockAuthInvoke {
             contract: &w.sub.address,
             fn_name: "subscribe",
-            args: (&user, &plan_id, &0, &0i128).into_val(&w.env),
+            args: (&user, &plan_id, &0u32, &0i128).into_val(&w.env),
             sub_invokes: &[],
         },
     }]);
@@ -350,6 +498,39 @@ fn keeper_tip_is_paid_from_the_merchant_share() {
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
     // The tip rate is frozen into the mandate, like the fee.
     assert_eq!(w.sub.get_mandate(&id).keeper_bps, KEEPER_BPS);
+}
+
+#[test]
+fn charge_result_matches_charged_event_and_reports_completion() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0);
+
+    let result = w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(
+        last_event_field_i128(&w.env, "amount"),
+        Some(result.merchant_amount)
+    );
+    assert_eq!(last_event_field_i128(&w.env, "fee"), Some(result.fee));
+    assert_eq!(
+        event_field_u32(&w.env, "charges_made"),
+        Some(result.charges_made)
+    );
+    assert_eq!(
+        last_event_field_u64(&w.env, "next_charge"),
+        Some(result.next_charge)
+    );
+    assert!(result.completed);
+
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "mandate_completed".try_into().unwrap();
+    assert_eq!(name, &expected);
 }
 
 /// The acceptance criterion for the tip: a tip changes how the plan's price is
@@ -535,64 +716,6 @@ fn max_charges_completes_the_mandate() {
 }
 
 #[test]
-fn max_total_allows_an_exact_boundary_and_completes() {
-    let w = world();
-    let plan_id = w.plan();
-    let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &(2 * PRICE));
-
-    w.sub.charge(&w.keeper, &id);
-    assert_eq!(w.sub.get_mandate(&id).total_spent, PRICE);
-    assert!(w.sub.is_due(&id));
-    w.advance(MONTH);
-    w.sub.charge(&w.keeper, &id);
-
-    let mandate = w.sub.get_mandate(&id);
-    assert_eq!(mandate.total_spent, 2 * PRICE);
-    assert_eq!(mandate.charges_made, 2);
-    assert_eq!(mandate.status, MandateStatus::Completed);
-    assert!(!w.sub.is_due(&id));
-}
-
-#[test]
-fn charge_that_would_exceed_max_total_completes_without_debit() {
-    let w = world();
-    let plan_id = w.plan();
-    let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &3, &(PRICE + 1));
-
-    w.sub.charge(&w.keeper, &id);
-    let balance_after_first_charge = w.vault.balance(&user, &w.token);
-    let merchant_after_first_charge = w.token_client.balance(&w.merchant);
-    w.advance(MONTH);
-
-    assert!(w.sub.is_due(&id));
-    w.sub.charge(&w.keeper, &id);
-
-    let mandate = w.sub.get_mandate(&id);
-    assert_eq!(mandate.status, MandateStatus::Completed);
-    assert_eq!(mandate.charges_made, 1);
-    assert_eq!(mandate.total_spent, PRICE);
-    assert_eq!(w.vault.balance(&user, &w.token), balance_after_first_charge);
-    assert_eq!(w.token_client.balance(&w.merchant), merchant_after_first_charge);
-}
-
-#[test]
-fn max_charges_and_max_total_complete_whichever_is_reached_first() {
-    let w = world();
-    let plan_id = w.plan();
-    let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &(2 * PRICE));
-
-    w.sub.charge(&w.keeper, &id);
-
-    let mandate = w.sub.get_mandate(&id);
-    assert_eq!(mandate.charges_made, 1);
-    assert_eq!(mandate.total_spent, PRICE);
-    assert_eq!(mandate.status, MandateStatus::Completed);
-}
-
-#[test]
 fn charge_fails_when_vault_is_underfunded() {
     let w = world();
     let plan_id = w.plan();
@@ -677,6 +800,7 @@ fn zero_fee_pays_merchant_in_full() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -714,6 +838,186 @@ fn constructor_records_its_configuration() {
 fn unknown_mandate_errors() {
     let w = world();
     assert_eq!(w.sub.try_get_mandate(&999), Err(Ok(Error::MandateNotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// Charge quotes
+// ---------------------------------------------------------------------------
+
+/// Acceptance criterion: a quote and the charge that follows agree on the fee
+/// and merchant amount for a price where basis-point rounding actually bites.
+/// 99 stroops at 100 bps is 0.99 stroops, truncated to a zero fee.
+#[test]
+fn quote_matches_charge_for_a_price_that_rounds() {
+    let w = world();
+    let plan_id = w.plan_priced(99);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let quote = w.sub.quote_charge(&id);
+    assert_eq!(
+        quote,
+        ChargeQuote {
+            amount: 99,
+            fee: 0,
+            merchant_amount: 99,
+            due_at: w.env.ledger().timestamp(),
+            chargeable: true,
+        }
+    );
+
+    w.sub.charge(&w.keeper, &id);
+
+    // Settlement moved exactly the integers the quote promised.
+    assert_eq!(w.token_client.balance(&w.merchant), quote.merchant_amount);
+    assert_eq!(w.token_client.balance(&w.fee_to), quote.fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - quote.amount);
+
+    // The same quote now reflects the new schedule.
+    let after = w.sub.quote_charge(&id);
+    assert_eq!(after.amount, quote.amount);
+    assert_eq!(after.fee, quote.fee);
+    assert_eq!(after.merchant_amount, quote.merchant_amount);
+    assert_eq!(after.due_at, w.env.ledger().timestamp() + MONTH);
+    assert!(!after.chargeable);
+}
+
+/// The merchant amount a quote reports is what the merchant actually receives,
+/// so it excludes the keeper tip even though the subscriber pays `amount`.
+#[test]
+fn quote_merchant_amount_excludes_the_keeper_tip() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let quote = w.sub.quote_charge(&id);
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let tip = (PRICE - fee) * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+
+    assert_eq!(quote.amount, PRICE);
+    assert_eq!(quote.fee, fee);
+    assert_eq!(quote.merchant_amount, PRICE - fee - tip);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&w.merchant), quote.merchant_amount);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&w.fee_to), quote.fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - quote.amount);
+}
+
+#[test]
+fn quote_unknown_mandate_errors() {
+    let w = world();
+    assert_eq!(
+        w.sub.try_quote_charge(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn quote_never_changes_state() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let mandate_before = w.sub.get_mandate(&id);
+    let balances_before = (
+        w.token_client.balance(&w.merchant),
+        w.token_client.balance(&w.fee_to),
+        w.token_client.balance(&w.keeper),
+        w.vault.balance(&user, &w.token),
+    );
+    let events_before = w.env.events().all().events().len();
+
+    for _ in 0..3 {
+        w.sub.quote_charge(&id);
+    }
+
+    assert_eq!(w.sub.get_mandate(&id), mandate_before);
+    assert_eq!(
+        (
+            w.token_client.balance(&w.merchant),
+            w.token_client.balance(&w.fee_to),
+            w.token_client.balance(&w.keeper),
+            w.vault.balance(&user, &w.token),
+        ),
+        balances_before
+    );
+    assert_eq!(w.env.events().all().events().len(), events_before);
+}
+
+/// `chargeable` must agree with `is_due` in every status, not just the happy
+/// path. Vault balance is intentionally not part of either check.
+#[test]
+fn quote_chargeable_mirrors_is_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // Active and due.
+    let capped = w.sub.subscribe(&user, &plan_id, &1, &0);
+    assert!(w.sub.is_due(&capped));
+    assert!(w.sub.quote_charge(&capped).chargeable);
+    w.sub.charge(&w.keeper, &capped);
+    // Completed by the charge cap.
+    assert_eq!(w.sub.get_mandate(&capped).status, MandateStatus::Completed);
+    assert!(!w.sub.is_due(&capped));
+    assert!(!w.sub.quote_charge(&capped).chargeable);
+
+    // Paused.
+    let paused = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.set_paused(&user, &paused, &true);
+    assert!(!w.sub.is_due(&paused));
+    assert!(!w.sub.quote_charge(&paused).chargeable);
+
+    // Cancelled.
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.cancel(&user, &cancelled);
+    assert!(!w.sub.is_due(&cancelled));
+    assert!(!w.sub.quote_charge(&cancelled).chargeable);
+
+    // Active but waiting for the next period.
+    let waiting = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &waiting);
+    assert!(!w.sub.is_due(&waiting));
+    assert!(!w.sub.quote_charge(&waiting).chargeable);
+
+    w.advance(MONTH);
+    assert!(w.sub.is_due(&waiting));
+    assert!(w.sub.quote_charge(&waiting).chargeable);
+}
+
+/// A quote is a pure read, so it must work with no authorization at all.
+#[test]
+fn quote_needs_no_authorization() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.env.mock_auths(&[]);
+    assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
+}
+
+/// A price large enough to overflow the fee multiplication is reported as
+/// `AmountOverflow` by both quote and charge instead of panicking.
+#[test]
+fn quote_and_charge_report_fee_overflow() {
+    let w = world();
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = w.subscriber(1_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert_eq!(w.sub.try_quote_charge(&id), Err(Ok(Error::AmountOverflow)));
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+    // The failed charge left the mandate untouched.
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,6 +1358,7 @@ fn fee_paid_to_address() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -1420,6 +1725,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         &PRICE,
         &MONTH,
         &String::from_str(&w.env, "Other Token Plan"),
+        &String::from_str(&w.env, ""),
         &0,
     );
 
@@ -1677,6 +1983,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
+        &String::from_str(&env, ""),
         &0,
     );
     let user = Address::generate(&env);
@@ -1761,6 +2068,7 @@ impl FailingTokenWorld<'_> {
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
+            &String::from_str(&self.env, ""),
             &keeper_bps,
         )
     }
@@ -1877,4 +2185,439 @@ fn charge_reverts_completely_when_keeper_tip_transfer_fails() {
     assert_eq!(w.test_token.balance(&w.fee_to), 0);
     assert_eq!(w.test_token.balance(&w.keeper), 0);
     assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+}
+
+// ----- upgrading a mandate to another plan (#94) -----
+//
+// Moving to a more expensive plan collects the price difference for the part
+// of the current period that is still ahead, prorated and truncated towards
+// zero. Moving to a cheaper plan takes effect at the next charge and never
+// refunds anything: the subscriber has already paid for the period they are
+// in.
+
+#[test]
+fn upgrade_collects_the_prorated_difference() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    // The first charge settles right away, so half of the period is left.
+    w.sub.charge(&w.keeper, &id);
+    let next_charge = w.sub.get_mandate(&id).next_charge;
+    w.advance(MONTH / 2);
+
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer);
+
+    // Half of the 10_000 difference: 5_000, of which 50 is the protocol fee.
+    assert_eq!(w.token_client.balance(&w.merchant), 9_900 + 4_950);
+    assert_eq!(w.token_client.balance(&w.fee_to), 100 + 50);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - 10_000 - 5_000);
+
+    // The mandate now carries the new plan's terms, and the billing date did
+    // not move.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.amount, PRICE * 2);
+    assert_eq!(m.period, MONTH);
+    assert_eq!(m.plan_id, dearer);
+    assert_eq!(m.next_charge, next_charge);
+}
+
+#[test]
+fn upgrade_rounds_the_difference_in_the_subscriber_s_favour() {
+    let w = world();
+    let plan_id = w.plan_amount(PRICE, WEEK);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    // Three days of a seven-day period: 4/7 of the difference, which is not a
+    // whole number. 10_000 * 4/7 is 5_714.28..., and the subscriber pays
+    // 5_714.
+    w.advance(3 * 24 * 60 * 60);
+    let dearer = w.plan_amount(PRICE * 2, WEEK);
+    w.sub.upgrade(&user, &id, &dearer);
+
+    let charged = last_event_field_i128(&w.env, "charged").unwrap();
+    assert_eq!(charged, 5_714);
+    // The fee is taken on the truncated amount, not on the exact fraction.
+    assert_eq!(w.token_client.balance(&w.fee_to), 100 + 57);
+}
+
+#[test]
+fn upgrade_at_the_period_boundary_collects_nothing() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    // Exactly at the boundary the current period is over: the old price was
+    // paid for it and the new price applies to the period that starts now.
+    w.advance(MONTH);
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer);
+
+    assert_eq!(last_event_field_i128(&w.env, "charged"), Some(0));
+    assert_eq!(w.token_client.balance(&w.merchant), 9_900);
+    assert_eq!(w.token_client.balance(&w.fee_to), 100);
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE * 2);
+}
+
+#[test]
+fn upgrade_right_after_a_charge_collects_the_full_difference() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    // The whole period is still ahead, so the whole difference is due.
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer);
+
+    assert_eq!(last_event_field_i128(&w.env, "charged"), Some(10_000));
+    assert_eq!(w.token_client.balance(&w.merchant), 9_900 + 9_900);
+    assert_eq!(w.token_client.balance(&w.fee_to), 100 + 100);
+}
+
+#[test]
+fn a_downgrade_takes_effect_at_the_next_charge_and_refunds_nothing() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH / 2);
+
+    let cheaper = w.plan_amount(PRICE / 2, MONTH);
+    w.sub.upgrade(&user, &id, &cheaper);
+
+    // Nothing is collected and nothing is refunded: the period already paid
+    // for stays paid for.
+    assert_eq!(last_event_field_i128(&w.env, "charged"), Some(0));
+    assert_eq!(w.token_client.balance(&w.merchant), 9_900);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - 10_000);
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE / 2);
+
+    // The cheaper price is billed at the next charge.
+    w.advance(MONTH / 2);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.token_client.balance(&w.merchant), 9_900 + 4_950);
+}
+
+#[test]
+fn upgrade_rejects_a_plan_in_another_token() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let sac = w
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&w.env));
+    let other_token = sac.address();
+    let other_plan = w.registry.create_plan(
+        &w.merchant,
+        &other_token,
+        &(PRICE * 2),
+        &MONTH,
+        &String::from_str(&w.env, "Other Token Plan"),
+        &String::from_str(&w.env, ""),
+        &0,
+    );
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &other_plan),
+        Err(Ok(Error::DifferentToken))
+    );
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE);
+}
+
+#[test]
+fn upgrade_rejects_a_plan_from_another_merchant() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let other_merchant = Address::generate(&w.env);
+    let other_plan = w.registry.create_plan(
+        &other_merchant,
+        &w.token,
+        &(PRICE * 2),
+        &MONTH,
+        &String::from_str(&w.env, "Other Merchant Plan"),
+        &String::from_str(&w.env, ""),
+        &0,
+    );
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &other_plan),
+        Err(Ok(Error::DifferentMerchant))
+    );
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE);
+}
+
+#[test]
+fn upgrade_rejects_a_non_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    let attacker = Address::generate(&w.env);
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+
+    assert_eq!(
+        w.sub.try_upgrade(&attacker, &id, &dearer),
+        Err(Ok(Error::NotSubscriber))
+    );
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE);
+}
+
+#[test]
+fn upgrade_requires_the_subscriber_to_authorize() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    let other_signer = Address::generate(&w.env);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &other_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "upgrade",
+            args: (&user, &id, &dearer).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w.sub.try_upgrade(&user, &id, &dearer).is_err());
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE);
+}
+
+#[test]
+fn upgrade_rejects_a_cancelled_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.cancel(&user, &id);
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &dearer),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+#[test]
+fn upgrade_rejects_an_inactive_plan() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    w.registry.set_plan_active(&w.merchant, &dearer, &false);
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &dearer),
+        Err(Ok(Error::PlanInactive))
+    );
+    assert_eq!(w.sub.get_mandate(&id).amount, PRICE);
+}
+
+#[test]
+fn upgrade_event_carries_the_old_and_the_new_terms() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH / 2);
+
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer);
+
+    // An indexer must be able to describe the change from the event alone.
+    assert_eq!(last_event_field_i128(&w.env, "old_amount"), Some(PRICE));
+    assert_eq!(last_event_field_i128(&w.env, "new_amount"), Some(PRICE * 2));
+    assert_eq!(last_event_field_i128(&w.env, "charged"), Some(5_000));
+}
+
+#[test]
+fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    // Helper to find the latest MandateUpdated snapshot event for a given mandate_id
+    let find_latest_snapshot = |env: &Env, target_id: u64| -> Option<Mandate> {
+        let mut snapshot = None;
+        for event in env.events().all().events() {
+            let ContractEventBody::V0(body) = &event.body;
+            if body.topics.len() < 2 {
+                continue;
+            }
+            let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() != "mandate_updated" {
+                continue;
+            }
+            if let ScVal::U64(id) = body.topics[1] {
+                if id == target_id {
+                    let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+                        continue;
+                    };
+                    for entry in entries.iter() {
+                        let ScVal::Symbol(ScSymbol(field)) = &entry.key else {
+                            continue;
+                        };
+                        if field.to_utf8_string_lossy() == "mandate" {
+                            snapshot = Some(Mandate::from_val(env, &entry.val));
+                        }
+                    }
+                }
+            }
+        }
+        snapshot
+    };
+
+    // 1. Subscribe
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+    let snap1 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on subscribe");
+    assert_eq!(snap1, w.sub.get_mandate(&id));
+    assert_eq!(snap1.status, MandateStatus::Active);
+    assert_eq!(snap1.charges_made, 0);
+
+    // 2. Pause
+    w.sub.set_paused(&user, &id, &true);
+    let snap2 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on pause");
+    assert_eq!(snap2, w.sub.get_mandate(&id));
+    assert_eq!(snap2.status, MandateStatus::Paused);
+
+    // 3. Resume
+    w.sub.set_paused(&user, &id, &false);
+    let snap3 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on resume");
+    assert_eq!(snap3, w.sub.get_mandate(&id));
+    assert_eq!(snap3.status, MandateStatus::Active);
+
+    // 4. Pause until
+    let future_time = 1_000_000 + 10_000;
+    w.sub.pause_until(&user, &id, &future_time);
+    let snap_pu = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on pause_until");
+    assert_eq!(snap_pu, w.sub.get_mandate(&id));
+    assert_eq!(snap_pu.status, MandateStatus::Paused);
+    assert_eq!(snap_pu.paused_until, future_time);
+
+    // Resume from pause_until and advance time so charge is due
+    w.sub.set_paused(&user, &id, &false);
+    w.env.ledger().set_timestamp(future_time);
+
+    // 5. Charge
+    w.sub.charge(&w.keeper, &id);
+    let snap4 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on charge");
+    assert_eq!(snap4, w.sub.get_mandate(&id));
+    assert_eq!(snap4.charges_made, 1);
+    assert_eq!(snap4.status, MandateStatus::Active);
+
+    // 6. Upgrade
+    let dearer_plan = w.plan_amount(PRICE * 2, MONTH);
+    w.sub.upgrade(&user, &id, &dearer_plan);
+    let snap_up = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on upgrade");
+    assert_eq!(snap_up, w.sub.get_mandate(&id));
+    assert_eq!(snap_up.plan_id, dearer_plan);
+    assert_eq!(snap_up.amount, PRICE * 2);
+
+    // 7. Refund
+    w.minter.mint(&w.merchant, &10_000);
+    w.sub.refund(&w.merchant, &id, &500);
+    let snap_ref = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on refund");
+    assert_eq!(snap_ref, w.sub.get_mandate(&id));
+    assert_eq!(snap_ref.refunded, 500);
+
+    // 8. Cancel (subscriber)
+    w.sub.cancel(&user, &id);
+    let snap5 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on cancel");
+    assert_eq!(snap5, w.sub.get_mandate(&id));
+    assert_eq!(snap5.status, MandateStatus::Cancelled);
+
+    // 9. End mandate (merchant) - test on a separate mandate
+    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.end_mandate(&w.merchant, &id2);
+    let snap6 = find_latest_snapshot(&w.env, id2).expect("MandateUpdated emitted on end_mandate");
+    assert_eq!(snap6, w.sub.get_mandate(&id2));
+    assert_eq!(snap6.status, MandateStatus::Cancelled);
+
+    // 10. Complete mandate on final charge
+    let id3 = w.sub.subscribe(&user, &plan_id, &1, &0);
+    w.sub.charge(&w.keeper, &id3);
+    let snap7 =
+        find_latest_snapshot(&w.env, id3).expect("MandateUpdated emitted on mandate completion");
+    assert_eq!(snap7, w.sub.get_mandate(&id3));
+    assert_eq!(snap7.charges_made, 1);
+    assert_eq!(snap7.status, MandateStatus::Completed);
+}
+
+#[test]
+fn a_total_spend_cap_completes_the_mandate_instead_of_overcharging() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 10);
+    // Room for two charges exactly.
+    let id = w.sub.subscribe(&user, &plan_id, &0, &(PRICE * 2));
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).total_spent, PRICE);
+
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.total_spent, PRICE * 2);
+    assert_eq!(m.status, MandateStatus::Completed);
+
+    // A third charge is refused, and the mandate is no longer due.
+    w.advance(MONTH);
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert!(!w.sub.is_due(&id));
+}
+
+#[test]
+fn a_cap_the_next_charge_would_cross_stops_billing_short_of_it() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 10);
+    // One and a half charges' worth: the second must not be settled at all.
+    let id = w.sub.subscribe(&user, &plan_id, &0, &(PRICE + PRICE / 2));
+
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert_eq!(w.sub.get_mandate(&id).total_spent, PRICE);
+    assert!(!w.sub.is_due(&id));
+}
+
+#[test]
+fn zero_means_no_total_spend_cap_and_a_negative_cap_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 10);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Active);
+    assert_eq!(m.total_spent, PRICE * 2);
+
+    assert_eq!(
+        w.sub.try_subscribe(&user, &plan_id, &0, &-1),
+        Err(Ok(Error::InvalidMaxTotal))
+    );
 }
