@@ -9,6 +9,61 @@ change the contract interface.
 
 ### Added
 
+- `subscription:quote_charge(mandate_id)` returns a read-only
+  `ChargeQuote { amount, fee, merchant_amount, due_at, chargeable }`, so clients
+  no longer have to reimplement the contract's integer fee split. `charge` and
+  `quote_charge` share one private split helper, so the quote cannot drift from
+  settlement; `chargeable` shares the `is_due` check. Quoting an unknown mandate
+  returns `MandateNotFound`, and quoting never writes storage or emits an
+  event. `merchant_amount` is net of both the protocol fee and the keeper tip,
+  and `chargeable` does not consider the vault balance.
+Interface changes (`quote_charge`/`ChargeQuote`, `set_profile`, `profile`,
+`deactivate_page`, `ProfileUpdated`, `create_plan`'s `keeper_bps`, `charge`'s
+`keeper` argument and the new `tip`/`keeper`/`keeper_bps` event fields) ripple
+into `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues
+to consume the new fields, call `quote_charge` instead of recomputing the split,
+and pass the keeper argument are tracked in the pull request.
+- **`quote_charge` tests** — the quote matches `charge` for a price that
+  rounds (99 stroops at 100 bps), excludes the keeper tip from
+  `merchant_amount`, returns `MandateNotFound` for an unknown mandate, never
+  changes storage/balances/events, mirrors `is_due` across active, paused,
+  cancelled and completed mandates, needs no authorization, and reports
+  `AmountOverflow` instead of panicking on an extreme price.
+
+### Security
+
+- **contracts:** add `#![forbid(unsafe_code)]` to every contract crate
+  (`plan-registry`, `vault`, `subscription`). Any attempt to introduce an
+  `unsafe` block now fails the build immediately. No interface or event changes.
+  Closes #97.
+
+- **subscription:** `set_seats(subscriber, mandate_id, seats)` lets the
+  subscriber change the seat count on an active mandate. The new count is stored
+  in `Mandate.seats` and takes effect from the next charge; no proration is
+  applied. Only the subscriber may call it, the mandate must be active (not
+  cancelled or completed), and `seats` must be at least 1, otherwise the call
+  fails with the new `InvalidSeats` error (code 18). Emits the new `SeatsChanged`
+  event (topics `mandate_id`, `subscriber`; data `old_seats`, `new_seats`) and a
+  `MandateUpdated` snapshot. `Mandate` gains the `seats` field (0 for flat-rate
+  mandates that were opened before this change or that do not use seat-based
+  pricing). This is an interface change: `payflow-backend`, `payflow-frontend`
+  and `payflow-docs` need to read the new `Mandate.seats` field, handle the new
+  `seats_changed` event, and map the new error code. Closes #93.
+
+### Changed
+
+- **subscription:** `Mandate` gains a `seats: u32` field, defaulting to `0` for
+  mandates that are not seat-based or opened before this change. This is a
+  breaking storage change: existing deployed mandates do not contain the new
+  field and will fail to decode on deployments that have not been redeployed.
+  `payflow-backend`, `payflow-frontend` and `payflow-docs` need downstream
+  updates.
+
+- **tests:** the subscription, vault and plan-registry suites will assert the
+  exact `env.auths()` tree for every state-changing function, and each mutating
+  function gains a negative test using `mock_auths` with the wrong signer. No
+  interface, event or error changes. Closes the auth-tree test issue.
+
 - **contracts:** expose `version()` on the subscription, plan-registry and vault
   contracts so clients can identify the deployed crate version. This interface
   addition needs handling in payflow-backend, payflow-frontend and payflow-docs.
@@ -62,6 +117,14 @@ change the contract interface.
   behind it are written up in [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
   payflow-backend, payflow-frontend and payflow-docs need the new
   `subscription_upgraded` event and the new error codes. Closes #94.
+
+- **subscription:** `estimated_end(mandate_id)` returns the projected final
+  charge timestamp for capped mandates using the current `next_charge` schedule,
+  including drift after late charges. It returns `None` for open-ended mandates
+  and the actual final charge timestamp after completion. This read interface
+  addition needs handling in payflow-backend, payflow-frontend and payflow-docs;
+  payflow-docs also needs a message for the new `ScheduleOverflow` error. Closes
+  #105.
 
 ### Changed
 

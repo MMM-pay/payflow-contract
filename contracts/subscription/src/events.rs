@@ -204,3 +204,22 @@ pub struct MandateUpdated {
     /// Complete snapshot of the mandate after update.
     pub mandate: crate::types::Mandate,
 }
+
+/// Emitted when a subscriber changes the seat count on their mandate.
+///
+/// The new seat count takes effect from the next charge; no money moves at the
+/// time this event is emitted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeatsChanged {
+    /// ID of the mandate whose seat count changed.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber who made the change.
+    #[topic]
+    pub subscriber: Address,
+    /// Seat count before the change.
+    pub old_seats: u32,
+    /// Seat count after the change, effective from the next charge.
+    pub new_seats: u32,
+}

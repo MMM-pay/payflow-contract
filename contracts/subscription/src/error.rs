@@ -47,4 +47,13 @@ pub enum Error {
     /// upgrade: the mandate's merchant decides who is paid and who may
     /// refund.
     DifferentMerchant = 17,
+    /// The estimated end timestamp for a mandate's remaining schedule overflows `u64`.
+    ScheduleOverflow = 18,
+    /// The seat count is zero, or exceeds the plan's `max_seats`.
+    InvalidSeats = 19,
+    /// The seat count was supplied for a plan that is not seat-based, or was
+    /// omitted for one that is.
+    SeatsNotApplicable = 20,
+    /// `price * seats` overflows `i128`.
+    SeatsOverflow = 21,
 }

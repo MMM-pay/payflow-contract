@@ -84,8 +84,31 @@ pub struct Mandate {
     /// merchant can never refund more than it has collected, so this counter
     /// is the hard cap `refund` enforces.
     pub refunded: i128,
+    /// Number of seats the subscriber is paying for. `1` for non-seat plans.
+    /// `amount` already equals the per-seat price multiplied by this value.
+    pub seats: u32,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
+}
+
+/// Read-only preview of what `charge` would pay right now.
+///
+/// Clients use this instead of recomputing the merchant/fee split, so a quote
+/// can never disagree with settlement because of a different rounding rule.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChargeQuote {
+    /// Total the subscriber would be debited: the mandate's frozen price.
+    pub amount: i128,
+    /// Protocol fee, truncated to whole stroops exactly as `charge` does.
+    pub fee: i128,
+    /// The merchant's share after both the protocol fee and the keeper tip.
+    pub merchant_amount: i128,
+    /// Unix seconds at which the mandate next becomes chargeable.
+    pub due_at: u64,
+    /// True when `charge` would pass its status, cap and timing checks right
+    /// now. Vault balance is not considered, matching `is_due`.
+    pub chargeable: bool,
 }
 
 /// Storage keys used by the subscription contract.

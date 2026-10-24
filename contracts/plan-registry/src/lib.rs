@@ -5,6 +5,10 @@
 
 #![no_std]
 #![deny(missing_docs)]
+// `deny`, not `forbid`: soroban-sdk's #[contractimpl] expansion carries its
+// own #[allow(unsafe_code)], which `forbid` cannot be overridden by. `deny`
+// still fails the build on any unsafe block written in this crate.
+#![deny(unsafe_code)]
 
 #[allow(missing_docs)]
 mod error;

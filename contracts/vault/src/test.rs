@@ -7,6 +7,7 @@ use soroban_sdk::{
     token::{StellarAssetClient, TokenClient},
     Address, Env, IntoVal, String,
 };
+use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 
 struct Harness<'a> {
     env: Env,
@@ -92,6 +93,43 @@ fn deposit_rejects_non_positive() {
         h.vault.try_deposit(&user, &h.token, &-5),
         Err(Ok(Error::InvalidAmount))
     );
+}
+
+#[test]
+fn deposit_auth_tree_is_exact() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(
+        auths[0].1.function,
+        AuthorizedFunction::Contract((
+            h.vault_id.clone(),
+            Symbol::new(&h.env, "deposit"),
+            (user.clone(), h.token.clone(), 1_000i128).into_val(&h.env),
+        ))
+    );
+}
+
+#[test]
+fn deposit_rejects_wrong_signer() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let intruder = Address::generate(&h.env);
+    h.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &intruder,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "deposit",
+            args: (user.clone(), h.token.clone(), 1_000i128).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_deposit(&user, &h.token, &1_000).is_err());
 }
 
 #[test]
