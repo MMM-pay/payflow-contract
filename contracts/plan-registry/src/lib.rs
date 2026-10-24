@@ -21,7 +21,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanRenamed, PlanStatusChanged, ProfileUpdated};
+pub use events::{PlanCreated, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
@@ -196,68 +196,61 @@ mod contract {
             }
             .publish(&env);
 
-    /// Set the name of a plan. Only the plan's merchant may rename it.
-    /// The name is bounded by `MAX_NAME_LEN` bytes; longer names are rejected.
-    /// Emits `PlanRenamed` so indexers and the UI can update immediately.
-    pub fn set_plan_name(
-        env: Env,
-        merchant: Address,
-        plan_id: u64,
-        name: String,
-    ) -> Result<(), Error> {
-        merchant.require_auth();
-
-        if name.len() > MAX_NAME_LEN {
-            return Err(Error::PlanNameTooLong);
+            Ok(id)
         }
 
-        let mut plan: Plan = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Plan(plan_id))
-            .ok_or(Error::PlanNotFound)?;
+        /// Rename a plan. Only the plan's own merchant may do this, and only
+        /// the label changes: price, period, token and status are frozen once
+        /// a plan is published, because subscribers' mandates are priced from
+        /// them.
+        ///
+        /// # Errors
+        /// [`Error::PlanNameTooLong`] if `name` exceeds [`MAX_NAME_LEN`],
+        /// [`Error::PlanNotFound`] if no such plan exists, and
+        /// [`Error::NotPlanOwner`] if `merchant` does not own it.
+        ///
+        /// # Auth
+        /// Requires authorization from `merchant`.
+        ///
+        /// # Events
+        /// Emits [`PlanRenamed`].
+        pub fn set_plan_name(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            name: String,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
 
-        if plan.merchant != merchant {
-            return Err(Error::NotPlanOwner);
-        }
+            if name.len() > MAX_NAME_LEN {
+                return Err(Error::PlanNameTooLong);
+            }
 
-        plan.name = name.clone();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Plan(plan_id), &plan);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Plan(plan_id),
-            PERSIST_THRESHOLD,
-            PERSIST_BUMP,
-        );
+            let key = DataKey::Plan(plan_id);
+            let mut plan: Plan = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(Error::PlanNotFound)?;
 
-        PlanRenamed {
-            merchant,
-            plan_id,
-            name,
-        }
-        .publish(&env);
+            if plan.merchant != merchant {
+                return Err(Error::NotPlanOwner);
+            }
 
-        Ok(())
-    }
+            plan.name = name.clone();
+            env.storage().persistent().set(&key, &plan);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
 
-    /// Set or replace `merchant`'s self-declared profile: a display name and a
-    /// URL (website or terms). The profile is not verified by the contract;
-    /// subscribers should treat it as a claim the merchant makes about itself.
-    /// Only the merchant may set its own profile.
-    pub fn set_profile(
-        env: Env,
-        merchant: Address,
-        name: String,
-        url: String,
-    ) -> Result<(), Error> {
-        merchant.require_auth();
+            PlanRenamed {
+                merchant,
+                plan_id,
+                name,
+            }
+            .publish(&env);
 
-        if name.len() > MAX_NAME_LEN {
-            return Err(Error::ProfileNameTooLong);
-        }
-        if url.len() > MAX_URL_LEN {
-            return Err(Error::ProfileUrlTooLong);
+            Ok(())
         }
 
         /// Activate or deactivate a plan. Deactivating stops new subscriptions but

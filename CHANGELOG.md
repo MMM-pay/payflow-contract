@@ -9,6 +9,12 @@ change the contract interface.
 
 ### Added
 
+- `plan-registry:set_plan_name(merchant, plan_id, name)`: a merchant can rename
+  any of its plans. The name is bounded by `MAX_NAME_LEN` bytes (64); longer
+  names are rejected with `PlanNameTooLong`. Only the plan's merchant may rename
+  it. Emits `PlanRenamed { merchant, plan_id, name }` so indexers and the UI can
+  update immediately.
+
 - `subscription:quote_charge(mandate_id)` returns a read-only
   `ChargeQuote { amount, fee, merchant_amount, due_at, chargeable }`, so clients
   no longer have to reimplement the contract's integer fee split. `charge` and
@@ -187,11 +193,13 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 ## Unreleased
 
 ### Added
-- `plan-registry:set_plan_name(merchant, plan_id, name)`: a merchant can rename
-  any of its plans. The name is bounded by `MAX_NAME_LEN` bytes (64); longer
-  names are rejected with `PlanNameTooLong`. Only the plan's merchant may rename
-  it. Emits `PlanRenamed { merchant, plan_id, name }` so indexers and the UI can
-  update immediately.
+
+- Generated TypeScript clients for the plan registry, vault and subscription
+  contracts are published together as `@mmm-pay/contracts` on tagged releases.
+  CI verifies the generated package, and a manual testnet smoke workflow calls
+  the registry's read-only `next_plan_id` method. Follow-up adoption issues in
+  `payflow-frontend`, `payflow-backend` and `payflow-docs` should replace
+  handwritten wrappers and document the package as appropriate.
 
 ### Security
 
