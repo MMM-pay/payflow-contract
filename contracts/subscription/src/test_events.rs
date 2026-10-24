@@ -62,6 +62,7 @@ fn subscribed_layout() {
             period: 86_400,
             next_charge: 1_700_000_000,
             max_charges: 24,
+            max_total: 108_000,
             fee_bps: 250,
             keeper_bps: 100,
         },

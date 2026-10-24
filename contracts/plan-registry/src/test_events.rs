@@ -62,6 +62,7 @@ fn plan_created_layout() {
             amount: 12_345,
             period: 86_400,
             name: String::from_str(&env, "sample-plan"),
+            description: String::from_str(&env, "sample description"),
             keeper_bps: 125,
         },
     );
