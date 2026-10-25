@@ -1,0 +1,61 @@
+name: Testnet
+
+# Manual end-to-end check (issue #21): build the wasm, deploy a fresh suite to
+# testnet with a throwaway identity and run the demo smoke test against it.
+# The other CI jobs never execute scripts/deploy.sh or scripts/demo.sh, so a
+# broken script was only found on a maintainer's machine. Run it from the
+# Actions tab before tagging a release.
+#
+# The identity is throwaway: it only pays the deploy fee on testnet, and the
+# suite it deploys is independent of the ids committed in
+# deployments/testnet.env (those are overwritten in this workspace only, and
+# the result is uploaded as an artifact).
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  testnet:
+    name: deploy + demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - uses: stellar/stellar-cli@v27.0.0
+
+      # Funded from friendbot; the scripts fail the job if a deploy or an
+      # invoke fails, which is the point of running them here.
+      - name: Generate and fund a throwaway identity
+        run: stellar keys generate payflow-ci --network testnet --fund
+
+      - name: Deploy the suite
+        run: ./scripts/deploy.sh testnet payflow-ci
+
+      - name: Smoke test (demo.sh)
+        run: ./scripts/demo.sh testnet
+
+      # The ids of the freshly deployed suite, visible without downloading
+      # the artifact.
+      - name: Print ids in the job summary
+        if: always()
+        run: |
+          if [ -f deployments/testnet.env ]; then
+            {
+              echo '### Deployed suite'
+              echo '```'
+              cat deployments/testnet.env
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload deployments/testnet.env
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment
+          path: deployments/testnet.env
+          if-no-files-found: ignore

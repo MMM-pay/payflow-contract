@@ -141,11 +141,14 @@ echo "==> building"
 stellar contract build >/dev/null
 
 # deploy <wasm> [constructor args...]
+# stderr is left alone on purpose: hiding it made a failed deploy
+# undiagnosable. pipefail plus set -e already turn a failure into a non-zero
+# exit for the caller.
 deploy() {
   local wasm="$1"
   shift
   stellar contract deploy --wasm "$WASM_DIR/$wasm" --source "$SOURCE" --network "$NETWORK" \
-    -- "$@" 2>/dev/null | tail -1
+    -- "$@" | tail -1
 }
 
 # Indexers can start from here instead of scanning older ledgers.
@@ -170,9 +173,9 @@ SUBSCRIPTION="$(deploy payflow_subscription.wasm --admin "$ADMIN" \
 # one side has to be wired after both exist. Only the vault admin can do it.
 echo "==> granting debit rights to subscription"
 stellar contract invoke --id "$VAULT" --source "$SOURCE" --network "$NETWORK" \
-  -- set_subscription --subscription "$SUBSCRIPTION" >/dev/null 2>&1
+  -- set_subscription --subscription "$SUBSCRIPTION" >/dev/null
 
-TOKEN="$(stellar contract id asset --asset native --network "$NETWORK" 2>/dev/null | tail -1)"
+TOKEN="$(stellar contract id asset --asset native --network "$NETWORK" | tail -1)"
 
 mkdir -p deployments
 cat > "deployments/$NETWORK.env" <<EOF
