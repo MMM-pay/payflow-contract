@@ -2,12 +2,12 @@
 
 use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
+use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     Address, Env, IntoVal, String,
 };
-use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 
 struct Harness<'a> {
     env: Env,
@@ -898,5 +898,62 @@ fn set_subscription_requires_admin_auth() {
     let other = Address::generate(&h.env);
     h.env.set_auths(&[]);
     assert!(h.vault.try_set_subscription(&other).is_err());
+    assert_eq!(h.vault.subscription(), h.subscription);
+}
+
+// ---------------------------------------------------------------------------
+// Admin-gated upgrades
+// ---------------------------------------------------------------------------
+
+/// Real wasm bytes for the upgrade tests. `env.deployer()
+/// .upload_contract_wasm` needs a compiled module, and cargo does not produce
+/// one on the host target these tests run on. Built from this contract with
+/// `stellar contract build`; refresh the fixture when the contract's storage
+/// layout changes (copy from `target/wasm32v1-none/release/`).
+const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_vault.wasm");
+
+#[test]
+fn admin_can_upgrade_and_state_written_before_survives() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000); // persistent state
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    // The balance and the instance configuration written before the upgrade
+    // are both still readable after it.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.subscription(), h.subscription);
+
+    // And the new code still runs: deposits continue where they left off.
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+#[test]
+fn a_stranger_cannot_upgrade_the_vault() {
+    let h = setup();
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+
+    // The attacker passes the hash as the argument, but the signature on the
+    // call is the attacker's: `require_auth` on the admin fails.
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // With no authorization at all the call fails too.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The subscription pointer and balances are untouched.
     assert_eq!(h.vault.subscription(), h.subscription);
 }

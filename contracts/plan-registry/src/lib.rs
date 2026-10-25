@@ -23,11 +23,15 @@ mod test;
 mod test_events;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated};
+pub use events::{
+    ContractUpgraded, PlanCreated, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, ProfileUpdated,
+};
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::MAX_KEEPER_BPS;
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, Address, BytesN, ContractExecutable, Env, String, Symbol, Vec,
+};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -90,6 +94,12 @@ mod contract {
         /// keeps the tip it was opened with, so raising the tip later cannot take
         /// money from an existing subscriber or merchant.
         ///
+        /// `max_subscribers` caps how many mandates may be open against this plan
+        /// at once; 0 means unlimited. It is enforced by the subscription
+        /// contract, which counts open mandates per plan: a `subscribe` beyond
+        /// the cap fails with `PlanFull`. Like the other terms it is immutable,
+        /// so a merchant cannot shrink the cap below the mandates already open.
+        ///
         /// # Auth
         /// Requires authorization from `merchant`.
         ///
@@ -113,6 +123,7 @@ mod contract {
             description: String,
             keeper_bps: u32,
             category: Symbol,
+            max_subscribers: u32,
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
@@ -150,6 +161,7 @@ mod contract {
                 keeper_bps,
                 category: category.clone(),
                 successor_id: 0,
+                max_subscribers,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -198,6 +210,7 @@ mod contract {
                 description,
                 keeper_bps,
                 category,
+                max_subscribers,
             }
             .publish(&env);
 
@@ -602,6 +615,29 @@ mod contract {
                 .instance()
                 .get(&DataKey::Admin)
                 .ok_or(Error::NotInitialized)
+        }
+
+        /// Replace this contract's code with the wasm already uploaded under
+        /// `new_wasm_hash`. Admin-only: the code defines who owns which plan, so
+        /// only the admin may swap it.
+        ///
+        /// Instance and persistent storage are untouched by an upgrade — the new
+        /// code reads the keys the old code wrote. Storage-compatibility rules
+        /// (append-only enums, no key renames) are in CONTRIBUTING.md.
+        pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin: Address = Self::admin(env.clone())?;
+            admin.require_auth();
+
+            env.deployer()
+                .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+
+            ContractUpgraded {
+                admin,
+                new_wasm_hash,
+            }
+            .publish(&env);
+
+            Ok(())
         }
     }
 }

@@ -71,6 +71,11 @@ mod plan {
         /// has no successor. The pointer never re-prices an open mandate: a mandate
         /// keeps the terms of the plan it was opened against.
         pub successor_id: u64,
+        /// How many mandates may be open against this plan at once. 0 means
+        /// unlimited. Enforced by the subscription contract, which is the only
+        /// contract that observes cancels, endings and completions, so it can
+        /// release a seat when a mandate stops being open.
+        pub max_subscribers: u32,
     }
 }
 pub use plan::Plan;

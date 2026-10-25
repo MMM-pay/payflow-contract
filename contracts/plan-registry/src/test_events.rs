@@ -66,6 +66,7 @@ fn plan_created_layout() {
             description: String::from_str(&env, "sample description"),
             keeper_bps: 125,
             category: Symbol::new(&env, "fitness"),
+            max_subscribers: 25,
         },
     );
 }
