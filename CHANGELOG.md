@@ -323,4 +323,94 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   through the real `charge` path in the subscription contract.
 - **Test: token transfer failure behaviour** — adds `payflow-test-token`, a
   test-only token contract that can be configured to fail transfers globally or
-  for targeted 
+  for targeted accounts.
+- `subscription:set_max_charges(subscriber, mandate_id, max_charges)`: the
+  subscriber can raise, lower or reopen (0) the spend cap of an Active or
+  Paused mandate without cancelling and losing its id and history. A cap below
+  `charges_made` is rejected with the existing `InvalidMaxCharges`; a cap at
+  `charges_made` completes the mandate here and releases its plan seat. Emits
+  `MaxChargesChanged`, plus `MandateCompleted` when it finishes the mandate.
+- **Plan subscriber cap (issue #25).** `plan-registry:create_plan` takes
+  `max_subscribers: u32` (0 = unlimited), stored in `Plan` and emitted in
+  `PlanCreated`. The subscription contract counts open seats per plan,
+  rejects `subscribe` beyond the cap with the new error `PlanFull` (27,
+  appended so existing codes keep their numbers), releases a seat on cancel,
+  `end_mandate` and completion, and exposes the count as
+  `subscription:plan_subscriber_count(plan_id)`. Unlimited plans behave
+  exactly as before.
+- **Admin-gated upgrades (issue #19).** All three contracts gain
+  `upgrade_wasm(new_wasm_hash)`: admin-only, swaps the code in place while storage
+  stays untouched, and emits `ContractUpgraded` with the admin and the new wasm hash.
+  `scripts/upgrade.sh <contract> <network> [identity]` uploads the freshly
+  built wasm and invokes it; the storage-compatibility rules for new code are
+  in CONTRIBUTING.md.
+- **Manual testnet workflow (issue #21).** `.github/workflows/testnet.yml`
+  (`workflow_dispatch`) builds the wasm, funds a throwaway identity, runs
+  `deploy.sh testnet` and `demo.sh testnet`, prints the deployed ids in the
+  job summary and uploads `deployments/testnet.env` as an artifact. Both
+  scripts stopped hiding errors behind `2>/dev/null`, and `demo.sh` no longer
+  greps the charge output — a failed deploy or invoke now fails the run.
+- `docs/adr/`: five architecture decision records (vault/billing split,
+  `now + period` scheduling, constructors, per-position indexes,
+  permissionless `charge`), linked from README.
+
+Interface changes (`set_profile`, `profile`, `deactivate_page`,
+`ProfileUpdated`, `create_plan`'s `keeper_bps` and `max_subscribers`,
+`charge`'s `keeper` argument, the new `tip`/`keeper`/`keeper_bps` event fields,
+plus `MaxChargesChanged`, `ContractUpgraded` and `plan_subscriber_count`) ripple into
+`payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
+consume the new fields and pass the new arguments are tracked in the pull
+request.
+
+### Changed
+
+- **Breaking:** `charge` takes the settling `keeper: Address` and requires its
+  authorization; it no longer settles without a signature. Any address may
+  still act as keeper.
+- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
+  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
+  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
+  and `Mandate` values do not decode into the new shape.
+- **Breaking:** `plan-registry:create_plan` takes `max_subscribers: u32` as
+  its last argument (after `description`, `keeper_bps` and `category`), and `Plan` and `PlanCreated` gain
+  that field. Callers in `payflow-backend`, `payflow-frontend` and
+  `payflow-docs` must pass it — use `0` for an unlimited plan.
+- **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+  take `start` and `limit` and return at most 50 ids per call.
+- **Breaking:** `initialize` is replaced by `__constructor` in all three
+  contracts.
+- `rust-toolchain.toml` names the `wasm32v1-none` target that
+  `stellar contract build` uses.
+
+### Tests
+
+- 63 → 250 tests, covering paging limits, entry footprint limits, merchant
+  ending and constructor configuration.
+- **Keeper tip tests:** the tip is paid from the merchant's share, the
+  subscriber pays the same total with or without it, a missing or wrong signer
+  cannot settle or collect, and the registry rejects a tip above the cap.
+- **Plan-cap tests:** the seat count rises on `subscribe` and drops on cancel,
+  `end_mandate` and completion; `subscribe` past `max_subscribers` fails with
+  `PlanFull` and the count is unchanged; a `max_subscribers = 0` plan never
+  fills; the registry stores and emits the cap.
+- **`set_max_charges` tests:** only the subscriber may change the cap (a
+  stranger fails the auth check), a cap below `charges_made` fails with
+  `InvalidMaxCharges`, a cap at `charges_made` completes the mandate and
+  releases its seat, and pause and cap stay independent.
+- **Upgrade tests (all three contracts):** the admin swaps the wasm and every
+  value written before it (balances, config, mandates, plans) is still
+  readable afterwards; a stranger's `upgrade` is rejected and configuration
+  is untouched.
+- **New test: `admin_has_no_path_to_user_funds`** — asserts that `set_subscription`
+  does not change any user balances.
+- **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
+  is transferred to the `fee_to` address when a mandate is charged.
+
+## [0.1.0] - 2026-09-02
+
+First testnet deployment: plan registry, vault and subscription contracts with
+permissionless `charge`, spend caps, pause and cancel, and a capped protocol
+fee.
+
+[0.2.0]: https://github.com/MMM-pay/payflow-contract/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/MMM-pay/payflow-contract/releases/tag/v0.1.0
