@@ -68,4 +68,6 @@ pub enum Error {
     BatchTooLarge = 25,
     /// A batch subscription was given no plans.
     EmptyBatch = 26,
+    /// The plan already has `max_subscribers` mandates open.
+    PlanFull = 27,
 }

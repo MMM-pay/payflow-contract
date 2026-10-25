@@ -1,6 +1,6 @@
 //! Events emitted by the subscription contract.
 
-use soroban_sdk::{contractevent, Address};
+use soroban_sdk::{contractevent, Address, BytesN};
 
 /// Emitted when a subscriber opens a new mandate against a plan.
 #[contractevent]
@@ -213,6 +213,19 @@ pub struct Upgraded {
     pub next_charge: u64,
 }
 
+/// Emitted when a subscriber changes the charge cap of their own open
+/// mandate. The mandate keeps its id and history; only the limit moves.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaxChargesChanged {
+    #[topic]
+    pub mandate_id: u64,
+    #[topic]
+    pub subscriber: Address,
+    /// New cap. 0 means the mandate is now open-ended.
+    pub max_charges: u32,
+}
+
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
 /// after this point only; existing mandates keep the fee they were opened with.
 #[contractevent]
@@ -257,4 +270,16 @@ pub struct SeatsChanged {
     pub old_seats: u32,
     /// Seat count after the change, effective from the next charge.
     pub new_seats: u32,
+}
+
+/// Emitted when the admin replaces this contract's wasm. Persistent state is
+/// untouched by an upgrade; the new code reads the keys the old code wrote.
+/// Named `ContractUpgraded` because `Upgraded` is already taken by the
+/// mandate-plan upgrade event above.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
 }

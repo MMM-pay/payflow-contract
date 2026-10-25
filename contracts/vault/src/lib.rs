@@ -26,10 +26,12 @@ mod test;
 mod test_events;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
+pub use events::{ContractUpgraded, Debit, Deposit, DepositCapSet, Withdraw};
 pub use types::DataKey;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
+};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -390,6 +392,33 @@ mod contract {
                 .instance()
                 .get(&DataKey::Admin)
                 .ok_or(Error::NotInitialized)
+        }
+
+        /// Replace this contract's code with the wasm already uploaded under
+        /// `new_wasm_hash`. Admin-only: the code guards every balance, so only
+        /// the admin may swap it.
+        ///
+        /// Balances live in persistent storage and are untouched by an upgrade —
+        /// the new code reads the keys the old code wrote. Storage-compatibility
+        /// rules (append-only enums, no key renames) are in CONTRIBUTING.md.
+        pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            admin.require_auth();
+
+            env.deployer()
+                .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+
+            ContractUpgraded {
+                admin,
+                new_wasm_hash,
+            }
+            .publish(&env);
+
+            Ok(())
         }
     }
 

@@ -109,6 +109,7 @@ impl World<'_> {
             &String::from_str(&self.env, ""),
             &keeper_bps,
             &Symbol::new(&self.env, ""),
+            &0,
         )
     }
 
@@ -123,6 +124,22 @@ impl World<'_> {
             &String::from_str(&self.env, ""),
             &0,
             &Symbol::new(&self.env, ""),
+            &0,
+        )
+    }
+
+    /// A plan that accepts at most `max_subscribers` open mandates.
+    fn plan_with_cap(&self, max_subscribers: u32) -> u64 {
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &PRICE,
+            &MONTH,
+            &String::from_str(&self.env, "Seated Plan"),
+            &String::from_str(&self.env, ""),
+            &0,
+            &Symbol::new(&self.env, ""),
+            &max_subscribers,
         )
     }
 
@@ -351,6 +368,28 @@ fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
         }
     }
     found
+}
+
+/// Pull a u32 field out of the data map of the most recently emitted event.
+/// Used where an earlier event carries the same field name with a different
+/// value, so scanning every event would find a stale one.
+fn last_event_field_u32(env: &Env, field: &str) -> Option<u32> {
+    let last = env.events().all().events().last().cloned()?;
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+        return None;
+    };
+    for entry in entries.iter() {
+        let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+            continue;
+        };
+        if name.to_utf8_string_lossy() == field {
+            if let ScVal::U32(v) = entry.val {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 #[test]
@@ -809,6 +848,7 @@ fn zero_fee_pays_merchant_in_full() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &0,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1368,6 +1408,7 @@ fn fee_paid_to_address() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &0,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1736,6 +1777,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &0,
     );
 
     let user = w.subscriber(1_000_000);
@@ -1995,6 +2037,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &0,
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);
@@ -2131,6 +2174,7 @@ impl FailingTokenWorld<'_> {
             &String::from_str(&self.env, ""),
             &keeper_bps,
             &Symbol::new(&self.env, ""),
+            &0,
         )
     }
 
@@ -2388,6 +2432,7 @@ fn upgrade_rejects_a_plan_in_another_token() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &0,
     );
 
     assert_eq!(
@@ -2414,6 +2459,7 @@ fn upgrade_rejects_a_plan_from_another_merchant() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &0,
     );
 
     assert_eq!(
@@ -2473,6 +2519,240 @@ fn upgrade_rejects_a_cancelled_mandate() {
 
     assert_eq!(
         w.sub.try_upgrade(&user, &id, &dearer),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+// Plan subscriber cap (max_subscribers)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscribe_rejects_a_full_plan() {
+    let w = world();
+    let plan_id = w.plan_with_cap(2);
+    let a = w.subscriber(100_000);
+    let b = w.subscriber(100_000);
+    let rejected = w.subscriber(100_000);
+
+    w.sub.subscribe(&a, &plan_id, &0, &0);
+    w.sub.subscribe(&b, &plan_id, &0, &0);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 2);
+
+    // The plan is full: no mandate is opened and the counter is unchanged.
+    assert_eq!(
+        w.sub.try_subscribe(&rejected, &plan_id, &0, &0),
+        Err(Ok(Error::PlanFull))
+    );
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 2);
+    assert_eq!(w.sub.subscriber_mandate_count(&rejected), 0);
+}
+
+#[test]
+fn cancelling_frees_a_seat_on_a_full_plan() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let first = w.subscriber(100_000);
+    let id = w.sub.subscribe(&first, &plan_id, &0, &0);
+
+    let second = w.subscriber(100_000);
+    assert_eq!(
+        w.sub.try_subscribe(&second, &plan_id, &0, &0),
+        Err(Ok(Error::PlanFull))
+    );
+
+    w.sub.cancel(&first, &id);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+
+    // The freed seat is immediately usable.
+    w.sub.subscribe(&second, &plan_id, &0, &0);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+}
+
+#[test]
+fn ending_a_mandate_frees_a_seat() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let first = w.subscriber(100_000);
+    let id = w.sub.subscribe(&first, &plan_id, &0, &0);
+
+    w.sub.end_mandate(&w.merchant, &id);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+
+    let second = w.subscriber(100_000);
+    w.sub.subscribe(&second, &plan_id, &0, &0);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+}
+
+#[test]
+fn completion_frees_a_seat() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let first = w.subscriber(100_000);
+    // Capped at one charge: the mandate completes on the first charge.
+    let id = w.sub.subscribe(&first, &plan_id, &1, &0);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+
+    let second = w.subscriber(100_000);
+    w.sub.subscribe(&second, &plan_id, &0, &0);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+}
+
+#[test]
+fn paused_mandates_still_hold_their_seat() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let first = w.subscriber(100_000);
+    let id = w.sub.subscribe(&first, &plan_id, &0, &0);
+    w.sub.set_paused(&first, &id, &true);
+
+    // Paused is still open: resuming later must keep working, so the seat is
+    // not released.
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+    let second = w.subscriber(100_000);
+    assert_eq!(
+        w.sub.try_subscribe(&second, &plan_id, &0, &0),
+        Err(Ok(Error::PlanFull))
+    );
+
+    w.sub.set_paused(&first, &id, &false);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn unlimited_plans_accept_any_number_of_subscribers() {
+    let w = world();
+    let plan_id = w.plan(); // max_subscribers = 0: unlimited
+    let user = w.subscriber(1_000_000);
+
+    for _ in 0..5 {
+        w.sub.subscribe(&user, &plan_id, &0, &0);
+    }
+    // The count still tracks open mandates so an indexer can read it, but
+    // nothing is ever rejected for being full.
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 5);
+}
+
+// ---------------------------------------------------------------------------
+// Changing the charge cap of an open mandate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscriber_can_raise_the_cap_of_an_open_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+
+    // "Three more months": raise without cancelling, keeping the mandate id
+    // and its charge history.
+    w.sub.set_max_charges(&user, &id, &4);
+
+    // The test env exposes the events of the invocation that just ran, so
+    // assert them before any further call.
+    assert_eq!(last_event_field_u32(&w.env, "max_charges"), Some(4));
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.max_charges, 4);
+    assert_eq!(m.charges_made, 1);
+    assert_eq!(m.status, MandateStatus::Active);
+
+    // The new cap binds: billing continues past where the old cap stopped.
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
+}
+
+#[test]
+fn only_the_subscriber_can_change_the_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+
+    // A stranger fails the ownership check even though auth is mocked.
+    let attacker = Address::generate(&w.env);
+    assert_eq!(
+        w.sub.try_set_max_charges(&attacker, &id, &99),
+        Err(Ok(Error::NotSubscriber))
+    );
+    // The merchant cannot raise what its own subscriber pays either.
+    assert_eq!(
+        w.sub.try_set_max_charges(&w.merchant, &id, &99),
+        Err(Ok(Error::NotSubscriber))
+    );
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 2);
+}
+
+#[test]
+fn a_different_signer_cannot_change_the_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+    let attacker = Address::generate(&w.env);
+
+    // The attacker passes the subscriber's address as the argument, but the
+    // signature on the call is the attacker's: `require_auth` on the
+    // subscriber fails and the cap is unchanged.
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "set_max_charges",
+            args: (&user, &id, &99u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_set_max_charges(&user, &id, &99).is_err());
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 2);
+}
+
+#[test]
+fn lowering_the_cap_to_charges_made_completes_the_mandate() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0); // open-ended
+
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+
+    // "Stop after the current one": cap == charges_made finishes the mandate
+    // right here, exactly as the next charge would have.
+    w.sub.set_max_charges(&user, &id, &2);
+
+    // The test env exposes the events of the invocation that just ran, so
+    // assert them before any further call. MandateCompleted is the last of
+    // the two events this call emits.
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "mandate_completed".try_into().unwrap();
+    assert_eq!(name, &expected);
+    assert_eq!(last_event_field_u32(&w.env, "charges_made"), Some(2));
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.max_charges, 2);
+    assert_eq!(m.status, MandateStatus::Completed);
+    assert!(!w.sub.is_due(&id));
+    // The finished mandate released its seat on the capped plan.
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+
+    w.advance(MONTH);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
         Err(Ok(Error::MandateNotActive))
     );
 }
@@ -2838,4 +3118,139 @@ fn due_mandates_agrees_with_is_due_and_needs_no_auth() {
     w.sub.cancel(&user, &id);
     assert!(!w.sub.is_due(&id));
     assert!(w.sub.due_mandates(&w.merchant, &0, &u32::MAX).is_empty());
+}
+
+#[test]
+fn a_cap_below_charges_made_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
+
+    // The subscriber already paid two charges' worth; a cap of 1 would sit
+    // below what has been charged and is rejected.
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &id, &1),
+        Err(Ok(Error::InvalidMaxCharges))
+    );
+    // 0 reopens an open-ended mandate, which is never below the count.
+    w.sub.set_max_charges(&user, &id, &0);
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 0);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn raising_the_cap_works_on_a_paused_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    w.sub.set_paused(&user, &id, &true);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Paused);
+
+    w.sub.set_max_charges(&user, &id, &3);
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 3);
+    // Raising does not resume on its own: pause and cap are independent.
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Paused);
+
+    w.sub.set_paused(&user, &id, &false);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
+}
+
+#[test]
+fn changing_the_cap_of_a_cancelled_mandate_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.cancel(&user, &id);
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &id, &5),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Admin-gated upgrades
+// ---------------------------------------------------------------------------
+
+/// Real wasm bytes for the upgrade tests. `env.deployer()
+/// .upload_contract_wasm` needs a compiled module, and cargo does not produce
+/// one on the host target these tests run on. Built from this contract with
+/// `stellar contract build`; refresh the fixture when the contract's storage
+/// layout changes (copy from `target/wasm32v1-none/release/`).
+const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_subscription.wasm");
+
+#[test]
+fn admin_can_upgrade_and_state_written_before_survives() {
+    let w = world();
+    let plan_id = w.plan_with_cap(4);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    w.sub.upgrade_wasm(&wasm_hash);
+
+    // The test env exposes the events of the invocation that just ran:
+    // the upgrade must have announced itself.
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "contract_upgraded".try_into().unwrap();
+    assert_eq!(name, &expected);
+
+    // The mandate, its seat on the plan, and the fee config written before
+    // the upgrade are all still readable after it.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 1);
+    assert_eq!(m.max_charges, 2);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+
+    // And the new code still settles charges.
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - 2 * PRICE);
+}
+
+#[test]
+fn a_stranger_cannot_upgrade_the_subscription_contract() {
+    let w = world();
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&w.env);
+
+    // The attacker passes the hash as the argument, but the signature on the
+    // call is the attacker's: `require_auth` on the admin fails.
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // With no authorization at all the call fails too.
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // Configuration is untouched by the rejected upgrades.
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
 }

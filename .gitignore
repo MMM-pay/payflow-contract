@@ -2,6 +2,11 @@ target/
 .env
 .env.local
 *.wasm
+# Prebuilt fixtures for the upgrade tests: `env.deployer()
+# .upload_contract_wasm` needs real wasm bytes, which cargo does not produce
+# on the host target the tests run on. Refresh with `stellar contract build`
+# and copy from target/wasm32v1-none/release/.
+!contracts/*/testdata/*.wasm
 .DS_Store
 .stellar/
 contracts/*/test_snapshots/*

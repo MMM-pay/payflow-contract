@@ -149,4 +149,7 @@ pub enum DataKey {
     MerchantMandateCount(Address),
     /// The n-th mandate opened against a merchant's plans (0-based).
     MerchantMandate(Address, u32),
+    /// Number of mandates currently open (active or paused) against a plan.
+    /// This is the counter `max_subscribers` is checked against.
+    PlanSubscriberCount(u64),
 }

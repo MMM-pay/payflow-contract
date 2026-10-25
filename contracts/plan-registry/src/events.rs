@@ -1,6 +1,6 @@
 //! Events emitted by the plan registry contract.
 
-use soroban_sdk::{contractevent, Address, String, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
 /// Emitted when a merchant publishes a new plan.
 #[contractevent]
@@ -26,6 +26,9 @@ pub struct PlanCreated {
     pub keeper_bps: u32,
     /// Discovery category the merchant chose, empty when it chose none.
     pub category: Symbol,
+    /// Seat cap frozen into the plan; 0 means unlimited. Carried in the event
+    /// so indexers need no follow-up contract read.
+    pub max_subscribers: u32,
 }
 
 /// Emitted when a merchant activates or deactivates a plan.
@@ -79,4 +82,14 @@ pub struct PlanRenamed {
     #[topic]
     pub plan_id: u64,
     pub name: String,
+}
+
+/// Emitted when the admin replaces this contract's wasm. Persistent state is
+/// untouched by an upgrade; the new code reads the keys the old code wrote.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
 }
