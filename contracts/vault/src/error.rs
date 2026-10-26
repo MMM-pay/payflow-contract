@@ -32,4 +32,8 @@ pub enum Error {
     AllowanceInsufficient = 9,
     /// The SEP-41 allowance granted to the vault has expired (its expiration ledger has passed).
     AllowanceExpired = 10,
+    /// `amount_a + amount_b` passed to `debit_split` would overflow `i128`.
+    /// The split is rejected rather than wrapped, because a wrapped total
+    /// would under-charge the subscriber.
+    AmountOverflow = 11,
 }

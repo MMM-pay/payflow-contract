@@ -55,6 +55,29 @@ pub const MAX_FEE_BPS: u32 = 1_000;
 /// so a page of 50 leaves room for the entries the caller reads alongside it.
 pub const MAX_PAGE: u32 = 50;
 
+/// Cancellation code reported by [`Subscription::cancel`] and
+/// [`Subscription::cancel_page`]: the subscriber gave no reason. Also accepted
+/// by [`Subscription::cancel_with_reason`], so a client that always sends a
+/// code can still let the subscriber skip the question.
+pub const CANCEL_REASON_NONE: u32 = 0;
+/// Cancellation code: the subscription cost more than the subscriber is
+/// willing to pay.
+pub const CANCEL_REASON_TOO_EXPENSIVE: u32 = 1;
+/// Cancellation code: the subscriber stopped using the service.
+pub const CANCEL_REASON_NOT_USING: u32 = 2;
+/// Cancellation code: the service is missing something the subscriber needs.
+pub const CANCEL_REASON_MISSING_FEATURE: u32 = 3;
+/// Cancellation code: the subscriber was unhappy with the quality of the
+/// service.
+pub const CANCEL_REASON_SERVICE_QUALITY: u32 = 4;
+/// Cancellation code: anything the codes above do not describe.
+pub const CANCEL_REASON_OTHER: u32 = 5;
+/// Highest documented cancellation code. The set is closed: a code above it is
+/// rejected with [`Error::InvalidCancelReason`] and leaves the mandate
+/// untouched, so an indexer can map every [`Cancelled`] event without a
+/// catch-all branch.
+pub const MAX_CANCEL_REASON: u32 = CANCEL_REASON_OTHER;
+
 #[allow(missing_docs)]
 mod contract {
     use super::*;
@@ -305,19 +328,23 @@ mod contract {
                 || (mandate.max_total != 0 && next_total >= mandate.max_total);
 
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
             let vault = VaultClient::new(&env, &vault_addr);
 
-            vault.debit(
+            // One vault call settles the merchant share and the protocol fee.
+            // Two `debit` calls would repeat the authorization, the config read
+            // and the balance read/write for the same total; a zero fee leaves
+            // the second leg empty, which emits the single `Debit` a lone
+            // charge used to. The keeper tip is a third payee, so a tipped
+            // charge makes two vault calls rather than three.
+            vault.debit_split(
                 &mandate.subscriber,
                 &mandate.token,
                 &mandate.merchant,
                 &merchant_amount,
+                &fee_to,
+                &fee,
             );
-
-            if fee > 0 {
-                let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
-                vault.debit(&mandate.subscriber, &mandate.token, &fee_to, &fee);
-            }
 
             if tip > 0 {
                 vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
@@ -484,17 +511,18 @@ mod contract {
                 let merchant_gross = charged - fee;
 
                 let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+                let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
                 let vault = VaultClient::new(&env, &vault_addr);
-                vault.debit(
+                // The prorated difference is settled the same way a charge is:
+                // merchant share and protocol fee from one debit.
+                vault.debit_split(
                     &subscriber,
                     &mandate.token,
                     &mandate.merchant,
                     &merchant_gross,
+                    &fee_to,
+                    &fee,
                 );
-                if fee > 0 {
-                    let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
-                    vault.debit(&subscriber, &mandate.token, &fee_to, &fee);
-                }
             }
 
             // The mandate carries the new plan's terms from now on. A downgrade
@@ -533,6 +561,10 @@ mod contract {
         /// Terminate a mandate permanently. Only the subscriber may do this, and it
         /// can be done at any time without the merchant's involvement.
         ///
+        /// This is [`Subscription::cancel_with_reason`] with
+        /// [`CANCEL_REASON_NONE`]: the mandate is cancelled exactly as before and
+        /// the [`Cancelled`] event reports reason `0`.
+        ///
         /// # Auth
         /// Requires authorization from `subscriber`.
         ///
@@ -544,7 +576,54 @@ mod contract {
         /// [`Error::NotSubscriber`] if the caller is not the subscriber, or
         /// [`Error::MandateNotActive`] if the mandate is already cancelled or completed.
         pub fn cancel(env: Env, subscriber: Address, mandate_id: u64) -> Result<(), Error> {
+            Self::cancel_with_reason(env, subscriber, mandate_id, CANCEL_REASON_NONE)
+        }
+
+        /// Terminate a mandate permanently and record why.
+        ///
+        /// Behave exactly like [`Subscription::cancel`] — same authorization,
+        /// same state change, same events — and additionally report the
+        /// subscriber's reason in the [`Cancelled`] event, so a merchant can
+        /// measure churn from chain data alone instead of asking its users.
+        ///
+        /// The reason cannot change what the call does: the mandate is
+        /// cancelled either way, so a code can never keep a mandate alive, move
+        /// money, or make a charge cost more. The set is closed:
+        ///
+        /// | Code | Constant | Meaning |
+        /// |---|---|---|
+        /// | 0 | [`CANCEL_REASON_NONE`] | No reason given; what `cancel` emits |
+        /// | 1 | [`CANCEL_REASON_TOO_EXPENSIVE`] | Too expensive |
+        /// | 2 | [`CANCEL_REASON_NOT_USING`] | No longer using the service |
+        /// | 3 | [`CANCEL_REASON_MISSING_FEATURE`] | Missing a needed feature |
+        /// | 4 | [`CANCEL_REASON_SERVICE_QUALITY`] | Unhappy with the service |
+        /// | 5 | [`CANCEL_REASON_OTHER`] | Something else |
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`Cancelled`], whose `reason` is the
+        /// code passed in.
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidCancelReason`] if `reason > MAX_CANCEL_REASON`,
+        /// [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::NotSubscriber`] if the caller is not the subscriber, or
+        /// [`Error::MandateNotActive`] if the mandate is already cancelled or completed.
+        pub fn cancel_with_reason(
+            env: Env,
+            subscriber: Address,
+            mandate_id: u64,
+            reason: u32,
+        ) -> Result<(), Error> {
             subscriber.require_auth();
+
+            // Validate before touching storage: a rejected call must not change
+            // the mandate, and a closed code set keeps the event space small.
+            if reason > MAX_CANCEL_REASON {
+                return Err(Error::InvalidCancelReason);
+            }
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
             if mandate.subscriber != subscriber {
@@ -569,6 +648,7 @@ mod contract {
                 mandate_id,
                 subscriber,
                 charges_made: mandate.charges_made,
+                reason,
             }
             .publish(&env);
             Ok(())
@@ -1004,7 +1084,9 @@ mod contract {
         /// full page within the 100-entry transaction limit.
         ///
         /// Mandates already cancelled or completed are skipped, so calling it
-        /// twice is harmless. Returns how many this call cancelled.
+        /// twice is harmless. Returns how many this call cancelled. Each
+        /// [`Cancelled`] event reports reason [`CANCEL_REASON_NONE`]: a
+        /// subscriber who clears out everything is not explaining one by one.
         ///
         /// # Auth
         /// Requires authorization from `subscriber`.
@@ -1042,6 +1124,9 @@ mod contract {
                     mandate_id,
                     subscriber: subscriber.clone(),
                     charges_made: mandate.charges_made,
+                    // A bulk cancel is not an explained cancellation: the
+                    // subscriber chose to stop everything, not to say why.
+                    reason: CANCEL_REASON_NONE,
                 }
                 .publish(&env);
                 cancelled += 1;

@@ -7,7 +7,44 @@ change the contract interface.
 
 ## Unreleased
 
+### Changed
+
+- **Breaking (events):** `Cancelled` gains a trailing `reason: u32` field, set
+  by the new `cancel_with_reason`. Indexers and clients that decode the event
+  must read it; `cancel` and `cancel_page` always report `0`, so a mandate
+  cancelled without a reason still carries the field and the event shape stays
+  constant. Follow-up issues are needed in `payflow-backend` (event decoder),
+  `payflow-frontend` (optional reason picker) and `payflow-docs` (events
+  reference and error-code page).
+
+- `charge` settles a mandate with fewer vault calls: the merchant share and the
+  protocol fee go through one `vault.debit_split`, and the keeper tip keeps its
+  own debit. A keeper-settled charge now costs 55 310 fewer instructions
+  (-7.1%) and 10 517 fewer memory bytes (-4.0%), measured on the test host with
+  mainnet resource limits enforced; balances and the `Charged`/`Debit` events
+  are unchanged. `upgrade` settles its prorated difference the same way.
+
+- New error variants at the end of their enums, so existing codes keep their
+  numbers: vault `AmountOverflow = 11`, subscription `InvalidCancelReason = 27`.
+
 ### Added
+
+- `subscription:cancel_with_reason(subscriber, mandate_id, reason)` cancels a
+  mandate exactly as `cancel` does and adds the subscriber's reason to the
+  `Cancelled` event, so a merchant can measure churn from chain data alone. The
+  codes are a closed set exported as `CANCEL_REASON_*` constants: `0` none, `1`
+  too expensive, `2` no longer using, `3` missing feature, `4` service quality,
+  `5` other. A code above `MAX_CANCEL_REASON` is rejected with the new
+  `InvalidCancelReason` error and leaves the mandate untouched. `cancel` and
+  `cancel_page` are unchanged in effect and now report reason `0`.
+
+- `vault:debit_split(user, token, to_a, amount_a, to_b, amount_b)` pays two
+  recipients from a single debit — one authorization, one `Subscription` read,
+  one balance read and one balance write instead of two of each — and emits the
+  same one `Debit` per non-empty leg, with the running balances that two
+  sequential `debit` calls reported. `amount_a` must be positive, `amount_b` may
+  be zero (a settlement with no fee then emits a single `Debit`), and a total
+  that would overflow `i128` is rejected with the new `AmountOverflow` error.
 
 - `plan-registry:create_plan` takes a `category: Symbol`; `Plan` and
   `PlanCreated` expose it for discovery. Follow-up issues are needed in
