@@ -7,7 +7,8 @@
 # with the addresses of the registry and the vault, and the vault must be told
 # which subscription contract may debit it.
 #
-# Writes the resulting ids to deployments/<network>.env.
+# Writes the resulting deployment details to deployments/<network>.env and
+# deployments/<network>.json.
 set -euo pipefail
 
 NETWORK="testnet"
@@ -133,12 +134,23 @@ if [[ "$DRY_RUN" == true ]]; then
     --network "$NETWORK" -- set_subscription --subscription '<SUBSCRIPTION_ID>'
   echo '==> reading native token id'
   print_command stellar contract id asset --asset native --network "$NETWORK"
-  echo "==> writing deployments/$NETWORK.env (after successful deployment)"
+  echo "==> writing deployments/$NETWORK.env and deployments/$NETWORK.json (after successful deployment)"
   exit 0
 fi
 
+command -v jq >/dev/null || { echo "jq not found" >&2; exit 1; }
+command -v sha256sum >/dev/null || { echo "sha256sum not found" >&2; exit 1; }
+
 echo "==> building"
 stellar contract build >/dev/null
+
+wasm_sha256() {
+  sha256sum "$WASM_DIR/$1" | cut -d ' ' -f 1
+}
+
+REGISTRY_WASM_SHA256="$(wasm_sha256 payflow_plan_registry.wasm)"
+VAULT_WASM_SHA256="$(wasm_sha256 payflow_vault.wasm)"
+SUBSCRIPTION_WASM_SHA256="$(wasm_sha256 payflow_subscription.wasm)"
 
 # deploy <wasm> [constructor args...]
 deploy() {
@@ -188,7 +200,39 @@ TOKEN_ID=$TOKEN
 START_LEDGER=$START_LEDGER
 EOF
 
+jq -n \
+  --arg NETWORK "$NETWORK" \
+  --arg ADMIN "$ADMIN" \
+  --arg FEE_BPS "$FEE_BPS" \
+  --arg FEE_TO "$FEE_TO" \
+  --arg PLAN_REGISTRY_ID "$REGISTRY" \
+  --arg VAULT_ID "$VAULT" \
+  --arg SUBSCRIPTION_ID "$SUBSCRIPTION" \
+  --arg TOKEN_ID "$TOKEN" \
+  --arg START_LEDGER "$START_LEDGER" \
+  --arg PLAN_REGISTRY_WASM_SHA256 "$REGISTRY_WASM_SHA256" \
+  --arg VAULT_WASM_SHA256 "$VAULT_WASM_SHA256" \
+  --arg SUBSCRIPTION_WASM_SHA256 "$SUBSCRIPTION_WASM_SHA256" \
+  '{
+    NETWORK: $NETWORK,
+    ADMIN: $ADMIN,
+    FEE_BPS: $FEE_BPS,
+    FEE_TO: $FEE_TO,
+    PLAN_REGISTRY_ID: $PLAN_REGISTRY_ID,
+    VAULT_ID: $VAULT_ID,
+    SUBSCRIPTION_ID: $SUBSCRIPTION_ID,
+    TOKEN_ID: $TOKEN_ID,
+    START_LEDGER: $START_LEDGER,
+    PLAN_REGISTRY_WASM_SHA256: $PLAN_REGISTRY_WASM_SHA256,
+    VAULT_WASM_SHA256: $VAULT_WASM_SHA256,
+    SUBSCRIPTION_WASM_SHA256: $SUBSCRIPTION_WASM_SHA256
+  }' > "deployments/$NETWORK.json"
+jq empty "deployments/$NETWORK.json"
+
 echo
 echo "Wrote deployments/$NETWORK.env:"
 echo
 cat "deployments/$NETWORK.env"
+echo
+echo "Wrote deployments/$NETWORK.json:"
+cat "deployments/$NETWORK.json"
