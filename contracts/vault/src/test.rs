@@ -2,12 +2,13 @@
 
 use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
+use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Events as _},
     token::{StellarAssetClient, TokenClient},
+    xdr::{ContractEventBody, ScSymbol, ScVal},
     Address, Env, IntoVal, String,
 };
-use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 
 struct Harness<'a> {
     env: Env,
@@ -166,6 +167,204 @@ fn debit_pays_merchant_and_reduces_balance() {
 
     assert_eq!(h.vault.balance(&user, &h.token), 3_800);
     assert_eq!(h.token_client.balance(&merchant), 1_200);
+}
+
+/// Number of `Debit` events emitted during the most recent invocation.
+fn debit_event_count(h: &Harness) -> usize {
+    let mut count = 0;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "debit" {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Balance field of the n-th `Debit` event of the most recent invocation.
+fn debit_event_balance(h: &Harness, index: usize) -> Option<i128> {
+    let mut seen = 0;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let is_debit = matches!(
+            body.topics.first(),
+            Some(ScVal::Symbol(ScSymbol(name))) if name.to_utf8_string_lossy() == "debit"
+        );
+        if !is_debit {
+            continue;
+        }
+        if seen < index {
+            seen += 1;
+            continue;
+        }
+        let ScVal::Map(Some(soroban_sdk::xdr::ScMap(entries))) = &body.data else {
+            return None;
+        };
+        for entry in entries.iter() {
+            if let ScVal::Symbol(ScSymbol(name)) = &entry.key {
+                if name.to_utf8_string_lossy() == "balance" {
+                    if let ScVal::I128(ref parts) = entry.val {
+                        return Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                    }
+                }
+            }
+        }
+        return None;
+    }
+    None
+}
+
+#[test]
+fn debit_split_pays_both_recipients_from_one_balance_update() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    h.vault
+        .debit_split(&user, &h.token, &merchant, &1_200, &fee_to, &300);
+
+    // One debit per payee, exactly as two `debit` calls emitted, and the
+    // running balances are the ones sequential debits would have reported.
+    assert_eq!(debit_event_count(&h), 2);
+    assert_eq!(debit_event_balance(&h, 0), Some(5_000 - 1_200));
+    assert_eq!(debit_event_balance(&h, 1), Some(5_000 - 1_500));
+
+    // The subscriber pays the sum once, and each payee gets its own leg.
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000 - 1_500);
+    assert_eq!(h.token_client.balance(&merchant), 1_200);
+    assert_eq!(h.token_client.balance(&fee_to), 300);
+    assert_eq!(h.token_client.balance(&h.vault_id), 5_000 - 1_500);
+}
+
+#[test]
+fn debit_split_with_a_zero_second_leg_emits_one_debit() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    h.vault
+        .debit_split(&user, &h.token, &merchant, &1_200, &fee_to, &0);
+
+    // Equivalent to the single `debit` call this replaces.
+    assert_eq!(debit_event_count(&h), 1);
+    assert_eq!(h.vault.balance(&user, &h.token), 3_800);
+    assert_eq!(h.token_client.balance(&merchant), 1_200);
+    assert_eq!(h.token_client.balance(&fee_to), 0);
+}
+
+#[test]
+fn debit_split_checks_the_combined_total() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &100);
+
+    // Neither leg alone exceeds the balance, but the two together do.
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &merchant, &80, &fee_to, &30),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    // The rejected call moved nothing.
+    assert_eq!(h.vault.balance(&user, &h.token), 100);
+    assert_eq!(h.token_client.balance(&merchant), 0);
+    assert_eq!(h.token_client.balance(&fee_to), 0);
+}
+
+#[test]
+fn debit_split_rejects_non_positive_amounts() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    // The first leg is the merchant share and must exist...
+    for first in [0i128, -1] {
+        assert_eq!(
+            h.vault
+                .try_debit_split(&user, &h.token, &merchant, &first, &fee_to, &100),
+            Err(Ok(Error::InvalidAmount))
+        );
+    }
+    // ...while the fee leg may be empty but never negative.
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &merchant, &100, &fee_to, &-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+#[test]
+fn debit_split_rejects_a_total_that_overflows() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    // A wrapped total would under-charge the subscriber, so it is refused.
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &merchant, &i128::MAX, &fee_to, &i128::MAX),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+#[test]
+fn debit_split_rejects_a_different_signer() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    // A signature from some other address must not move funds: only the
+    // registered subscription contract may split a debit.
+    let attacker = Address::generate(&h.env);
+    h.env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "debit_split",
+            args: (&user, &h.token, &merchant, &1_200i128, &fee_to, &300i128).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(h
+        .vault
+        .try_debit_split(&user, &h.token, &merchant, &1_200, &fee_to, &300)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.token_client.balance(&merchant), 0);
+}
+
+#[test]
+fn debit_split_requires_the_subscription_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    // Drop the blanket mock: the subscription contract must authorize, and it
+    // is the only address that can.
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_debit_split(&user, &h.token, &merchant, &1_200, &fee_to, &300)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
 }
 
 #[test]

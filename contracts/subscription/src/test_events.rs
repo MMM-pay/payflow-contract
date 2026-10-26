@@ -101,6 +101,7 @@ fn cancelled_layout() {
             mandate_id: 11,
             subscriber: a,
             charges_made: 2,
+            reason: 2,
         },
     );
 }

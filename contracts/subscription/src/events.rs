@@ -90,6 +90,11 @@ pub struct Cancelled {
     pub subscriber: Address,
     /// Total number of charges completed before cancellation.
     pub charges_made: u32,
+    /// Why the subscriber left, as one of the documented `CANCEL_REASON_*`
+    /// codes. `0` means no reason given, which is what `cancel` and
+    /// `cancel_page` emit. Carried on the wire so a merchant can compute
+    /// churn without a contract read per cancellation.
+    pub reason: u32,
 }
 
 /// Emitted when the merchant ends a mandate, for example because it stopped
