@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach WASM artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup target add wasm32v1-none
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Stellar CLI
+        uses: stellar/stellar-cli@v27.0.0
+
+      - name: Build WASM artifacts
+        run: stellar contract build
+
+      - name: Compute SHA-256 checksums
+        run: |
+          cd target/wasm32v1-none/release
+          sha256sum \
+            payflow_subscription.wasm \
+            payflow_vault.wasm \
+            payflow_plan_registry.wasm \
+            > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Attach artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/wasm32v1-none/release/payflow_subscription.wasm
+            target/wasm32v1-none/release/payflow_vault.wasm
+            target/wasm32v1-none/release/payflow_plan_registry.wasm
+            target/wasm32v1-none/release/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
