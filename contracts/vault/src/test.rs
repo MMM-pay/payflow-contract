@@ -967,6 +967,16 @@ fn withdraw_requires_the_user_auth() {
 }
 
 #[test]
+fn withdraw_all_requires_the_user_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_withdraw_all(&user, &h.token).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
 fn debit_requires_the_subscription_auth() {
     let h = setup();
     let user = funded_user(&h, 10_000);

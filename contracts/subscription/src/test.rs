@@ -3015,7 +3015,7 @@ fn subscribe_at_accepts_a_start_one_year_from_now() {
 }
 
 #[test]
-fn subscribe_at_requires_the_subscribers_signature() {
+fn subscribe_at_requires_the_subscriber_to_authorize() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
