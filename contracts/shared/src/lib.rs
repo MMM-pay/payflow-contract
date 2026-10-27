@@ -71,6 +71,11 @@ mod plan {
         /// has no successor. The pointer never re-prices an open mandate: a mandate
         /// keeps the terms of the plan it was opened against.
         pub successor_id: u64,
+        /// Link to the plan's description and terms of service, shown to
+        /// subscribers before they open a mandate. At most `MAX_TERMS_LEN`
+        /// (200) bytes; may be empty. Self-declared by the merchant, like the
+        /// profile URL: the contract does not verify it.
+        pub terms_uri: String,
     }
 }
 pub use plan::Plan;

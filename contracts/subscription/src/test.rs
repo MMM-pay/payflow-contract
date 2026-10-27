@@ -12,7 +12,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
-    Address, Env, FromVal, IntoVal, String, Symbol,
+    Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal,
 };
 
 const MONTH: u64 = 2_592_000;
@@ -109,6 +109,7 @@ impl World<'_> {
             &String::from_str(&self.env, ""),
             &keeper_bps,
             &Symbol::new(&self.env, ""),
+            &String::from_str(&self.env, ""),
         )
     }
 
@@ -123,6 +124,7 @@ impl World<'_> {
             &String::from_str(&self.env, ""),
             &0,
             &Symbol::new(&self.env, ""),
+            &String::from_str(&self.env, ""),
         )
     }
 
@@ -347,6 +349,54 @@ fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
                 if let ScVal::U64(value) = entry.val {
                     found = Some(value);
                 }
+            }
+        }
+    }
+    found
+}
+
+/// Pull a u64 field out of the data map of any emitted contract event.
+fn event_field_u64(env: &Env, field: &str) -> Option<u64> {
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::U64(v) = entry.val {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The value of `field` from the data map of the most recent event whose
+/// topic 0 is `event_name`.
+fn event_field_address(env: &Env, event_name: &str, field: &str) -> Option<Address> {
+    let mut found = None;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Symbol(ScSymbol(topic)) = &body.topics[0] else {
+            continue;
+        };
+        if topic.to_utf8_string_lossy() != event_name {
+            continue;
+        }
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field && matches!(entry.val, ScVal::Address(_)) {
+                found = Address::try_from_val(env, &entry.val).ok();
             }
         }
     }
@@ -809,6 +859,7 @@ fn zero_fee_pays_merchant_in_full() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1368,6 +1419,7 @@ fn fee_paid_to_address() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1736,6 +1788,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
     );
 
     let user = w.subscriber(1_000_000);
@@ -1995,6 +2048,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);
@@ -2131,6 +2185,7 @@ impl FailingTokenWorld<'_> {
             &String::from_str(&self.env, ""),
             &keeper_bps,
             &Symbol::new(&self.env, ""),
+            &String::from_str(&self.env, ""),
         )
     }
 
@@ -2388,6 +2443,7 @@ fn upgrade_rejects_a_plan_in_another_token() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
     );
 
     assert_eq!(
@@ -2414,6 +2470,7 @@ fn upgrade_rejects_a_plan_from_another_merchant() {
         &String::from_str(&w.env, ""),
         &0,
         &Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
     );
 
     assert_eq!(
@@ -2838,4 +2895,162 @@ fn due_mandates_agrees_with_is_due_and_needs_no_auth() {
     w.sub.cancel(&user, &id);
     assert!(!w.sub.is_due(&id));
     assert!(w.sub.due_mandates(&w.merchant, &0, &u32::MAX).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Charged event: which token the amounts are in
+// ---------------------------------------------------------------------------
+
+/// The acceptance criterion for the token in `Charged`: an indexer reading
+/// only events must learn which SEP-41 token the amounts are denominated in,
+/// without joining back to the mandate. Event-only indexers otherwise report
+/// wrong totals for any merchant with more than one token.
+#[test]
+fn charged_event_carries_the_token() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.charge(&w.keeper, &id);
+
+    let token = event_field_address(&w.env, "charged", "token")
+        .expect("Charged event must carry the token on the wire");
+    assert_eq!(token, w.token);
+}
+
+// ---------------------------------------------------------------------------
+// subscribe_at: choose when billing starts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscribe_at_schedules_billing_from_the_start() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let start = w.env.ledger().timestamp() + MONTH / 2;
+
+    let id = w.sub.subscribe_at(&user, &plan_id, &0, &0, &start);
+
+    // Indexers see the start in Subscribed.next_charge, no follow-up read.
+    // (Events are only visible from the last invocation, hence right here.)
+    assert_eq!(event_field_u64(&w.env, "next_charge"), Some(start));
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.next_charge, start);
+    assert_eq!(m.charges_made, 0);
+    assert!(!w.sub.is_due(&id));
+
+    // Once the start is reached, billing proceeds exactly as before.
+    w.advance(MONTH / 2);
+    assert!(w.sub.is_due(&id));
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn charging_before_the_start_fails_with_not_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let start = w.env.ledger().timestamp() + MONTH;
+    let id = w.sub.subscribe_at(&user, &plan_id, &0, &0, &start);
+
+    // The mandate exists but cannot settle before its start.
+    assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000);
+
+    w.advance(MONTH - 1);
+    assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+
+    w.advance(1);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn subscribe_at_rejects_a_start_in_the_past() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let past = w.env.ledger().timestamp() - 1;
+
+    assert_eq!(
+        w.sub.try_subscribe_at(&user, &plan_id, &0, &0, &past),
+        Err(Ok(Error::InvalidStart))
+    );
+    // Nothing was opened: no mandate, no index entries.
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 0);
+}
+
+#[test]
+fn subscribe_at_rejects_a_start_more_than_a_year_ahead() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let too_far = w.env.ledger().timestamp() + MAX_START_OFFSET + 1;
+
+    assert_eq!(
+        w.sub.try_subscribe_at(&user, &plan_id, &0, &0, &too_far),
+        Err(Ok(Error::InvalidStart))
+    );
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+}
+
+#[test]
+fn subscribe_at_accepts_a_start_one_year_from_now() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let start = w.env.ledger().timestamp() + MAX_START_OFFSET;
+
+    let id = w.sub.subscribe_at(&user, &plan_id, &0, &0, &start);
+
+    // The boundary itself is allowed: exactly one year ahead.
+    assert_eq!(w.sub.get_mandate(&id).next_charge, start);
+    assert!(!w.sub.is_due(&id));
+}
+
+#[test]
+fn subscribe_at_requires_the_subscriber_to_authorize() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let stranger = Address::generate(&w.env);
+    let start = w.env.ledger().timestamp() + MONTH;
+
+    // The stranger signs, but the call opens a mandate for `user`: the
+    // signature does not cover the subscriber, so it is rejected.
+    w.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_at",
+            args: (&user, &plan_id, &0u32, &0i128, &start).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w
+        .sub
+        .try_subscribe_at(&user, &plan_id, &0, &0, &start)
+        .is_err());
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+}
+
+/// `subscribe` keeps its old meaning: billing starts now, whatever the plan.
+#[test]
+fn subscribe_is_subscribe_at_now() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let now = w.env.ledger().timestamp();
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert_eq!(w.sub.get_mandate(&id).next_charge, now);
+    assert!(w.sub.is_due(&id));
 }

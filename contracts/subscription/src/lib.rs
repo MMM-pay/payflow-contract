@@ -55,6 +55,12 @@ pub const MAX_FEE_BPS: u32 = 1_000;
 /// so a page of 50 leaves room for the entries the caller reads alongside it.
 pub const MAX_PAGE: u32 = 50;
 
+/// How far ahead of the current ledger timestamp billing may be scheduled
+/// with `subscribe_at`: one year, in seconds. Far ahead enough to set up an
+/// annual subscription in advance, close enough that a mandate cannot be
+/// scheduled so far out that the subscriber forgets it exists.
+pub const MAX_START_OFFSET: u64 = 365 * 24 * 60 * 60;
+
 #[allow(missing_docs)]
 mod contract {
     use super::*;
@@ -117,7 +123,7 @@ mod contract {
         ///
         /// The plan's terms are copied into the mandate here and never re-read, so
         /// a merchant cannot change the price of a subscription after the fact.
-        /// The first charge is due immediately.
+        /// The first charge is due immediately: this is `subscribe_at(..., now)`.
         ///
         /// # Auth
         /// Requires authorization from `subscriber`.
@@ -126,7 +132,8 @@ mod contract {
         /// Emits [`MandateUpdated`] and [`Subscribed`].
         ///
         /// # Errors
-        /// Returns [`Error::PlanInactive`] if the target plan is inactive, or
+        /// Returns [`Error::InvalidMaxTotal`] if `max_total < 0`,
+        /// [`Error::PlanInactive`] if the target plan is inactive, or
         /// [`Error::NotInitialized`] if configuration keys are missing.
         pub fn subscribe(
             env: Env,
@@ -135,10 +142,51 @@ mod contract {
             max_charges: u32,
             max_total: i128,
         ) -> Result<u64, Error> {
+            let now = env.ledger().timestamp();
+            Self::subscribe_at(env, subscriber, plan_id, max_charges, max_total, now)
+        }
+
+        /// Open a mandate whose first charge falls due at `start` rather than
+        /// now, so a subscriber can set up billing ahead of time.
+        ///
+        /// `start` must be the current ledger timestamp or later, and no more
+        /// than `MAX_START_OFFSET` (one year) after it: a mandate may be
+        /// scheduled in advance, but neither backdated nor locked away in the
+        /// distant future. Everything else is identical to `subscribe` — the
+        /// plan's terms are copied into the mandate and never re-read — and
+        /// `Subscribed` carries `start` as `next_charge`, so indexers learn when
+        /// billing begins from the event alone.
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`Subscribed`].
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidStart`] if `start` is before the current
+        /// ledger timestamp or more than `MAX_START_OFFSET` after it,
+        /// [`Error::InvalidMaxTotal`] if `max_total < 0`, [`Error::PlanInactive`]
+        /// if the target plan is inactive, or [`Error::NotInitialized`] if
+        /// configuration keys are missing.
+        pub fn subscribe_at(
+            env: Env,
+            subscriber: Address,
+            plan_id: u64,
+            max_charges: u32,
+            max_total: i128,
+            start: u64,
+        ) -> Result<u64, Error> {
             subscriber.require_auth();
 
             if max_total < 0 {
                 return Err(Error::InvalidMaxTotal);
+            }
+
+            // `start - now` only after the past check, so it cannot underflow.
+            let now = env.ledger().timestamp();
+            if start < now || start - now > MAX_START_OFFSET {
+                return Err(Error::InvalidStart);
             }
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
@@ -165,7 +213,6 @@ mod contract {
             // passed to this deployment does not enforce the cap.
             let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
 
-            let now = env.ledger().timestamp();
             let mandate = Mandate {
                 id,
                 subscriber: subscriber.clone(),
@@ -175,7 +222,7 @@ mod contract {
                 amount: plan.amount,
                 period: plan.period,
                 created_at: now,
-                next_charge: now,
+                next_charge: start,
                 last_charge: 0,
                 charges_made: 0,
                 max_charges,
@@ -226,7 +273,7 @@ mod contract {
                 max_total,
                 amount: plan.amount,
                 period: plan.period,
-                next_charge: now,
+                next_charge: start,
                 max_charges,
                 fee_bps,
                 keeper_bps,
@@ -352,6 +399,7 @@ mod contract {
                 mandate_id,
                 subscriber: mandate.subscriber.clone(),
                 merchant: mandate.merchant.clone(),
+                token: mandate.token.clone(),
                 amount: merchant_amount,
                 fee,
                 tip,

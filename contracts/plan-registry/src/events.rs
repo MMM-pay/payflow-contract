@@ -26,6 +26,9 @@ pub struct PlanCreated {
     pub keeper_bps: u32,
     /// Discovery category the merchant chose, empty when it chose none.
     pub category: Symbol,
+    /// Link to the plan's terms, carried in the event so frontends need no
+    /// follow-up contract read. At most 200 bytes; may be empty.
+    pub terms_uri: String,
 }
 
 /// Emitted when a merchant activates or deactivates a plan.

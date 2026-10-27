@@ -68,4 +68,7 @@ pub enum Error {
     BatchTooLarge = 25,
     /// A batch subscription was given no plans.
     EmptyBatch = 26,
+    /// `subscribe_at` was given a `start` before the current ledger timestamp
+    /// or more than `MAX_START_OFFSET` (one year) after it.
+    InvalidStart = 27,
 }

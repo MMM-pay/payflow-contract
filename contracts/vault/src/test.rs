@@ -2,12 +2,13 @@
 
 use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
+use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
+    xdr::{ContractEventBody, ScSymbol, ScVal},
     Address, Env, IntoVal, String,
 };
-use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 
 struct Harness<'a> {
     env: Env,
@@ -361,6 +362,91 @@ impl Rng {
             .wrapping_add(1442695040888963407);
         self.state % bound
     }
+}
+
+// ---------------------------------------------------------------------------
+// withdraw_all: exit without racing the keeper
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_all_returns_the_whole_balance() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 4_000);
+
+    // The existing Withdraw event carries the amount and the new balance.
+    // (Events are only readable from the last invocation, hence right here.)
+    let last = h.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "withdraw".try_into().unwrap();
+    assert_eq!(name, &expected);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    // The deposit (4_000) came back: the wallet holds everything again.
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn withdraw_all_works_after_a_charge_reduced_the_balance() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+    // The subscription contract settles a charge against this balance.
+    h.vault.debit(&user, &h.token, &merchant, &1_200);
+
+    // A plain `withdraw` of the original 5_000 would fail with
+    // InsufficientBalance; withdraw_all takes what is left.
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 3_800);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000 - 1_200);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn withdraw_all_on_an_empty_balance_returns_zero_without_moving_tokens() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    // An empty exit is a no-op: read straight after the call, withdraw_all —
+    // the last invocation — published no events, so no Withdraw fired.
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 0);
+    assert_eq!(h.env.events().all().events().len(), 0);
+
+    // ...and no token moved.
+    assert_eq!(h.token_client.balance(&user), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn withdraw_all_rejects_a_different_signer() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+    let attacker = Address::generate(&h.env);
+
+    // The attacker signs, but the call withdraws the user's balance: the
+    // signature does not cover `user`, so it is rejected and funds stay put.
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "withdraw_all",
+            args: (&user, &h.token).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(h.vault.try_withdraw_all(&user, &h.token).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 4_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +963,16 @@ fn withdraw_requires_the_user_auth() {
     h.vault.deposit(&user, &h.token, &1_000);
     h.env.set_auths(&[]);
     assert!(h.vault.try_withdraw(&user, &h.token, &1_000).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn withdraw_all_requires_the_user_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_withdraw_all(&user, &h.token).is_err());
     assert_eq!(h.vault.balance(&user, &h.token), 1_000);
 }
 
