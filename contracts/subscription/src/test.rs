@@ -2095,7 +2095,7 @@ fn only_the_merchant_of_a_mandate_can_refund() {
 }
 
 #[test]
-fn refund_requires_the_merchants_signature() {
+fn refund_requires_the_merchants_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
@@ -2110,6 +2110,30 @@ fn refund_requires_the_merchants_signature() {
         w.token_client.balance(&w.merchant),
         merchant_receipt_per_charge()
     );
+}
+
+#[test]
+fn set_seats_requires_the_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    let other_signer = Address::generate(&w.env);
+
+    // Seats are what the subscriber is billed for, so only their own signature
+    // may change them; a merchant scaling a team up is not a subscriber action.
+    w.env.mock_auths(&[MockAuth {
+        address: &other_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "set_seats",
+            args: (&user, &id, &5u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w.sub.try_set_seats(&user, &id, &5).is_err());
+    assert_eq!(w.sub.get_mandate(&id).seats, 1);
 }
 
 #[test]
