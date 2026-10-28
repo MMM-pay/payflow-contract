@@ -26,6 +26,9 @@ declare -A allowlist_subscription=(
     [subscriber_mandates]=1
     [merchant_mandate_count]=1
     [merchant_mandates]=1
+    [due_mandates]=1
+    [estimated_end]=1
+    [quote_charge]=1
     [fee_bps]=1
     [admin]=1
     [plan_registry]=1
@@ -83,13 +86,17 @@ for contract_name in "${!contracts[@]}"; do
     fi
     
     # Extract public function names from #[contractimpl] block
-    # This matches lines like: "pub fn function_name(" inside the impl block
+    # This matches lines like: "pub fn function_name(" inside the impl block.
+    # Kept to POSIX awk (no gawk-only match() capture array) so the gate runs
+    # the same checks on every runner instead of silently finding no functions.
     mapfile -t public_fns < <(
         awk '
             /#\[contractimpl\]/ { in_impl=1; next }
             in_impl && /^[[:space:]]*pub fn [a-z_]+[[:space:]]*\(/ {
-                match($0, /pub fn ([a-z_]+)/, arr)
-                print arr[1]
+                line = $0
+                sub(/^[[:space:]]*pub fn /, "", line)
+                sub(/[[:space:]]*\(.*/, "", line)
+                print line
             }
             in_impl && /^[[:space:]]*\}[[:space:]]*$/ && prev_brace { in_impl=0 }
             { prev_brace = (/^[[:space:]]*\}[[:space:]]*$/) }

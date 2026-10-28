@@ -382,6 +382,97 @@ mod contract {
             Ok(())
         }
 
+        /// Debit a subscriber once and pay two recipients from that debit.
+        ///
+        /// `charge` splits every settlement into a merchant share and a protocol
+        /// fee. Settling that with two `debit` calls repeated the authorization
+        /// check, the `Subscription` read and the balance read and write for the
+        /// same total. `debit_split` performs them once, then makes the same two
+        /// token transfers and emits one [`Debit`] per non-empty leg, with the
+        /// running balances two sequential `debit` calls would have reported:
+        /// the first event carries the balance after `amount_a`, the second the
+        /// balance after both legs.
+        ///
+        /// `amount_a` must be positive, like `debit`. `amount_b` may be zero: a
+        /// settlement with no protocol fee then has a single leg and emits a
+        /// single [`Debit`], exactly as one `debit` call would have.
+        ///
+        /// # Auth
+        /// Requires authorization from the registered `subscription` contract.
+        ///
+        /// # Events
+        /// Emits one [`Debit`] per non-empty leg.
+        ///
+        /// # Errors
+        /// Returns [`Error::SubscriptionNotSet`] if no subscription contract is
+        /// set, [`Error::InvalidAmount`] if `amount_a <= 0` or `amount_b < 0`,
+        /// [`Error::AmountOverflow`] if the two amounts overflow `i128`, or
+        /// [`Error::InsufficientBalance`] if the total exceeds `user`'s
+        /// spendable balance.
+        pub fn debit_split(
+            env: Env,
+            user: Address,
+            token: Address,
+            to_a: Address,
+            amount_a: i128,
+            to_b: Address,
+            amount_b: i128,
+        ) -> Result<(), Error> {
+            let subscription: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Subscription)
+                .ok_or(Error::SubscriptionNotSet)?;
+            subscription.require_auth();
+
+            if amount_a <= 0 || amount_b < 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            // The total is what the subscriber can afford; both legs are
+            // settled from it or neither is. Soroban rolls the invocation back
+            // on error, so a failed transfer cannot leave half a charge.
+            let total = amount_a
+                .checked_add(amount_b)
+                .ok_or(Error::AmountOverflow)?;
+
+            let balance = Self::read_balance(&env, &user, &token);
+            if balance < total {
+                return Err(Error::InsufficientBalance);
+            }
+
+            let after_a = balance - amount_a;
+            let after_both = after_a - amount_b;
+            Self::write_balance(&env, &user, &token, after_both);
+
+            let vault = env.current_contract_address();
+            let token_client = token::TokenClient::new(&env, &token);
+
+            token_client.transfer(&vault, &to_a, &amount_a);
+            Debit {
+                user: user.clone(),
+                token: token.clone(),
+                to: to_a,
+                amount: amount_a,
+                balance: after_a,
+            }
+            .publish(&env);
+
+            if amount_b > 0 {
+                token_client.transfer(&vault, &to_b, &amount_b);
+                Debit {
+                    user,
+                    token,
+                    to: to_b,
+                    amount: amount_b,
+                    balance: after_both,
+                }
+                .publish(&env);
+            }
+
+            Ok(())
+        }
+
         /// Spendable balance of `user` in `token` held in the vault.
         pub fn balance(env: Env, user: Address, token: Address) -> i128 {
             Self::read_balance(&env, &user, &token)

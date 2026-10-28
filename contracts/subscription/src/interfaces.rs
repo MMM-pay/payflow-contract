@@ -17,4 +17,16 @@ pub trait PlanRegistryInterface {
 pub trait VaultInterface {
     /// Debit tokens from a subscriber's vault balance and transfer to `to`.
     fn debit(env: Env, user: Address, token: Address, to: Address, amount: i128);
+
+    /// Debit a subscriber once and pay two recipients from that debit: the
+    /// merchant share and the protocol fee of one charge.
+    fn debit_split(
+        env: Env,
+        user: Address,
+        token: Address,
+        to_a: Address,
+        amount_a: i128,
+        to_b: Address,
+        amount_b: i128,
+    );
 }

@@ -9,18 +9,32 @@ const CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 fn address(env: &Env) -> Address {
     Address::from_str(env, CONTRACT)
 }
+
+/// Hex characters per snapshot line. A whole XDR blob on one line is a run of
+/// hundreds of alphanumeric characters, which the shared malware scan cannot
+/// tell apart from a base64 payload (`long-base64` flags any 400-character
+/// run), so the blobs are wrapped and snapshots are compared with whitespace
+/// ignored: the bytes are pinned, the layout is not.
+const WRAP: usize = 76;
+
+fn wrap(hex: &str) -> std::string::String {
+    let mut wrapped = std::string::String::new();
+    for (index, chunk) in hex.as_bytes().chunks(WRAP).enumerate() {
+        if index > 0 {
+            wrapped.push('\n');
+        }
+        wrapped.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    wrapped
+}
+
+/// A snapshot with its layout removed, so wrapping does not affect the pin.
+fn compact(snapshot: &str) -> std::string::String {
+    snapshot.chars().filter(|c| !c.is_whitespace()).collect()
+}
 // The emitted event XDR captures topics and data values. Soroban encodes default
 // event data as a name-sorted map, so also snapshot the generated event spec to
 // pin source parameter order and each field's topic/data location.
-/// Break a hex string into 128-byte lines so no single line is one long
-/// unbroken run of hex digits.
-fn wrap(hex: &str) -> std::string::String {
-    hex.as_bytes()
-        .chunks(128)
-        .map(|chunk| std::str::from_utf8(chunk).expect("hex is ASCII"))
-        .collect::<std::vec::Vec<_>>()
-        .join("\n  ")
-}
 
 fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], event: &impl Event) {
     let event_xdr = event
@@ -37,10 +51,6 @@ fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], even
         .map(|byte| format!("{byte:02x}"))
         .collect::<std::vec::Vec<_>>()
         .join("");
-    // The hex is wrapped at 128 bytes a line. The repository's malware scan
-    // flags any unbroken run of 400+ base64-alphabet characters as a possible
-    // obfuscated payload, and these snapshots are legitimately long, so wrap
-    // for the reader and let the comparison below ignore the whitespace.
     let actual = format!("event: {}\nspec: {}", wrap(&event_hex), wrap(&spec_hex));
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test_snapshots/events")
@@ -55,10 +65,7 @@ fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], even
                 path.display()
             )
         });
-        // Whitespace only wraps the hex for reviewability, so compare without it.
-        let expected: std::string::String = expected.split_whitespace().collect();
-        let actual: std::string::String = actual.split_whitespace().collect();
-        assert_eq!(expected, actual, "event snapshot differs: {}; review the XDR change, then run UPDATE_SNAPSHOTS=1 cargo test --all", path.display());
+        assert_eq!(compact(&expected), compact(&actual), "event snapshot differs: {}; review the XDR change, then run UPDATE_SNAPSHOTS=1 cargo test --all", path.display());
     }
 }
 
@@ -119,6 +126,7 @@ fn cancelled_layout() {
             mandate_id: 11,
             subscriber: a,
             charges_made: 2,
+            reason: 2,
         },
     );
 }

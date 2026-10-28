@@ -334,6 +334,23 @@ fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
     found
 }
 
+/// Number of vault `Debit` events emitted during the most recent invocation.
+/// `charge` used to call `vault.debit` once per payee; it now settles the
+/// merchant and the fee through one `debit_split`, which must still produce the
+/// same events.
+fn vault_debit_event_count(env: &Env) -> usize {
+    let mut count = 0;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "debit" {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
     let mut found = None;
     for event in env.events().all().events() {
@@ -457,6 +474,72 @@ fn first_charge_is_due_immediately_and_splits_fee() {
     assert_eq!(m.charges_made, 1);
     assert_eq!(m.created_at, 1_000_000);
     assert_eq!(m.next_charge, w.env.ledger().timestamp() + MONTH);
+}
+
+#[test]
+fn charge_settles_merchant_and_fee_through_one_vault_call() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.charge(&w.keeper, &id);
+
+    // One `debit_split` replaces the two `debit` calls, but the vault still
+    // emits one `Debit` per payee, exactly as before.
+    assert_eq!(vault_debit_event_count(&w.env), 2);
+
+    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE - expected_fee);
+    assert_eq!(w.token_client.balance(&w.fee_to), expected_fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 1);
+    assert_eq!(m.total_spent, PRICE);
+    assert_eq!(m.next_charge, w.env.ledger().timestamp() + MONTH);
+}
+
+#[test]
+fn a_zero_fee_charge_emits_one_debit() {
+    let w = world();
+    let plan_id = w.plan();
+
+    // Open the mandate at a zero protocol fee, so the split has an empty
+    // second leg and must look exactly like a single `debit` call.
+    w.sub.set_fee_bps(&0);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(vault_debit_event_count(&w.env), 1);
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn a_tipped_charge_still_pays_three_payees() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.charge(&w.keeper, &id);
+
+    // The tip is a third payee and keeps its own debit, so a tipped charge
+    // makes two vault calls and still emits three `Debit` events.
+    assert_eq!(vault_debit_event_count(&w.env), 3);
+
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let merchant_gross = PRICE - fee;
+    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    assert_eq!(w.token_client.balance(&w.fee_to), fee);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_gross - tip);
+    // The subscriber is debited the price exactly, tip included.
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
 }
 
 #[test]
@@ -709,6 +792,145 @@ fn cancel_twice_is_rejected() {
     w.sub.cancel(&user, &id);
     assert_eq!(
         w.sub.try_cancel(&user, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation reasons (#73)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_with_reason_records_the_code_in_the_event() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    w.sub.charge(&w.keeper, &id);
+
+    w.sub
+        .cancel_with_reason(&user, &id, &CANCEL_REASON_TOO_EXPENSIVE);
+
+    // The reason must be recoverable from the event alone. The assertions come
+    // first because the test host keeps only the most recent invocation's
+    // events, and `get_mandate` below would replace them.
+    assert_eq!(
+        event_field_u32(&w.env, "reason"),
+        Some(CANCEL_REASON_TOO_EXPENSIVE)
+    );
+    assert_eq!(event_field_u32(&w.env, "charges_made"), Some(1));
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn plain_cancel_emits_reason_zero() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.cancel(&user, &id);
+
+    // `cancel` is `cancel_with_reason` with no reason: indexers see 0, never a
+    // missing field.
+    assert_eq!(event_field_u32(&w.env, "reason"), Some(0));
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn every_documented_cancel_reason_is_accepted() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    for reason in CANCEL_REASON_NONE..=MAX_CANCEL_REASON {
+        let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+        w.sub.cancel_with_reason(&user, &id, &reason);
+        assert_eq!(event_field_u32(&w.env, "reason"), Some(reason));
+        assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+    }
+}
+
+#[test]
+fn an_undocumented_cancel_reason_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert_eq!(
+        w.sub
+            .try_cancel_with_reason(&user, &id, &(MAX_CANCEL_REASON + 1)),
+        Err(Ok(Error::InvalidCancelReason))
+    );
+    assert_eq!(
+        w.sub.try_cancel_with_reason(&user, &id, &u32::MAX),
+        Err(Ok(Error::InvalidCancelReason))
+    );
+    // The rejected call must not cancel or otherwise alter the mandate.
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn cancel_with_reason_rejects_a_non_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let attacker = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert_eq!(
+        w.sub
+            .try_cancel_with_reason(&attacker, &id, &CANCEL_REASON_NOT_USING),
+        Err(Ok(Error::NotSubscriber))
+    );
+    // The merchant has `end_mandate`, not a subscriber cancellation.
+    assert_eq!(
+        w.sub
+            .try_cancel_with_reason(&w.merchant, &id, &CANCEL_REASON_NOT_USING),
+        Err(Ok(Error::NotSubscriber))
+    );
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn cancel_with_reason_wrong_signer_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    // A reason is not an authorization: only the subscriber's own signature
+    // may cancel, even though anyone can read the code set.
+    let wrong_signer = Address::generate(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &wrong_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "cancel_with_reason",
+            args: (&user, &id, &CANCEL_REASON_NOT_USING).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w
+        .sub
+        .try_cancel_with_reason(&user, &id, &CANCEL_REASON_NOT_USING)
+        .is_err());
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn cancel_with_reason_cannot_cancel_twice() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    w.sub.cancel_with_reason(&user, &id, &CANCEL_REASON_OTHER);
+    assert_eq!(
+        w.sub
+            .try_cancel_with_reason(&user, &id, &CANCEL_REASON_OTHER),
         Err(Ok(Error::MandateNotActive))
     );
 }
@@ -1926,7 +2148,7 @@ fn only_the_merchant_of_a_mandate_can_refund() {
 }
 
 #[test]
-fn refund_requires_the_merchants_signature() {
+fn refund_requires_the_merchants_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
@@ -1941,6 +2163,30 @@ fn refund_requires_the_merchants_signature() {
         w.token_client.balance(&w.merchant),
         merchant_receipt_per_charge()
     );
+}
+
+#[test]
+fn set_seats_requires_the_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+    let other_signer = Address::generate(&w.env);
+
+    // Seats are what the subscriber is billed for, so only their own signature
+    // may change them; a merchant scaling a team up is not a subscriber action.
+    w.env.mock_auths(&[MockAuth {
+        address: &other_signer,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "set_seats",
+            args: (&user, &id, &5u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(w.sub.try_set_seats(&user, &id, &5).is_err());
+    assert_eq!(w.sub.get_mandate(&id).seats, 1);
 }
 
 #[test]
@@ -2832,6 +3078,21 @@ fn cancel_page_requires_the_subscriber_to_authorize() {
 
     assert!(w.sub.try_cancel_page(&user, &0, &1).is_err());
     assert_eq!(w.sub.subscriber_mandates(&user, &0, &1).len(), 1);
+}
+
+#[test]
+fn cancel_page_reports_no_reason() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0);
+
+    assert_eq!(w.sub.cancel_page(&user, &0, &1), 1);
+
+    // A bulk cancel carries no per-mandate explanation, so the event reports
+    // the same "no reason given" code plain `cancel` uses.
+    assert_eq!(event_field_u32(&w.env, "reason"), Some(0));
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
 }
 
 #[test]
