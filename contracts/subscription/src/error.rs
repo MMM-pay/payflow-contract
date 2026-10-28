@@ -68,8 +68,11 @@ pub enum Error {
     BatchTooLarge = 25,
     /// A batch subscription was given no plans.
     EmptyBatch = 26,
+    /// `subscribe_at` was given a `start` before the current ledger timestamp
+    /// or more than `MAX_START_OFFSET` (one year) after it.
+    InvalidStart = 27,
     /// A cancellation reason outside the documented `CANCEL_REASON_*` code
     /// set was supplied. The set is closed so an indexer can map every
     /// `Cancelled` event it will ever see without a catch-all branch.
-    InvalidCancelReason = 27,
+    InvalidCancelReason = 28,
 }

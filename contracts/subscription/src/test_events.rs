@@ -35,6 +35,7 @@ fn compact(snapshot: &str) -> std::string::String {
 // The emitted event XDR captures topics and data values. Soroban encodes default
 // event data as a name-sorted map, so also snapshot the generated event spec to
 // pin source parameter order and each field's topic/data location.
+
 fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], event: &impl Event) {
     let event_xdr = event
         .to_xdr(env, &address(env))
@@ -103,6 +104,7 @@ fn charged_layout() {
             mandate_id: 11,
             subscriber: a.clone(),
             merchant: a.clone(),
+            token: a.clone(),
             amount: 4_000,
             fee: 250,
             tip: 50,

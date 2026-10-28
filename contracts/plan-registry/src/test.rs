@@ -2,10 +2,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+use soroban_sdk::xdr::{ContractEventBody, ScMap, ScSymbol, ScVal};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal, String, Symbol, Vec,
+    Address, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
@@ -47,6 +47,7 @@ fn create_plan_assigns_sequential_ids() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let b = client.create_plan(
         &merchant,
@@ -57,6 +58,7 @@ fn create_plan_assigns_sequential_ids() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(a, 1);
@@ -94,6 +96,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
                 &desc,
                 &0_u32,
                 &Symbol::new(&env, ""),
+                &String::from_str(&env, ""),
             )
                 .into_val(&env),
             sub_invokes: &[],
@@ -108,6 +111,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
         &desc,
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(
         env.auths(),
@@ -125,7 +129,8 @@ fn create_plan_authorizes_exact_merchant_tree() {
                         &name,
                         &desc,
                         &0_u32,
-                        &Symbol::new(&env, "")
+                        &Symbol::new(&env, ""),
+                        &String::from_str(&env, "")
                     )
                         .into_val(&env),
                 )),
@@ -161,6 +166,7 @@ fn create_plan_rejects_a_wrong_signer() {
                 &desc,
                 &0_u32,
                 &Symbol::new(&env, ""),
+                &String::from_str(&env, ""),
             )
                 .into_val(&env),
             sub_invokes: &[],
@@ -175,7 +181,8 @@ fn create_plan_rejects_a_wrong_signer() {
             &name,
             &desc,
             &0,
-            &Symbol::new(&env, "")
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         )
         .is_err());
 }
@@ -195,6 +202,7 @@ fn create_plan_stores_fields() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let plan = client.get_plan(&id);
 
@@ -221,6 +229,7 @@ fn create_plan_stores_the_keeper_tip() {
         &String::from_str(&env, ""),
         &MAX_KEEPER_BPS,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(client.get_plan(&id).keeper_bps, MAX_KEEPER_BPS);
@@ -241,6 +250,7 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &String::from_str(&env, ""),
         &(MAX_KEEPER_BPS + 1),
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(res, Err(Ok(Error::KeeperBpsTooHigh)));
@@ -261,6 +271,7 @@ fn create_plan_rejects_zero_amount() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -279,6 +290,7 @@ fn create_plan_rejects_negative_amount() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -297,6 +309,7 @@ fn create_plan_rejects_sub_minimum_period() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
 }
@@ -321,6 +334,7 @@ fn set_plan_active_toggles() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     client.set_plan_active(&merchant, &id, &false);
@@ -348,6 +362,7 @@ fn set_plan_active_authorizes_exact_merchant_tree() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     env.mock_auths(&[MockAuth {
@@ -405,6 +420,7 @@ fn set_plan_active_rejects_non_owner() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let res = client.try_set_plan_active(&attacker, &id, &false);
@@ -434,6 +450,7 @@ fn create_plan_stores_the_name() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(
         client.get_plan(&id).name,
@@ -457,6 +474,7 @@ fn create_plan_accepts_an_empty_name() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
 }
@@ -477,6 +495,7 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
 }
@@ -497,6 +516,7 @@ fn create_plan_rejects_an_overlong_name() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -518,6 +538,7 @@ fn merchant_plans_pages_are_bounded() {
             &String::from_str(&env, ""),
             &0,
             &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         );
     }
 
@@ -677,6 +698,7 @@ fn deactivate_page_turns_off_a_page_of_plans() {
             &String::from_str(&env, ""),
             &0,
             &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         ));
     }
 
@@ -708,6 +730,7 @@ fn deactivate_page_is_idempotent() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
@@ -734,6 +757,7 @@ fn deactivate_page_respects_the_page_cap() {
             &String::from_str(&env, ""),
             &0,
             &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         );
     }
 
@@ -768,6 +792,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let b_id = client.create_plan(
         &b,
@@ -778,6 +803,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     client.deactivate_page(&a, &0, &10);
@@ -803,6 +829,7 @@ fn deactivate_page_requires_the_merchants_auth() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     // Drop every mocked authorization: the merchant must sign for itself.
@@ -830,6 +857,7 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -853,6 +881,7 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
 }
@@ -875,6 +904,7 @@ fn set_successor_stores_the_replacement() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let new_id = client.create_plan(
         &merchant,
@@ -885,6 +915,7 @@ fn set_successor_stores_the_replacement() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     // A freshly published plan has no successor yet.
@@ -911,6 +942,7 @@ fn set_successor_rejects_a_plan_that_is_its_own_successor() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let res = client.try_set_successor(&merchant, &id, &id);
@@ -933,6 +965,7 @@ fn set_successor_rejects_an_unknown_successor() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let res = client.try_set_successor(&merchant, &id, &999);
@@ -955,6 +988,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let other_id = client.create_plan(
         &other,
@@ -965,6 +999,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     // The merchant may only point at plans it owns itself.
@@ -988,6 +1023,7 @@ fn set_successor_rejects_a_different_token() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let other_id = client.create_plan(
         &merchant,
@@ -998,6 +1034,7 @@ fn set_successor_rejects_a_different_token() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     // A replacement denominated in another asset would reprice differently and
@@ -1024,6 +1061,7 @@ fn set_successor_requires_the_merchants_auth() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let replacement_id = client.create_plan(
         &merchant,
@@ -1034,6 +1072,7 @@ fn set_successor_requires_the_merchants_auth() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     // The merchant signs the call itself, and the signature must cover the
@@ -1080,6 +1119,7 @@ fn set_successor_emits_plan_successor_set() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let new_id = client.create_plan(
         &merchant,
@@ -1090,6 +1130,7 @@ fn set_successor_emits_plan_successor_set() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     client.set_successor(&merchant, &old_id, &new_id);
@@ -1126,6 +1167,7 @@ fn create_plan_stores_the_description() {
         &description,
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let plan = client.get_plan(&id);
@@ -1148,6 +1190,7 @@ fn an_empty_description_is_allowed() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(client.get_plan(&id).description, String::from_str(&env, ""));
@@ -1169,6 +1212,7 @@ fn a_description_at_the_limit_is_accepted() {
         &at_limit,
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(client.get_plan(&id).description, at_limit);
@@ -1190,6 +1234,7 @@ fn create_plan_rejects_an_overlong_description() {
         &too_long,
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     assert_eq!(res, Err(Ok(Error::DescriptionTooLong)));
 }
@@ -1223,6 +1268,7 @@ fn create_plan_indexes_by_token() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let plan_2 = client.create_plan(
         &merchant_b,
@@ -1233,6 +1279,7 @@ fn create_plan_indexes_by_token() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let plan_3 = client.create_plan(
         &merchant_a,
@@ -1243,6 +1290,7 @@ fn create_plan_indexes_by_token() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     assert_eq!(client.token_plan_count(&token_usdc), 2);
@@ -1275,6 +1323,7 @@ fn token_plans_pages_are_bounded() {
             &String::from_str(&env, ""),
             &0,
             &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         );
     }
 
@@ -1306,6 +1355,7 @@ fn set_plan_name_renames_only_the_label() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let renamed = String::from_str(&env, "Pro");
@@ -1335,6 +1385,7 @@ fn set_plan_name_rejects_another_merchant_and_a_missing_plan() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     let name = String::from_str(&env, "Mine now");
 
@@ -1362,6 +1413,7 @@ fn set_plan_name_rejects_a_name_over_the_limit() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     let long = String::from_str(&env, &"n".repeat(MAX_NAME_LEN as usize + 1));
@@ -1385,6 +1437,7 @@ fn set_plan_name_requires_the_merchants_auth() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
 
     env.set_auths(&[]);
@@ -1430,6 +1483,7 @@ fn create_plan_requires_the_merchants_auth() {
             &String::from_str(&env, ""),
             &0,
             &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
         )
         .is_err());
 }
@@ -1448,8 +1502,173 @@ fn set_plan_active_requires_the_merchants_auth() {
         &String::from_str(&env, ""),
         &0,
         &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
     );
     env.set_auths(&[]);
     assert!(client.try_set_plan_active(&merchant, &id, &false).is_err());
     assert!(client.get_plan(&id).active);
+}
+
+// ---------------------------------------------------------------------------
+// Plan terms URI
+// ---------------------------------------------------------------------------
+
+/// Pull a string field out of the data map of any emitted contract event.
+fn event_field_string(env: &Env, field: &str) -> Option<String> {
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == field && matches!(entry.val, ScVal::String(_)) {
+                return String::try_from_val(env, &entry.val).ok();
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn create_plan_stores_the_terms_uri() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let terms = String::from_str(&env, "https://acme.example/terms");
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &terms,
+    );
+
+    assert_eq!(client.get_plan(&id).terms_uri, terms);
+}
+
+#[test]
+fn create_plan_accepts_an_empty_terms_uri() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    // The URI is optional: not every plan has published terms yet.
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+    );
+
+    assert_eq!(client.get_plan(&id).terms_uri.len(), 0);
+}
+
+#[test]
+fn create_plan_accepts_a_terms_uri_at_the_byte_limit() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let at_limit = String::from_str(&env, &"x".repeat(MAX_TERMS_LEN as usize));
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &at_limit.clone(),
+    );
+
+    assert_eq!(client.get_plan(&id).terms_uri, at_limit);
+}
+
+#[test]
+fn create_plan_rejects_an_overlong_terms_uri() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let too_long = String::from_str(&env, &"x".repeat(MAX_TERMS_LEN as usize + 1));
+
+    let res = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &too_long,
+    );
+
+    assert_eq!(res, Err(Ok(Error::UriTooLong)));
+    // The rejected plan was not stored or indexed.
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.next_plan_id(), 1);
+}
+
+#[test]
+fn create_plan_rejects_a_multibyte_terms_uri_over_the_byte_limit() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    // 67 euro signs is 201 bytes: only 67 characters, but over the 200-byte
+    // limit. The guard counts bytes, not characters.
+    let terms = "€".repeat(67);
+    assert_eq!(terms.len(), 201);
+
+    let res = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, &terms),
+    );
+
+    assert_eq!(res, Err(Ok(Error::UriTooLong)));
+}
+
+#[test]
+fn plan_created_carries_the_terms_uri() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let terms = String::from_str(&env, "https://acme.example/terms");
+
+    client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &terms,
+    );
+
+    // The URI must be recoverable from the event alone: a frontend rendering
+    // newly published plans from events needs no follow-up contract read.
+    assert_eq!(event_field_string(&env, "terms_uri"), Some(terms));
 }

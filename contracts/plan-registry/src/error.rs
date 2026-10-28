@@ -41,4 +41,6 @@ pub enum Error {
     DescriptionTooLong = 15,
     /// `set_plan_name` was given a name longer than MAX_NAME_LEN bytes.
     PlanNameTooLong = 16,
+    /// `create_plan` was given a terms URI longer than MAX_TERMS_LEN bytes.
+    UriTooLong = 17,
 }

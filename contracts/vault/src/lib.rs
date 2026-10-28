@@ -286,6 +286,48 @@ mod contract {
             Ok(())
         }
 
+        /// Withdraw the entire balance in one call.
+        ///
+        /// Exiting must not be a race: with `withdraw`, a charge that settles
+        /// between reading the balance and withdrawing makes the withdraw fail
+        /// with [`Error::InsufficientBalance`]. This takes whatever is there
+        /// instead, so a subscriber leaving the protocol cannot be thwarted by
+        /// a keeper.
+        ///
+        /// # Auth
+        /// Requires authorization from `user`.
+        ///
+        /// # Events
+        /// Emits [`Withdraw`] for a non-empty balance, and nothing at all for an
+        /// empty one.
+        ///
+        /// # Errors
+        /// Never fails on the balance itself: an empty balance returns `0`
+        /// without a token transfer.
+        pub fn withdraw_all(env: Env, user: Address, token: Address) -> Result<i128, Error> {
+            user.require_auth();
+
+            let balance = Self::read_balance(&env, &user, &token);
+            if balance <= 0 {
+                // Nothing to move: no transfer, no event, no state change.
+                return Ok(0);
+            }
+
+            Self::write_balance(&env, &user, &token, 0);
+
+            let vault = env.current_contract_address();
+            token::TokenClient::new(&env, &token).transfer(&vault, &user, &balance);
+
+            Withdraw {
+                user,
+                token,
+                amount: balance,
+                balance: 0,
+            }
+            .publish(&env);
+            Ok(balance)
+        }
+
         /// Debit a subscriber and pay `to`. Restricted to the subscription
         /// contract, which is the direct caller and is therefore implicitly
         /// authorized by the host when it invokes this function.

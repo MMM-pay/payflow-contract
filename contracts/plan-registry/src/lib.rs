@@ -51,6 +51,10 @@ pub const MAX_DESCRIPTION_LEN: u32 = payflow_shared::MAX_DESCRIPTION_LEN;
 /// capped here so storage and UI rendering stay bounded.
 pub const MAX_URL_LEN: u32 = 256;
 
+/// Maximum plan terms URI length in bytes. Like the profile URL it is
+/// self-declared, capped so one plan cannot bloat persistent storage.
+pub const MAX_TERMS_LEN: u32 = 200;
+
 /// Largest page `merchant_plans` returns in one call. Each id is read from its
 /// own storage entry, and a transaction may touch at most 100 entries.
 pub const MAX_PAGE: u32 = 50;
@@ -90,6 +94,11 @@ mod contract {
         /// keeps the tip it was opened with, so raising the tip later cannot take
         /// money from an existing subscriber or merchant.
         ///
+        /// `terms_uri` links to the plan's description and terms of service, so a
+        /// subscriber can read what they are agreeing to before opening a
+        /// mandate. It may be empty, is capped at `MAX_TERMS_LEN` bytes, and is
+        /// self-declared by the merchant: the contract does not fetch or verify it.
+        ///
         /// # Auth
         /// Requires authorization from `merchant`.
         ///
@@ -100,8 +109,9 @@ mod contract {
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`, [`Error::NameTooLong`]
         /// if `name` exceeds [`MAX_NAME_LEN`], [`Error::DescriptionTooLong`] if `description`
         /// exceeds [`MAX_DESCRIPTION_LEN`], [`Error::InvalidPeriod`] if `period < MIN_PERIOD`,
-        /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`, or [`Error::NotInitialized`]
-        /// if the contract has not been initialized.
+        /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`,
+        /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`], or
+        /// [`Error::NotInitialized`] if the contract has not been initialized.
         #[allow(clippy::too_many_arguments)]
         pub fn create_plan(
             env: Env,
@@ -113,6 +123,7 @@ mod contract {
             description: String,
             keeper_bps: u32,
             category: Symbol,
+            terms_uri: String,
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
@@ -130,6 +141,9 @@ mod contract {
             }
             if keeper_bps > MAX_KEEPER_BPS {
                 return Err(Error::KeeperBpsTooHigh);
+            }
+            if terms_uri.len() > MAX_TERMS_LEN {
+                return Err(Error::UriTooLong);
             }
 
             let id: u64 = env
@@ -150,6 +164,7 @@ mod contract {
                 keeper_bps,
                 category: category.clone(),
                 successor_id: 0,
+                terms_uri: terms_uri.clone(),
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -198,6 +213,7 @@ mod contract {
                 description,
                 keeper_bps,
                 category,
+                terms_uri,
             }
             .publish(&env);
 
