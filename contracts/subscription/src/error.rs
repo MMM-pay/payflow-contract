@@ -75,4 +75,19 @@ pub enum Error {
     /// set was supplied. The set is closed so an indexer can map every
     /// `Cancelled` event it will ever see without a catch-all branch.
     InvalidCancelReason = 28,
+    /// The caller gave a position in `subscriber_mandates` that does not hold
+    /// this mandate, so the transfer cannot update the old index in place.
+    InvalidSubscriberIndex = 29,
+    /// `accept_mandate_owner` was called for a mandate with no pending
+    /// transfer, or after the transfer was already accepted.
+    NoPendingTransfer = 30,
+    /// The address accepting the transfer is not the one the current
+    /// subscriber proposed in `propose_mandate_owner`.
+    NotProposedOwner = 31,
+    /// A transfer was proposed to the mandate's current subscriber; a move to
+    /// the same address is a no-op and is rejected.
+    SameSubscriber = 32,
+    /// The new subscriber already holds the maximum number of mandates its
+    /// index can track.
+    MandateIndexFull = 33,
 }
