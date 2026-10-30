@@ -186,6 +186,23 @@ pub struct Refunded {
     pub refunded_total: i128,
 }
 
+/// Emitted when a mandate's ownership moves from one subscriber to another via
+/// `propose_mandate_owner` / `accept_mandate_owner`. Future charges are debited
+/// from the new subscriber's vault; all frozen mandate terms and the merchant
+/// index are unchanged.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateTransferred {
+    /// ID of the transferred mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber the mandate moved away from.
+    #[topic]
+    pub old_subscriber: Address,
+    /// Subscriber the mandate moved to.
+    pub new_subscriber: Address,
+}
+
 /// Emitted when a subscriber moves a mandate onto a different plan.
 ///
 /// `charged` is the prorated difference collected for the part of the
