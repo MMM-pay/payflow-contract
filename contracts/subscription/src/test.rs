@@ -1012,7 +1012,7 @@ fn mandate_owner_transfer_repairs_a_pending_index_position() {
 }
 
 #[test]
-fn mandate_owner_transfer_requires_the_correct_signers() {
+fn propose_mandate_owner_requires_subscriber_auth() {
     let w = world();
     let plan_id = w.plan();
     let subscriber = w.subscriber(100_000);
@@ -1020,6 +1020,7 @@ fn mandate_owner_transfer_requires_the_correct_signers() {
     let wrong_signer = Address::generate(&w.env);
     let id = w.sub.subscribe(&subscriber, &plan_id, &0, &0);
 
+    // A signer other than the current subscriber cannot propose the transfer.
     w.env.mock_auths(&[MockAuth {
         address: &wrong_signer,
         invoke: &MockAuthInvoke {
@@ -1033,10 +1034,22 @@ fn mandate_owner_transfer_requires_the_correct_signers() {
         .sub
         .try_propose_mandate_owner(&subscriber, &id, &new_subscriber, &0)
         .is_err());
+}
+
+#[test]
+fn accept_mandate_owner_requires_new_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let wrong_signer = Address::generate(&w.env);
+    let id = w.sub.subscribe(&subscriber, &plan_id, &0, &0);
 
     w.env.mock_all_auths();
     w.sub
         .propose_mandate_owner(&subscriber, &id, &new_subscriber, &0);
+
+    // Only the proposed new subscriber can accept; any other signer is rejected.
     w.env.mock_auths(&[MockAuth {
         address: &wrong_signer,
         invoke: &MockAuthInvoke {
