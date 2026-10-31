@@ -175,7 +175,7 @@ deployed at are in [`deployments/testnet.env`](deployments/testnet.env).
 # prerequisites: Rust 1.96+, stellar-cli 27+
 rustup target add wasm32v1-none
 
-cargo test --all          # 63 tests
+cargo test --all          # 250 tests
 stellar contract build    # wasm -> target/wasm32v1-none/release
 ```
 
@@ -189,6 +189,12 @@ stellar keys generate payflow-deployer --network testnet --fund
 The script deploys in dependency order, passing each contract its configuration
 as constructor arguments, grants the subscription contract debit rights on the
 vault, and writes the ids to `deployments/<network>.env`.
+
+Upgrade a deployed suite to new wasm (admin-signed; storage is preserved):
+
+```bash
+./scripts/upgrade.sh subscription testnet payflow-deployer
+```
 
 Smoke-test a live deployment end to end:
 
@@ -259,6 +265,7 @@ contracts/
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test
+  upgrade.sh       admin-gated in-place wasm upgrade
   verify.sh        compare deployed WASMs with source
 deployments/
   testnet.env      ids of the live testnet suite

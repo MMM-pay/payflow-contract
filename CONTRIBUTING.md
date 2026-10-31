@@ -61,6 +61,22 @@ identity; the demo defaults to `testnet`.
 - **File layout.** Keep the `lib.rs` / `types.rs` / `error.rs` / `events.rs` /
   `test.rs` split.
 
+## Upgrades and storage compatibility
+
+All three contracts expose an admin-gated `upgrade(new_wasm_hash)`; deploy the
+new wasm with `scripts/upgrade.sh <contract> <network>`. An upgrade swaps only
+the code — instance and persistent storage stay as they are, so the new code
+must read exactly the keys and shapes the old code wrote:
+
+- **Error enums are append-only.** Add new variants at the end with the next
+  number; never renumber or remove one. The frontend maps codes to messages.
+- **Stored types are append-only.** New struct fields go last; never rename,
+  remove or retype an existing field of a stored type (`Plan`, `Mandate`,
+  config entries).
+- **Storage keys are stable.** Never rename a `DataKey` variant or change the
+  shape of an already-used variant.
+- A change that cannot satisfy these needs a migration, not an upgrade.
+
 ## Tests
 
 Every behavioural change needs a test. Follow the existing naming: describe the

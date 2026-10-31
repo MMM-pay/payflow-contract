@@ -9,6 +9,17 @@ change the contract interface.
 
 ### Changed
 
+- **Breaking (#158): plan subscriber caps, `set_max_charges`, admin-gated
+  upgrades.** `Plan` and `PlanCreated` gain `max_subscribers` (0 = unlimited);
+  `create_plan` takes a trailing `max_subscribers`. New subscriptions are
+  refused once a plan is at its cap, and a per-plan open-mandate count is kept
+  (released on cancel/end/complete and moved on `upgrade`). New
+  `subscription:set_max_charges` lets a subscriber raise/lower a mandate's
+  charge cap (reaching it completes the mandate and frees its seat). New
+  admin-only `upgrade_wasm` on all three contracts emits `ContractUpgraded`.
+  New error `PlanFull=34`; new `MaxChargesChanged` event. Existing testnet
+  deployments must be redeployed: `Plan`/`PlanCreated` layouts changed.
+
 - **Breaking (#136): referral shares, payout addresses, third-party funding and
   plan transfers.** `Plan` and `Mandate` gain `payout` and `referral_bps`
   (`Mandate` also `referrer`); `create_plan` takes trailing `referral_bps` and

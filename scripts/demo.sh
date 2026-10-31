@@ -15,10 +15,14 @@ fi
 : "${REGISTRY:?set REGISTRY}"; : "${VAULT:?set VAULT}"; : "${SUBSCRIPTION:?set SUBSCRIPTION}"
 
 echo "==> seeding sample plans and mandates"
+# seed.sh generates and funds the demo identities itself; a funding failure
+# there stops this run too, because every invoke below needs those keys.
 MANDATE="$(./scripts/seed.sh "$NETWORK")"
 MERCHANT="$(stellar keys address pf-demo-merchant)"
 
 echo "==> charging as an unrelated third party"
+# Run the charge unfiltered: grepping the output for "Charged|Error" would
+# let a failed charge exit zero, so CI could go green without billing.
 stellar contract invoke --id "$SUBSCRIPTION" --source pf-demo-merchant --network "$NETWORK" \
   -- charge --keeper "$MERCHANT" --mandate_id "$MANDATE"
 

@@ -94,6 +94,9 @@ mod plan {
         /// affected: mandates opened before the cutoff keep billing. The
         /// subscription contract enforces the cutoff in `subscribe`.
         pub available_until: u64,
+        /// Maximum number of simultaneously-open mandates the plan accepts; 0
+        /// means unlimited. Frozen into the plan, checked on each new sign-up.
+        pub max_subscribers: u32,
     }
 }
 pub use plan::Plan;
