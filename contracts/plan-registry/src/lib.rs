@@ -24,13 +24,15 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    PlanCreated, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet,
-    PlanTransferred, ProfileUpdated,
+    ContractUpgraded, PlanCreated, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged,
+    PlanSuccessorSet, PlanTransferred, ProfileUpdated,
 };
 pub use types::{DataKey, Plan, Profile};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, Address, BytesN, ContractExecutable, Env, String, Symbol, Vec,
+};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -130,6 +132,7 @@ mod contract {
             available_until: u64,
             referral_bps: u32,
             payout: Option<Address>,
+            max_subscribers: u32,
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
@@ -180,6 +183,7 @@ mod contract {
                 successor_id: 0,
                 terms_uri: terms_uri.clone(),
                 available_until,
+                max_subscribers,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -229,6 +233,7 @@ mod contract {
                 available_until,
                 referral_bps,
                 payout,
+                max_subscribers,
             }
             .publish(&env);
 
@@ -633,6 +638,24 @@ mod contract {
                 .instance()
                 .get(&DataKey::Admin)
                 .ok_or(Error::NotInitialized)
+        }
+
+        /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
+        /// admin may upgrade; persistent state is untouched. (From #158.)
+        pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin: Address = Self::admin(env.clone())?;
+            admin.require_auth();
+
+            env.deployer()
+                .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+
+            ContractUpgraded {
+                admin,
+                new_wasm_hash,
+            }
+            .publish(&env);
+
+            Ok(())
         }
 
         /// Propose transferring a plan to `new_owner`. Step one of a two-step

@@ -35,13 +35,16 @@ SUBSCRIBER="$(stellar keys address pf-demo-subscriber)"
 echo "==> publishing weekly, monthly, and yearly plans" >&2
 WEEKLY_PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \
   -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 10000000 --period 604800 \
-  --name "Demo Weekly" --keeper_bps 100 | tail -1)"
+  --name "Demo Weekly" --description "Weekly demo plan" --keeper_bps 100 \
+  --category general --max_subscribers 0 | tail -1)"
 MONTHLY_PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \
   -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 50000000 --period 2592000 \
-  --name "Demo Monthly" --keeper_bps 100 | tail -1)"
+  --name "Demo Monthly" --description "Monthly demo plan" --keeper_bps 100 \
+  --category general --max_subscribers 0 | tail -1)"
 YEARLY_PLAN="$(stellar contract invoke --id "$REGISTRY" --source pf-demo-merchant --network "$NETWORK" \
   -- create_plan --merchant "$MERCHANT" --token "$TOKEN" --amount 100000000 --period 31536000 \
-  --name "Demo Yearly" --keeper_bps 100 | tail -1)"
+  --name "Demo Yearly" --description "Yearly demo plan" --keeper_bps 100 \
+  --category general --max_subscribers 0 | tail -1)"
 
 echo "==> funding the subscriber's vault balance" >&2
 stellar contract invoke --id "$VAULT" --source pf-demo-subscriber --network "$NETWORK" \

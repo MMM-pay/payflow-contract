@@ -87,6 +87,7 @@ fn plan_created_layout() {
             available_until: 0,
             referral_bps: 0,
             payout: a.clone(),
+            max_subscribers: 0,
         },
     );
 }

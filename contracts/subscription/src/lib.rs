@@ -27,14 +27,17 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, FeeChanged, MandateCompleted, MandateEnded, MandateTransferred,
-    MandateUpdated, PauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
+    Cancelled, Charged, ContractUpgraded, FeeChanged, MandateCompleted, MandateEnded,
+    MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Refunded, SeatsChanged,
+    Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, Plan};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
+};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -307,6 +310,14 @@ mod contract {
                 return Err(Error::PlanInactive);
             }
 
+            // Seat cap (from #158): a plan with a non-zero `max_subscribers`
+            // refuses a new mandate once that many are already open. The count
+            // is maintained incrementally (inc here, dec when a mandate closes).
+            let open = Self::plan_open_count(&env, plan_id);
+            if plan.max_subscribers != 0 && open >= plan.max_subscribers {
+                return Err(Error::PlanFull);
+            }
+
             let id: u64 = env
                 .storage()
                 .instance()
@@ -377,6 +388,9 @@ mod contract {
                 |i| DataKey::PlanMandate(plan_id, i),
                 id,
             );
+            // Take a seat against the plan's cap (from #158); released when the
+            // mandate is cancelled, ended or completed.
+            Self::plan_open_inc(&env, plan_id);
 
             env.storage()
                 .instance()
@@ -532,6 +546,8 @@ mod contract {
 
             if completed {
                 mandate.status = MandateStatus::Completed;
+                // A completed mandate releases its seat on the plan (#158).
+                Self::plan_open_dec(&env, mandate.plan_id);
             }
 
             Self::write_mandate(&env, &mandate);
@@ -649,6 +665,15 @@ mod contract {
             let old_amount = mandate.amount;
             let old_period = mandate.period;
 
+            // Moving to a different plan takes a seat there; refuse if that plan
+            // is at its cap (#158). Same-plan "upgrades" keep their seat.
+            if new_plan_id != old_plan_id {
+                let open = Self::plan_open_count(&env, new_plan_id);
+                if plan.max_subscribers != 0 && open >= plan.max_subscribers {
+                    return Err(Error::PlanFull);
+                }
+            }
+
             // The part of the current period that is still ahead of us. A mandate
             // that was never charged has `next_charge` in the past, so nothing is
             // left of the current period and nothing is prorated: the old price
@@ -699,6 +724,14 @@ mod contract {
             // therefore bills the cheaper price at the next charge, and an
             // upgrade has already collected the difference for the rest of the
             // current period.
+            // Move the seat between plans (#158): release the old plan's seat
+            // and take one on the new plan. Guarded above so the counts stay
+            // right and a full target plan was already rejected.
+            if new_plan_id != old_plan_id {
+                Self::plan_open_dec(&env, old_plan_id);
+                Self::plan_open_inc(&env, new_plan_id);
+            }
+
             mandate.plan_id = new_plan_id;
             mandate.amount = plan.amount;
             mandate.period = plan.period;
@@ -806,6 +839,9 @@ mod contract {
             }
 
             mandate.status = MandateStatus::Cancelled;
+            // Cancelling releases the mandate's seat on the plan (#158); the
+            // guard above means an already-closed mandate never dec's twice.
+            Self::plan_open_dec(&env, mandate.plan_id);
             Self::write_mandate(&env, &mandate);
 
             MandateUpdated {
@@ -942,6 +978,9 @@ mod contract {
             }
 
             mandate.status = MandateStatus::Cancelled;
+            // Ending a mandate releases its seat on the plan (#158); the guard
+            // above means an already-closed mandate never dec's twice.
+            Self::plan_open_dec(&env, mandate.plan_id);
             Self::write_mandate(&env, &mandate);
 
             MandateUpdated {
@@ -1378,6 +1417,9 @@ mod contract {
                 }
 
                 mandate.status = MandateStatus::Cancelled;
+                // Each cancelled mandate releases its seat (#158); the guard
+                // above skips already-closed ones so no seat dec's twice.
+                Self::plan_open_dec(&env, mandate.plan_id);
                 Self::write_mandate(&env, &mandate);
                 Cancelled {
                     mandate_id,
@@ -1518,6 +1560,89 @@ mod contract {
             Self::index_page(&env, len, start, limit, |i| {
                 DataKey::PlanMandate(plan_id, i)
             })
+        }
+
+        /// Number of currently-open mandates against `plan_id`; the count the
+        /// plan's `max_subscribers` cap is checked against (from #158).
+        pub fn plan_subscriber_count(env: Env, plan_id: u64) -> u32 {
+            Self::plan_open_count(&env, plan_id)
+        }
+
+        /// Raise or lower a mandate's `max_charges` (0 = unlimited). Only the
+        /// subscriber may change it, and not below the charges already made.
+        /// Reaching the new cap completes the mandate and releases its seat.
+        /// (From #158.)
+        pub fn set_max_charges(
+            env: Env,
+            subscriber: Address,
+            mandate_id: u64,
+            max_charges: u32,
+        ) -> Result<(), Error> {
+            subscriber.require_auth();
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.subscriber != subscriber {
+                return Err(Error::NotSubscriber);
+            }
+            if mandate.status != MandateStatus::Active && mandate.status != MandateStatus::Paused {
+                return Err(Error::MandateNotActive);
+            }
+            if max_charges != 0 && max_charges < mandate.charges_made {
+                return Err(Error::InvalidMaxCharges);
+            }
+
+            mandate.max_charges = max_charges;
+
+            let completed = max_charges != 0 && mandate.charges_made >= max_charges;
+            if completed {
+                mandate.status = MandateStatus::Completed;
+                // The finished mandate releases its seat on the plan.
+                Self::plan_open_dec(&env, mandate.plan_id);
+            }
+
+            Self::write_mandate(&env, &mandate);
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            MaxChargesChanged {
+                mandate_id,
+                subscriber,
+                max_charges,
+            }
+            .publish(&env);
+
+            if completed {
+                MandateCompleted {
+                    mandate_id,
+                    subscriber: mandate.subscriber,
+                    charges_made: mandate.charges_made,
+                }
+                .publish(&env);
+            }
+
+            Ok(())
+        }
+
+        /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
+        /// admin may upgrade; persistent state is untouched. (From #158.)
+        pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin: Address = Self::cfg_address(&env, DataKey::Admin)?;
+            admin.require_auth();
+
+            env.deployer()
+                .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+
+            ContractUpgraded {
+                admin,
+                new_wasm_hash,
+            }
+            .publish(&env);
+
+            Ok(())
         }
 
         /// The id the next opened mandate will get. Mandates are numbered from 1,
@@ -1754,6 +1879,31 @@ mod contract {
             env.storage()
                 .persistent()
                 .remove(&DataKey::PendingSubscriberPosition(mandate_id));
+        }
+
+        /// Count of currently-open mandates against a plan, checked each sign-up
+        /// against the plan's `max_subscribers` (0 = unlimited). (From #158.)
+        fn plan_open_count(env: &Env, plan_id: u64) -> u32 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::PlanSubscriberCount(plan_id))
+                .unwrap_or(0)
+        }
+
+        fn plan_open_inc(env: &Env, plan_id: u64) {
+            let key = DataKey::PlanSubscriberCount(plan_id);
+            let count = Self::plan_open_count(env, plan_id) + 1;
+            let p = env.storage().persistent();
+            p.set(&key, &count);
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        }
+
+        fn plan_open_dec(env: &Env, plan_id: u64) {
+            let key = DataKey::PlanSubscriberCount(plan_id);
+            let count = Self::plan_open_count(env, plan_id).saturating_sub(1);
+            let p = env.storage().persistent();
+            p.set(&key, &count);
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
         fn index_len(env: &Env, count_key: DataKey) -> u32 {

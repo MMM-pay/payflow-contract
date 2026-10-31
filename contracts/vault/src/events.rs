@@ -1,6 +1,6 @@
 //! Events emitted by the vault contract.
 
-use soroban_sdk::{contractevent, Address};
+use soroban_sdk::{contractevent, Address, BytesN};
 
 /// Emitted when a subscriber funds their vault balance.
 #[contractevent]
@@ -81,4 +81,14 @@ pub struct Debit {
     pub amount: i128,
     /// Remaining spendable balance of the subscriber for this token.
     pub balance: i128,
+}
+
+/// Emitted when the admin replaces this contract's wasm. Persistent state is
+/// untouched by an upgrade; the new code reads the keys the old code wrote.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
 }

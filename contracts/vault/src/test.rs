@@ -11,6 +11,9 @@ use soroban_sdk::{
 };
 
 const THIRTY_DAYS: u64 = 2_592_000;
+/// A valid vault wasm used as the target for `upgrade_wasm` tests (#158); the
+/// contract upgrades to a copy of itself, exercising the upgrade mechanism.
+const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_vault.wasm");
 
 struct Harness<'a> {
     env: Env,
@@ -1476,4 +1479,50 @@ fn deposit_for_requires_the_payer_to_authorize() {
     assert_eq!(h.vault.balance(&user, &h.token), 0);
     assert_eq!(h.token_client.balance(&from), 10_000);
     assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn admin_can_upgrade_and_state_written_before_survives() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000); // persistent state
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    // The balance and the instance configuration written before the upgrade
+    // are both still readable after it.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.subscription(), h.subscription);
+
+    // And the new code still runs: deposits continue where they left off.
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+#[test]
+fn upgrade_wasm_wrong_signer_rejected() {
+    let h = setup();
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+
+    // The attacker passes the hash as the argument, but the signature on the
+    // call is the attacker's: `require_auth` on the admin fails.
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // With no authorization at all the call fails too.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The subscription pointer and balances are untouched.
+    assert_eq!(h.vault.subscription(), h.subscription);
 }

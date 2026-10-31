@@ -167,4 +167,7 @@ pub enum DataKey {
     PlanMandateCount(u64),
     /// The n-th mandate opened against a plan (0-based).
     PlanMandate(u64, u32),
+    /// Count of simultaneously-open mandates against a plan, checked against
+    /// the plan's `max_subscribers` seat cap.
+    PlanSubscriberCount(u64),
 }

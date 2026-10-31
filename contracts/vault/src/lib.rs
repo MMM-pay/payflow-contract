@@ -26,10 +26,12 @@ mod test;
 mod test_events;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, DepositCapSet, DepositFor, Withdraw};
+pub use events::{ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, Withdraw};
 pub use types::{DataKey, SpendLimit, SpendWindow};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
+};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -577,6 +579,28 @@ mod contract {
                 .instance()
                 .get(&DataKey::Admin)
                 .ok_or(Error::NotInitialized)
+        }
+
+        /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
+        /// admin may upgrade; persistent state is untouched. (From #158.)
+        pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            admin.require_auth();
+
+            env.deployer()
+                .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
+
+            ContractUpgraded {
+                admin,
+                new_wasm_hash,
+            }
+            .publish(&env);
+
+            Ok(())
         }
 
         /// Set or replace a per-period ceiling on total debits for
