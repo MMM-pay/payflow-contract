@@ -41,6 +41,7 @@ declare -A allowlist_subscription=(
 
 declare -A allowlist_vault=(
     [deposit_cap]=1
+    [spend_limit]=1
     [balance]=1
     [allowlist_enabled]=1
     [token_allowed]=1

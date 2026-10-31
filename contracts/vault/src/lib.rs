@@ -27,7 +27,7 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
-pub use types::DataKey;
+pub use types::{DataKey, SpendLimit, SpendWindow};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
@@ -365,6 +365,8 @@ mod contract {
                 return Err(Error::InsufficientBalance);
             }
 
+            Self::apply_spend_limit(&env, &user, &token, amount)?;
+
             let new_balance = balance - amount;
             Self::write_balance(&env, &user, &token, new_balance);
 
@@ -440,6 +442,12 @@ mod contract {
             if balance < total {
                 return Err(Error::InsufficientBalance);
             }
+
+            // Both legs are one logical charge, so the whole total counts
+            // against the spend limit once (merged from #134, which predates
+            // debit_split; counting the total here keeps the limit from being
+            // bypassed via split settlement).
+            Self::apply_spend_limit(&env, &user, &token, total)?;
 
             let after_a = balance - amount_a;
             let after_both = after_a - amount_b;
@@ -524,6 +532,64 @@ mod contract {
                 .get(&DataKey::Admin)
                 .ok_or(Error::NotInitialized)
         }
+
+        /// Set or replace a per-period ceiling on total debits for
+        /// `(user, token)`, across all of the user's mandates in that token.
+        /// Only the user themself can set it, and it can only make charges
+        /// fail — it never moves funds and never blocks `withdraw`.
+        ///
+        /// `amount == 0` disables the limit and clears the window tracker.
+        /// When a new limit is set, the window tracker is cleared too, so the
+        /// new ceiling is judged on usage from this point on.
+        pub fn set_spend_limit(
+            env: Env,
+            user: Address,
+            token: Address,
+            amount: i128,
+            window_secs: u64,
+        ) -> Result<(), Error> {
+            user.require_auth();
+
+            if amount < 0 {
+                return Err(Error::InvalidAmount);
+            }
+            if amount > 0 && window_secs == 0 {
+                return Err(Error::InvalidWindow);
+            }
+
+            let limit_key = DataKey::SpendLimit(user.clone(), token.clone());
+            let window_key = DataKey::SpendWindow(user.clone(), token.clone());
+            let p = env.storage().persistent();
+
+            if amount == 0 {
+                // Disabled: drop both entries so `debit`'s unlimited path stays
+                // a single miss on an absent key.
+                p.remove(&limit_key);
+                p.remove(&window_key);
+                return Ok(());
+            }
+
+            let limit = SpendLimit {
+                amount,
+                window_secs,
+            };
+            p.set(&limit_key, &limit);
+            p.extend_ttl(&limit_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            // Clear the tracker: the new limit starts counting fresh.
+            p.remove(&window_key);
+            Ok(())
+        }
+
+        /// The user's stored spending limit. `amount == 0` means no limit.
+        pub fn spend_limit(env: Env, user: Address, token: Address) -> SpendLimit {
+            env.storage()
+                .persistent()
+                .get(&DataKey::SpendLimit(user, token))
+                .unwrap_or(SpendLimit {
+                    amount: 0,
+                    window_secs: 0,
+                })
+        }
     }
 
     impl Vault {
@@ -555,6 +621,52 @@ mod contract {
         fn read_deposit_cap(env: &Env, user: &Address, token: &Address) -> i128 {
             let key = DataKey::DepositCap(user.clone(), token.clone());
             env.storage().persistent().get(&key).unwrap_or(0)
+        }
+
+        /// Count `amount` against `(user, token)`'s spend limit, rolling the
+        /// fixed window forward when the current one has elapsed. Fails with
+        /// `SpendLimitExceeded` before anything is written when the ceiling
+        /// would be crossed. When no limit is set this is a single absent-key
+        /// lookup, so the unlimited path costs one extra storage read.
+        fn apply_spend_limit(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            let limit_key = DataKey::SpendLimit(user.clone(), token.clone());
+            let Some(limit) = env.storage().persistent().get::<_, SpendLimit>(&limit_key) else {
+                return Ok(());
+            };
+            if limit.amount <= 0 {
+                return Ok(());
+            }
+
+            let now = env.ledger().timestamp();
+            let window_key = DataKey::SpendWindow(user.clone(), token.clone());
+            let (start, spent) = match env
+                .storage()
+                .persistent()
+                .get::<_, SpendWindow>(&window_key)
+            {
+                Some(w) if now < w.start.saturating_add(limit.window_secs) => (w.start, w.spent),
+                // No window yet, or the stored one has elapsed: start a fresh
+                // one, aligned to the epoch so the reset is deterministic.
+                _ => (now - (now % limit.window_secs), 0),
+            };
+
+            if spent.saturating_add(amount) > limit.amount {
+                return Err(Error::SpendLimitExceeded);
+            }
+
+            let window = SpendWindow {
+                start,
+                spent: spent + amount,
+            };
+            let p = env.storage().persistent();
+            p.set(&window_key, &window);
+            p.extend_ttl(&window_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Ok(())
         }
 
         fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {

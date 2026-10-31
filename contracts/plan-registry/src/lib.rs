@@ -124,6 +124,7 @@ mod contract {
             keeper_bps: u32,
             category: Symbol,
             terms_uri: String,
+            available_until: u64,
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
@@ -165,6 +166,7 @@ mod contract {
                 category: category.clone(),
                 successor_id: 0,
                 terms_uri: terms_uri.clone(),
+                available_until,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -214,6 +216,7 @@ mod contract {
                 keeper_bps,
                 category,
                 terms_uri,
+                available_until,
             }
             .publish(&env);
 

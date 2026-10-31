@@ -153,4 +153,8 @@ pub enum DataKey {
     MerchantMandateCount(Address),
     /// The n-th mandate opened against a merchant's plans (0-based).
     MerchantMandate(Address, u32),
+    /// Number of mandates opened against a plan.
+    PlanMandateCount(u64),
+    /// The n-th mandate opened against a plan (0-based).
+    PlanMandate(u64, u32),
 }

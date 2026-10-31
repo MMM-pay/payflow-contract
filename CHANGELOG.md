@@ -394,15 +394,45 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 - `docs/adr/`: five architecture decision records (vault/billing split,
   `now + period` scheduling, constructors, per-position indexes,
   permissionless `charge`), linked from README.
+- `plan-registry:create_plan` takes `available_until`, a unix timestamp after
+  which the plan stops accepting new subscribers (0 = forever), carried in
+  `Plan.available_until` and in `PlanCreated`. A promotion ends itself without
+  anyone remembering to call `set_plan_active(false)`. Enforced by
+  `subscription:subscribe`, which rejects an expired plan with the existing
+  `PlanInactive` (7); mandates opened before the cutoff keep billing.
+- `subscription:plan_mandate_count(plan_id)` and
+  `subscription:plan_mandates(plan_id, start, limit)`: a paged per-plan index
+  of mandate ids, the same one-entry-per-position layout as the merchant and
+  subscriber indexes, so merchants can see per-plan adoption without an
+  indexer. Pages are capped at `MAX_PAGE` (50).
+- `vault:set_spend_limit(user, token, amount, window_secs)` and
+  `vault:spend_limit(user, token)`: a subscriber-set ceiling on total debits
+  per fixed window across all of their mandates in one token ("never debit
+  more than 50 XLM per 30 days in total"). Enforced in `debit`; over the
+  ceiling a charge fails atomically with the new error `SpendLimitExceeded`
+  (6), the mandate stays due, and the keeper's backoff simply retries. Only
+  the user can set their own limit; `amount = 0` disables it; the new error
+  `InvalidWindow` (7) rejects a positive amount with a zero window. The limit
+  can only make charges fail — it never moves funds and never blocks
+  `withdraw`.
+- `subscription:subscribe_with_deposit(subscriber, plan_id, max_charges,
+  deposit)`: funds the vault and opens a mandate in one transaction, so a new
+  subscriber signs once instead of signing a deposit and then a subscribe.
+  The subscriber's single authorization covers the nested `vault:deposit` as
+  a sub-invocation (asserted in an auth-tree test), and the flow is atomic:
+  a failed deposit subscribes nothing, a failed subscribe rolls the deposit
+  back.
 
 Interface changes (`set_profile`, `profile`, `deactivate_page`,
-`ProfileUpdated`, `create_plan`'s `keeper_bps` and `terms_uri`, `charge`'s
-`keeper` argument, the new `tip`/`keeper`/`keeper_bps` event fields,
-`Charged.token`, `Subscribed.next_charge` as a scheduled start, and the new
-entry points `subscribe_at` and `withdraw_all`) ripple into
+`ProfileUpdated`, `create_plan`'s `keeper_bps`, `terms_uri` and
+`available_until`, `charge`'s `keeper` argument, the new
+`tip`/`keeper`/`keeper_bps` and `available_until` event fields,
+`Charged.token`, `Plan.available_until`, `Subscribed.next_charge` as a
+scheduled start, and the new entry points `subscribe_at`, `withdraw_all`,
+`subscribe_with_deposit` and the vault spend-limit methods) ripple into
 `payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
-consume the new fields and pass the new arguments are tracked in the pull
-request.
+consume the new fields, pass the new arguments, and surface the
+one-transaction sign-up and spend-limit UI are tracked in the pull request.
 
 ### Changed
 
@@ -415,11 +445,11 @@ request.
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.
 - **Breaking:** `plan-registry:create_plan` takes `description`, `keeper_bps`,
-  `category` and `terms_uri` as its trailing arguments, and `Plan`, `Mandate`,
-  `PlanCreated`, `Subscribed` and `Charged` gain fields. Existing testnet
-  deployments must be
-  redeployed: stored `Plan` and `Mandate` values do not decode into the new
-  shape, and `Charged`/`PlanCreated` event layouts changed.
+  `category`, `terms_uri` and `available_until` as its trailing arguments, and
+  `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged` gain fields.
+  Existing testnet deployments must be redeployed: stored `Plan` and `Mandate`
+  values do not decode into the new shape, and `Charged`/`PlanCreated` event
+  layouts changed.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -451,7 +481,21 @@ request.
   bytes), and carried in `PlanCreated`.
 - **New test: `charged_event_carries_the_token`** — decodes the `Charged`
   event and finds the token on the wire.
-- 229 → 247 tests.
+- **Plan cutoff tests (from #134):** a subscriber gets in one second before the
+  cutoff and is rejected at it, existing mandates keep billing past it, and the
+  cutoff rides in `PlanCreated` for indexers.
+- **Per-plan index tests (from #134):** per-plan isolation, oldest-first order,
+  paging bounds (`MAX_PAGE`, start past the end), cancelled mandates staying
+  listed, and the subscribe cost staying flat with many mandates on one plan.
+- **Spend limit tests (from #134):** over-the-ceiling debits fail atomically
+  (through the real `charge` path), the next window resets, limit 0 disables
+  it, replacing a limit resets the window, limits are scoped per (user, token),
+  a wrong signer cannot set one, and the unlimited debit path writes no window
+  state.
+- **One-signature sign-up tests (from #134):** `subscribe_with_deposit` funds
+  the vault and opens the mandate under a single subscriber signature; a wrong
+  signer fails; a failed deposit subscribes nothing and burns no mandate id;
+  an expired plan rolls the deposit back.
 
 ## [0.1.0] - 2026-09-02
 

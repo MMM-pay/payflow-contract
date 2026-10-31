@@ -84,6 +84,7 @@ fn plan_created_layout() {
             keeper_bps: 125,
             category: Symbol::new(&env, "fitness"),
             terms_uri: String::from_str(&env, "https://example.com/terms"),
+            available_until: 0,
         },
     );
 }

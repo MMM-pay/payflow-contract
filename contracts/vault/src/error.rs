@@ -36,4 +36,9 @@ pub enum Error {
     /// The split is rejected rather than wrapped, because a wrapped total
     /// would under-charge the subscriber.
     AmountOverflow = 11,
+    /// The debit would take the user over their per-window spend limit.
+    /// New variants go at the end so existing codes keep their numbers.
+    SpendLimitExceeded = 12,
+    /// `set_spend_limit` was given a positive amount with a zero window.
+    InvalidWindow = 13,
 }
