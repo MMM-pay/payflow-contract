@@ -99,6 +99,16 @@ pub struct Mandate {
     /// before this field existed decode to 0 and are therefore unlimited, so
     /// they are unaffected.
     pub max_pause_secs: u64,
+    /// Account that receives the merchant's share of each charge, frozen from
+    /// the plan's `payout` at sign-up. A later payout change or a plan-owner
+    /// transfer never redirects this open mandate's funds.
+    pub payout: Address,
+    /// Optional referrer paid a share of the merchant's money on every charge.
+    /// `None` disables the referral for this mandate.
+    pub referrer: Option<Address>,
+    /// Referral share in basis points of the merchant's share, frozen from the
+    /// plan at sign-up. Capped at `MAX_REFERRAL_BPS`.
+    pub referral_bps: u32,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
 }

@@ -33,7 +33,7 @@ pub use events::{
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, Plan};
 
-use payflow_shared::MAX_KEEPER_BPS;
+use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -164,9 +164,18 @@ mod contract {
             plan_id: u64,
             max_charges: u32,
             max_total: i128,
+            referrer: Option<Address>,
         ) -> Result<u64, Error> {
             let now = env.ledger().timestamp();
-            Self::subscribe_at(env, subscriber, plan_id, max_charges, max_total, now)
+            Self::subscribe_at(
+                env,
+                subscriber,
+                plan_id,
+                max_charges,
+                max_total,
+                now,
+                referrer,
+            )
         }
 
         /// Fund the vault and open a mandate in one transaction, so a new
@@ -198,6 +207,7 @@ mod contract {
             max_charges: u32,
             max_total: i128,
             deposit: i128,
+            referrer: Option<Address>,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
 
@@ -208,7 +218,15 @@ mod contract {
             VaultClient::new(&env, &vault_addr).deposit(&subscriber, &plan.token, &deposit);
 
             let now = env.ledger().timestamp();
-            Self::do_subscribe_at(env, subscriber, plan_id, max_charges, max_total, now)
+            Self::do_subscribe_at(
+                env,
+                subscriber,
+                plan_id,
+                max_charges,
+                max_total,
+                now,
+                referrer,
+            )
         }
 
         /// Open a mandate whose first charge falls due at `start` rather than
@@ -241,9 +259,18 @@ mod contract {
             max_charges: u32,
             max_total: i128,
             start: u64,
+            referrer: Option<Address>,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
-            Self::do_subscribe_at(env, subscriber, plan_id, max_charges, max_total, start)
+            Self::do_subscribe_at(
+                env,
+                subscriber,
+                plan_id,
+                max_charges,
+                max_total,
+                start,
+                referrer,
+            )
         }
 
         /// Core mandate creation shared by `subscribe_at` (which authorizes the
@@ -258,6 +285,7 @@ mod contract {
             max_charges: u32,
             max_total: i128,
             start: u64,
+            referrer: Option<Address>,
         ) -> Result<u64, Error> {
             if max_total < 0 {
                 return Err(Error::InvalidMaxTotal);
@@ -295,6 +323,10 @@ mod contract {
             // tip must never exceed MAX_KEEPER_BPS even if the registry contract
             // passed to this deployment does not enforce the cap.
             let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+            // Defensive clamp, same as keeper_bps: the referral share is frozen
+            // into the mandate and can never exceed MAX_REFERRAL_BPS even if a
+            // registry passed to this deployment failed to enforce the cap.
+            let referral_bps = plan.referral_bps.min(MAX_REFERRAL_BPS);
 
             let mandate = Mandate {
                 id,
@@ -318,6 +350,9 @@ mod contract {
                 total_spent: 0,
 
                 max_pause_secs: 0,
+                payout: plan.payout.clone(),
+                referrer: referrer.clone(),
+                referral_bps,
                 status: MandateStatus::Active,
             };
 
@@ -368,6 +403,8 @@ mod contract {
                 max_charges,
                 fee_bps,
                 keeper_bps,
+                referrer,
+                referral_bps,
             }
             .publish(&env);
 
@@ -431,7 +468,7 @@ mod contract {
                 return Err(Error::MaxChargesReached);
             }
 
-            let (fee, tip, merchant_amount) = Self::fee_split(&mandate)?;
+            let (fee, tip, referral, merchant_amount) = Self::fee_split(&mandate)?;
             let charges_made = mandate
                 .charges_made
                 .checked_add(1)
@@ -450,12 +487,17 @@ mod contract {
             // Two `debit` calls would repeat the authorization, the config read
             // and the balance read/write for the same total; a zero fee leaves
             // the second leg empty, which emits the single `Debit` a lone
-            // charge used to. The keeper tip is a third payee, so a tipped
-            // charge makes two vault calls rather than three.
+            // charge used to. The keeper tip and the referral are extra payees,
+            // each a further `debit` only when non-zero.
+            //
+            // The merchant share is paid to `mandate.payout`, frozen at sign-up:
+            // a later payout change or a plan-ownership transfer never redirects
+            // an open mandate's funds. Every leg is debited from the subscriber,
+            // so each counts against any vault spend limit on its own.
             vault.debit_split(
                 &mandate.subscriber,
                 &mandate.token,
-                &mandate.merchant,
+                &mandate.payout,
                 &merchant_amount,
                 &fee_to,
                 &fee,
@@ -463,6 +505,16 @@ mod contract {
 
             if tip > 0 {
                 vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
+            }
+
+            // Referral is a share of the merchant's own money paid to the
+            // referrer frozen into the mandate. `fee_split` only returns a
+            // non-zero referral when `mandate.referrer` is set, so the pattern
+            // below always binds.
+            if referral > 0 {
+                if let Some(referrer) = &mandate.referrer {
+                    vault.debit(&mandate.subscriber, &mandate.token, referrer, &referral);
+                }
             }
 
             // Settling through a scheduled pause that has run its course resumes
@@ -501,6 +553,8 @@ mod contract {
                 keeper,
                 charges_made: mandate.charges_made,
                 next_charge: mandate.next_charge,
+                referral,
+                referrer: mandate.referrer.clone(),
             }
             .publish(&env);
 
@@ -1267,7 +1321,7 @@ mod contract {
         /// than reimplementing the rounding.
         pub fn quote_charge(env: Env, mandate_id: u64) -> Result<ChargeQuote, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
-            let (fee, _tip, merchant_amount) = Self::fee_split(&m)?;
+            let (fee, _tip, _referral, merchant_amount) = Self::fee_split(&m)?;
             let now = env.ledger().timestamp();
             let chargeable = Self::active_at(&m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)
@@ -1527,7 +1581,13 @@ mod contract {
         /// one charge of `m`, all from the rates frozen into the mandate when
         /// the subscriber opened it. `charge` and `quote_charge` both call
         /// this, so a quote can never round differently from settlement.
-        fn fee_split(m: &Mandate) -> Result<(i128, i128, i128), Error> {
+        /// Splits a charge into `(fee, tip, referral, merchant_amount)`. The
+        /// fee is a share of the full amount; the tip and the referral are both
+        /// shares of the merchant's own money (`merchant_gross = amount - fee`),
+        /// so the subscriber is always debited exactly `amount` and the protocol
+        /// fee is never touched by either. `merchant_amount` is what is left for
+        /// the merchant's payout after the tip and the referral.
+        fn fee_split(m: &Mandate) -> Result<(i128, i128, i128, i128), Error> {
             let fee = m
                 .amount
                 .checked_mul(m.fee_bps as i128)
@@ -1542,7 +1602,22 @@ mod contract {
                 .checked_mul(tip_bps as i128)
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
-            Ok((fee, tip, merchant_gross - tip))
+
+            // Referral is a second share of the merchant's own money, capped at
+            // MAX_REFERRAL_BPS and paid only when the mandate has a referrer.
+            // A plan that advertises a referral rate but opens a mandate with no
+            // referrer therefore burns none of the merchant's money.
+            let referral = if m.referrer.is_some() {
+                let referral_bps = m.referral_bps.min(MAX_REFERRAL_BPS);
+                merchant_gross
+                    .checked_mul(referral_bps as i128)
+                    .ok_or(Error::AmountOverflow)?
+                    / BPS_DENOMINATOR
+            } else {
+                0
+            };
+
+            Ok((fee, tip, referral, merchant_gross - tip - referral))
         }
 
         /// Whether `charge` would settle this mandate at `now`: active,

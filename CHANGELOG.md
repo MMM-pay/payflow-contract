@@ -9,6 +9,22 @@ change the contract interface.
 
 ### Changed
 
+- **Breaking (#136): referral shares, payout addresses, third-party funding and
+  plan transfers.** `Plan` and `Mandate` gain `payout` and `referral_bps`
+  (`Mandate` also `referrer`); `create_plan` takes trailing `referral_bps` and
+  `payout: Option<Address>`; `subscribe`/`subscribe_at`/`subscribe_with_deposit`
+  take a trailing `referrer: Option<Address>`. `charge` pays the merchant share
+  to the mandate's frozen `payout` and a referral share (out of the merchant's
+  money, capped at `MAX_REFERRAL_BPS = 2000`) to the `referrer`. New vault
+  `deposit_for` (third-party funding) and plan-registry
+  `propose_plan_owner`/`accept_plan_owner` (two-step ownership transfer). New
+  errors (vault `SpendLimitExceeded`/`InvalidWindow` already at 12/13;
+  plan-registry `ReferralBpsTooHigh=18`, `PendingOwnershipNotFound=19`,
+  `NotPendingOwner=20`) and events (`PlanOwnershipProposed`, `PlanTransferred`,
+  `DepositFor`; `PlanCreated`/`Subscribed`/`Charged` gain fields). Existing
+  testnet deployments must be redeployed: stored `Plan`/`Mandate` values and
+  several event layouts changed.
+
 - **Breaking (events):** `Cancelled` gains a trailing `reason: u32` field, set
   by the new `cancel_with_reason`. Indexers and clients that decode the event
   must read it; `cancel` and `cancel_page` always report `0`, so a mandate

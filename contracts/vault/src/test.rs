@@ -1360,3 +1360,120 @@ fn debit_without_a_limit_writes_no_window_state() {
     assert!(!has_limit, "an unlimited user must have no limit entry");
     assert!(!has_window, "an unlimited user must have no window entry");
 }
+
+#[test]
+fn deposit_for_credits_the_recipient_and_debits_the_payer() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    // The recipient owns the balance; the payer's vault balance is untouched.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.balance(&from, &h.token), 0);
+    // The payer's wallet funded it, and the vault holds the tokens.
+    assert_eq!(h.token_client.balance(&from), 6_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 4_000);
+}
+
+#[test]
+fn deposit_for_accumulates_on_the_recipients_balance() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let other = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &1_000);
+    h.vault.deposit_for(&other, &user, &h.token, &2_500);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 3_500);
+    assert_eq!(h.token_client.balance(&h.vault_id), 3_500);
+}
+
+#[test]
+fn deposit_for_event_identifies_the_payer() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    let last = h.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    assert_eq!(name.to_utf8_string_lossy(), "deposit_for");
+    // from, user, token are the topics, in that order.
+    assert_eq!(body.topics[1], ScVal::from(from));
+    assert_eq!(body.topics[2], ScVal::from(user));
+    assert_eq!(body.topics[3], ScVal::from(h.token));
+}
+
+#[test]
+fn only_the_recipient_can_withdraw_gifted_funds() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = funded_user(&h, 0);
+
+    h.vault.deposit_for(&from, &user, &h.token, &4_000);
+
+    // The payer has no vault balance of its own to withdraw.
+    assert_eq!(
+        h.vault.try_withdraw(&from, &h.token, &1_000),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    // The recipient can withdraw everything, and only it receives the tokens.
+    // The payer's wallet keeps its remaining 6_000: the gift is gone and
+    // cannot be pulled back.
+    assert!(h.vault.try_withdraw(&user, &h.token, &4_000).is_ok());
+    assert_eq!(h.token_client.balance(&user), 4_000);
+    assert_eq!(h.token_client.balance(&from), 6_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn deposit_for_rejects_non_positive_amount() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_deposit_for(&from, &user, &h.token, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        h.vault.try_deposit_for(&from, &user, &h.token, &-5),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&from), 10_000);
+}
+
+#[test]
+fn deposit_for_requires_the_payer_to_authorize() {
+    let h = setup();
+    let from = funded_user(&h, 10_000);
+    let user = Address::generate(&h.env);
+
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault.address,
+            fn_name: "deposit_for",
+            args: (&from, &user, &h.token, &4_000).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(h
+        .vault
+        .try_deposit_for(&from, &user, &h.token, &4_000)
+        .is_err());
+    // Nothing moved on either side.
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&from), 10_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
