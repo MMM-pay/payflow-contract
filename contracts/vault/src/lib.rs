@@ -26,7 +26,7 @@ mod test;
 mod test_events;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, DepositCapSet, Withdraw};
+pub use events::{Debit, Deposit, DepositCapSet, DepositFor, Withdraw};
 pub use types::{DataKey, SpendLimit, SpendWindow};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
@@ -233,6 +233,52 @@ mod contract {
             Self::write_balance(&env, &user, &token, new_balance);
 
             Deposit {
+                user,
+                token,
+                amount,
+                balance: new_balance,
+            }
+            .publish(&env);
+            Ok(())
+        }
+
+        /// Credit `user`'s balance with tokens paid by a different account
+        /// `from` — third-party funding (merged from #136). `from` authorizes
+        /// and pays; `user` receives the spendable balance.
+        ///
+        /// Applies the same allowlist and deposit-cap checks as `deposit`, so
+        /// funding on someone's behalf cannot bypass either. (#136 predated both
+        /// features; enforcing them here keeps third-party funding consistent
+        /// with a direct deposit.)
+        pub fn deposit_for(
+            env: Env,
+            from: Address,
+            user: Address,
+            token: Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            from.require_auth();
+            if amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            if Self::allowlist_on(&env) && !Self::token_on(&env, &token) {
+                return Err(Error::TokenNotAllowed);
+            }
+
+            let new_balance = Self::read_balance(&env, &user, &token) + amount;
+            let cap = Self::read_deposit_cap(&env, &user, &token);
+            if cap > 0 && new_balance > cap {
+                return Err(Error::DepositCapExceeded);
+            }
+
+            let vault = env.current_contract_address();
+            token::TokenClient::new(&env, &token).transfer(&from, &vault, &amount);
+
+            Self::write_balance(&env, &user, &token, new_balance);
+
+            DepositFor {
+                from,
                 user,
                 token,
                 amount,

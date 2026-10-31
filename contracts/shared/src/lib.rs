@@ -19,6 +19,11 @@ use soroban_sdk::{contracttype, Address, String, Symbol};
 /// what a subscriber pays.
 pub const MAX_KEEPER_BPS: u32 = 500;
 
+/// Largest referral share a plan may set, in basis points of the merchant's
+/// share: 20%. The referral is paid out of the merchant's share and never out
+/// of the protocol fee or the keeper tip; the registry rejects anything higher.
+pub const MAX_REFERRAL_BPS: u32 = 2_000;
+
 /// Largest plan description, in bytes. A description is a short, plain
 /// summary of what the plan includes ("monthly consults, unlimited
 /// follow-ups"). At most MAX_DESCRIPTION_LEN bytes; may be empty.
@@ -76,6 +81,14 @@ mod plan {
         /// (200) bytes; may be empty. Self-declared by the merchant, like the
         /// profile URL: the contract does not verify it.
         pub terms_uri: String,
+        /// Account that actually receives the merchant's share of each charge.
+        /// Frozen into every mandate at sign-up, so a later payout change or a
+        /// plan-ownership transfer never redirects an open mandate's funds.
+        pub payout: Address,
+        /// Referral share paid to a mandate's referrer, in basis points of the
+        /// merchant's share (out of the merchant's own money, never the fee or
+        /// tip). 0 disables referrals. At most `MAX_REFERRAL_BPS`.
+        pub referral_bps: u32,
         /// Unix seconds after which the plan stops accepting new subscribers;
         /// 0 means it is available forever. Only new subscriptions are
         /// affected: mandates opened before the cutoff keep billing. The

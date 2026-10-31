@@ -49,4 +49,10 @@ pub enum DataKey {
     TokenPlanCount(Address),
     /// The n-th plan priced in a given token (0-based).
     TokenPlan(Address, u32),
+    /// Position of a plan within its merchant's `MerchantPlan` index, so an
+    /// ownership transfer can remove it in constant time.
+    PlanIndex(u64),
+    /// Pending ownership proposal for a plan: the address the current owner
+    /// proposed as the new owner, awaiting their acceptance.
+    PlanOwnerProposal(u64),
 }

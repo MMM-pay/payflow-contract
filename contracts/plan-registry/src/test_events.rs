@@ -76,7 +76,7 @@ fn plan_created_layout() {
         &super::PlanCreated {
             merchant: a.clone(),
             plan_id: 7,
-            token: a,
+            token: a.clone(),
             amount: 12_345,
             period: 86_400,
             name: String::from_str(&env, "sample-plan"),
@@ -85,6 +85,8 @@ fn plan_created_layout() {
             category: Symbol::new(&env, "fitness"),
             terms_uri: String::from_str(&env, "https://example.com/terms"),
             available_until: 0,
+            referral_bps: 0,
+            payout: a.clone(),
         },
     );
 }

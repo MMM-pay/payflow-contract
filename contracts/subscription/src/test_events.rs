@@ -89,6 +89,8 @@ fn subscribed_layout() {
             max_total: 108_000,
             fee_bps: 250,
             keeper_bps: 100,
+            referrer: None,
+            referral_bps: 0,
         },
     );
 }
@@ -111,6 +113,8 @@ fn charged_layout() {
             keeper: a,
             charges_made: 2,
             next_charge: 1_700_086_400,
+            referral: 0,
+            referrer: None,
         },
     );
 }

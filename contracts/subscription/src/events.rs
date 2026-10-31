@@ -32,6 +32,11 @@ pub struct Subscribed {
     pub fee_bps: u32,
     /// The keeper tip frozen into this mandate, for the same reason.
     pub keeper_bps: u32,
+    /// The referrer frozen into this mandate, if any.
+    pub referrer: Option<Address>,
+    /// The referral rate frozen into this mandate, in basis points of the
+    /// merchant's share.
+    pub referral_bps: u32,
 }
 
 /// Emitted when a batch of mandates is opened in a single call by
@@ -80,6 +85,11 @@ pub struct Charged {
     pub charges_made: u32,
     /// Unix timestamp when the next charge falls due.
     pub next_charge: u64,
+    /// Referral share paid to `referrer` out of the merchant's share, 0 when
+    /// the mandate has no referrer.
+    pub referral: i128,
+    /// Account paid the referral share, if any.
+    pub referrer: Option<Address>,
 }
 
 /// Emitted when a subscriber cancels a mandate.
