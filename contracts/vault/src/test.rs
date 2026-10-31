@@ -4,11 +4,13 @@ use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
 use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScSymbol, ScVal},
     Address, Env, IntoVal, String,
 };
+
+const THIRTY_DAYS: u64 = 2_592_000;
 
 struct Harness<'a> {
     env: Env,
@@ -1193,4 +1195,168 @@ fn set_subscription_requires_admin_auth() {
     h.env.set_auths(&[]);
     assert!(h.vault.try_set_subscription(&other).is_err());
     assert_eq!(h.vault.subscription(), h.subscription);
+}
+
+#[test]
+fn spend_limit_caps_debits_and_the_next_window_resets() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &50_000);
+
+    h.vault
+        .set_spend_limit(&user, &h.token, &5_000, &THIRTY_DAYS);
+    assert_eq!(h.vault.spend_limit(&user, &h.token).amount, 5_000);
+    assert_eq!(
+        h.vault.spend_limit(&user, &h.token).window_secs,
+        THIRTY_DAYS
+    );
+
+    h.vault.debit(&user, &h.token, &merchant, &3_000);
+    // Landing exactly on the ceiling is allowed...
+    h.vault.debit(&user, &h.token, &merchant, &2_000);
+    // ...one unit more is not.
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &merchant, &1),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+    // The failed debit moved nothing.
+    assert_eq!(h.vault.balance(&user, &h.token), 45_000);
+
+    // Once the window elapses the ceiling applies to fresh spending.
+    h.env
+        .ledger()
+        .set_timestamp(h.env.ledger().timestamp() + THIRTY_DAYS);
+    h.vault.debit(&user, &h.token, &merchant, &5_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 40_000);
+}
+
+#[test]
+fn spend_limit_zero_disables_the_limit() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &50_000);
+
+    h.vault.set_spend_limit(&user, &h.token, &100, &THIRTY_DAYS);
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &merchant, &101),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+
+    // 0 clears the limit and its window tracker entirely.
+    h.vault.set_spend_limit(&user, &h.token, &0, &0);
+    assert_eq!(h.vault.spend_limit(&user, &h.token).amount, 0);
+    h.vault.debit(&user, &h.token, &merchant, &10_000);
+    assert_eq!(h.token_client.balance(&merchant), 10_000);
+}
+
+#[test]
+fn set_spend_limit_rejects_bad_input() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert_eq!(
+        h.vault
+            .try_set_spend_limit(&user, &h.token, &-1, &THIRTY_DAYS),
+        Err(Ok(Error::InvalidAmount))
+    );
+    // A ceiling without a window length would be meaningless.
+    assert_eq!(
+        h.vault.try_set_spend_limit(&user, &h.token, &100, &0),
+        Err(Ok(Error::InvalidWindow))
+    );
+    // A disabled limit needs no window.
+    assert!(h.vault.try_set_spend_limit(&user, &h.token, &0, &0).is_ok());
+}
+
+#[test]
+fn set_spend_limit_requires_the_user_to_authorize() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let stranger = Address::generate(&h.env);
+
+    // Only the user may set their own ceiling; a stranger's signature for
+    // the same call does not cover it.
+    h.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "set_spend_limit",
+            args: (&user, &h.token, &100i128, &THIRTY_DAYS).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(h
+        .vault
+        .try_set_spend_limit(&user, &h.token, &100, &THIRTY_DAYS)
+        .is_err());
+    assert_eq!(h.vault.spend_limit(&user, &h.token).amount, 0);
+}
+
+#[test]
+fn spend_limits_are_scoped_to_user_and_token() {
+    let h = setup();
+    let a = funded_user(&h, 100_000);
+    let b = funded_user(&h, 100_000);
+    let merchant = Address::generate(&h.env);
+
+    let token2 = h
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&h.env))
+        .address();
+    StellarAssetClient::new(&h.env, &token2).mint(&a, &100_000);
+    h.vault.deposit(&a, &token2, &50_000);
+    h.vault.deposit(&a, &h.token, &50_000);
+    h.vault.deposit(&b, &h.token, &50_000);
+
+    h.vault.set_spend_limit(&a, &h.token, &100, &THIRTY_DAYS);
+
+    // The limit applies to a's first token only...
+    assert_eq!(
+        h.vault.try_debit(&a, &h.token, &merchant, &101),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+    // ...not to the same user's other token...
+    h.vault.debit(&a, &token2, &merchant, &1_000);
+    // ...and not to another user.
+    h.vault.debit(&b, &h.token, &merchant, &1_000);
+}
+
+#[test]
+fn changing_the_limit_resets_the_window() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &50_000);
+
+    h.vault
+        .set_spend_limit(&user, &h.token, &5_000, &THIRTY_DAYS);
+    h.vault.debit(&user, &h.token, &merchant, &5_000);
+
+    h.vault
+        .set_spend_limit(&user, &h.token, &1_000, &THIRTY_DAYS);
+    h.vault.debit(&user, &h.token, &merchant, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 44_000);
+}
+
+#[test]
+fn debit_without_a_limit_writes_no_window_state() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    h.vault.debit(&user, &h.token, &merchant, &1_000);
+
+    let (has_limit, has_window) = h.env.as_contract(&h.vault_id, || {
+        let p = h.env.storage().persistent();
+        (
+            p.has(&DataKey::SpendLimit(user.clone(), h.token.clone())),
+            p.has(&DataKey::SpendWindow(user.clone(), h.token.clone())),
+        )
+    });
+    assert!(!has_limit, "an unlimited user must have no limit entry");
+    assert!(!has_window, "an unlimited user must have no window entry");
 }

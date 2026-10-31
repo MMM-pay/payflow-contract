@@ -29,6 +29,9 @@ pub struct PlanCreated {
     /// Link to the plan's terms, carried in the event so frontends need no
     /// follow-up contract read. At most 200 bytes; may be empty.
     pub terms_uri: String,
+    /// Unix seconds after which the plan stops accepting new subscribers,
+    /// 0 = forever. Carried in the event so indexers need no follow-up read.
+    pub available_until: u64,
 }
 
 /// Emitted when a merchant activates or deactivates a plan.

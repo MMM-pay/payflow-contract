@@ -76,6 +76,11 @@ mod plan {
         /// (200) bytes; may be empty. Self-declared by the merchant, like the
         /// profile URL: the contract does not verify it.
         pub terms_uri: String,
+        /// Unix seconds after which the plan stops accepting new subscribers;
+        /// 0 means it is available forever. Only new subscriptions are
+        /// affected: mandates opened before the cutoff keep billing. The
+        /// subscription contract enforces the cutoff in `subscribe`.
+        pub available_until: u64,
     }
 }
 pub use plan::Plan;

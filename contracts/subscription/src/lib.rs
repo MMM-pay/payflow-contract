@@ -169,6 +169,48 @@ mod contract {
             Self::subscribe_at(env, subscriber, plan_id, max_charges, max_total, now)
         }
 
+        /// Fund the vault and open a mandate in one transaction, so a new
+        /// subscriber signs once instead of signing a deposit and then a
+        /// subscribe — the gap between the two is where sign-ups were lost.
+        ///
+        /// The subscriber's one `require_auth` at the top is the only signature
+        /// needed: the nested `vault.deposit` (and the token transfer it makes)
+        /// run as sub-invocations of this same authorization, and the mandate
+        /// is then created through the normal `subscribe_at` path (start =
+        /// now), so it carries the full, current mandate terms.
+        ///
+        /// Atomic by construction: if the deposit fails the whole invocation
+        /// aborts and no mandate is created; if mandate creation then fails,
+        /// the deposit is rolled back with it.
+        ///
+        /// (Merged from #134, extended with `max_total` for parity with the
+        /// current `subscribe`, which #134 predated.)
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Errors
+        /// As `subscribe`, plus any error the vault's `deposit` can return.
+        pub fn subscribe_with_deposit(
+            env: Env,
+            subscriber: Address,
+            plan_id: u64,
+            max_charges: u32,
+            max_total: i128,
+            deposit: i128,
+        ) -> Result<u64, Error> {
+            subscriber.require_auth();
+
+            let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
+            let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
+
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            VaultClient::new(&env, &vault_addr).deposit(&subscriber, &plan.token, &deposit);
+
+            let now = env.ledger().timestamp();
+            Self::do_subscribe_at(env, subscriber, plan_id, max_charges, max_total, now)
+        }
+
         /// Open a mandate whose first charge falls due at `start` rather than
         /// now, so a subscriber can set up billing ahead of time.
         ///
@@ -201,7 +243,22 @@ mod contract {
             start: u64,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
+            Self::do_subscribe_at(env, subscriber, plan_id, max_charges, max_total, start)
+        }
 
+        /// Core mandate creation shared by `subscribe_at` (which authorizes the
+        /// subscriber first) and `subscribe_with_deposit` (whose single
+        /// top-level `require_auth` already covers it — re-authorizing here
+        /// would add a second, uncovered auth entry). Not a contract entry
+        /// point: it performs no authorization of its own.
+        fn do_subscribe_at(
+            env: Env,
+            subscriber: Address,
+            plan_id: u64,
+            max_charges: u32,
+            max_total: i128,
+            start: u64,
+        ) -> Result<u64, Error> {
             if max_total < 0 {
                 return Err(Error::InvalidMaxTotal);
             }
@@ -215,7 +272,10 @@ mod contract {
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
             let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
 
-            if !plan.active {
+            // A plan that is switched off, or whose availability window has
+            // passed, accepts no new subscribers. Existing mandates never
+            // re-read the plan, so both checks only ever stop new sign-ups.
+            if !plan.active || (plan.available_until != 0 && now >= plan.available_until) {
                 return Err(Error::PlanInactive);
             }
 
@@ -272,6 +332,14 @@ mod contract {
                 &env,
                 DataKey::MerchantMandateCount(plan.merchant.clone()),
                 |i| DataKey::MerchantMandate(plan.merchant.clone(), i),
+                id,
+            );
+            // Per-plan index (from #134): hooked into subscribe_at — the single
+            // mandate-creation path — so every sign-up route keeps it in sync.
+            Self::index_push(
+                &env,
+                DataKey::PlanMandateCount(plan_id),
+                |i| DataKey::PlanMandate(plan_id, i),
                 id,
             );
 
@@ -1381,6 +1449,20 @@ mod contract {
             let len = Self::index_len(&env, DataKey::MerchantMandateCount(merchant.clone()));
             Self::index_page(&env, len, start, limit, |i| {
                 DataKey::MerchantMandate(merchant.clone(), i)
+            })
+        }
+
+        /// Number of mandates ever opened against plan `plan_id` (from #134).
+        pub fn plan_mandate_count(env: Env, plan_id: u64) -> u32 {
+            Self::index_len(&env, DataKey::PlanMandateCount(plan_id))
+        }
+
+        /// Ids of the mandates opened against plan `plan_id`, oldest first,
+        /// starting at position `start`. Returns at most `min(limit, MAX_PAGE)`.
+        pub fn plan_mandates(env: Env, plan_id: u64, start: u32, limit: u32) -> Vec<u64> {
+            let len = Self::index_len(&env, DataKey::PlanMandateCount(plan_id));
+            Self::index_page(&env, len, start, limit, |i| {
+                DataKey::PlanMandate(plan_id, i)
             })
         }
 
