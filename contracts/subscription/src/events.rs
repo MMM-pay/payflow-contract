@@ -319,3 +319,24 @@ pub struct ContractUpgraded {
     pub admin: Address,
     pub new_wasm_hash: BytesN<32>,
 }
+
+/// Emitted when a plan's committed revenue per period changes. This allows
+/// dashboards to track MRR/ARR on-chain without scanning all mandates.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedRevenueChanged {
+    /// ID of the plan whose committed revenue changed.
+    #[topic]
+    pub plan_id: u64,
+    /// Merchant owning the plan.
+    #[topic]
+    pub merchant: Address,
+    /// Token the plan is denominated in.
+    pub token: Address,
+    /// Previous committed amount per period.
+    pub old_committed: i128,
+    /// New committed amount per period.
+    pub new_committed: i128,
+    /// Billing period in seconds.
+    pub period: u64,
+}

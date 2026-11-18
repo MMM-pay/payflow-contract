@@ -45,10 +45,12 @@ pub enum Error {
     UriTooLong = 17,
     /// `create_plan` was given a referral rate above `MAX_REFERRAL_BPS`.
     ReferralBpsTooHigh = 18,
+    /// `create_plan` was given an amount below `MIN_CHARGE_AMOUNT`.
+    AmountTooLow = 19,
     /// `accept_plan_owner` was called for a plan with no pending ownership
     /// proposal, or after the proposal was already accepted.
-    PendingOwnershipNotFound = 19,
+    PendingOwnershipNotFound = 20,
     /// The address accepting ownership is not the one the current owner
     /// proposed in `propose_plan_owner`.
-    NotPendingOwner = 20,
+    NotPendingOwner = 21,
 }

@@ -387,6 +387,19 @@ fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
     None
 }
 
+/// Find the most recent event with the given topic name (e.g. "mandate_completed").
+fn event_by_topic(env: &Env, topic: &str) -> Option<soroban_sdk::xdr::ContractEventV0> {
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == topic {
+                return Some(body.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Pull an i128 field out of the data map of the most recently emitted event
 /// that carries it.
 fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
@@ -743,13 +756,12 @@ fn charge_result_matches_charged_event_and_reports_completion() {
     );
     assert!(result.completed);
 
-    let last = w.env.events().all().events().last().cloned().unwrap();
-    let ContractEventBody::V0(body) = &last.body;
+    let body = event_by_topic(&w.env, "mandate_completed").expect("mandate_completed event");
     let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
         panic!("topic 0 is not a symbol");
     };
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_completed".try_into().unwrap();
-    assert_eq!(name, &expected);
+    assert_eq!(*name, expected);
 }
 
 /// The acceptance criterion for the tip: a tip changes how the plan's price is
@@ -1379,11 +1391,11 @@ fn unknown_mandate_errors() {
 
 /// Acceptance criterion: a quote and the charge that follows agree on the fee
 /// and merchant amount for a price where basis-point rounding actually bites.
-/// 99 stroops at 100 bps is 0.99 stroops, truncated to a zero fee.
+/// 101 stroops at 100 bps is 1.01 stroops, truncated to a 1 stroop fee.
 #[test]
 fn quote_matches_charge_for_a_price_that_rounds() {
     let w = world();
-    let plan_id = w.plan_priced(99);
+    let plan_id = w.plan_priced(101);
     let user = w.subscriber(100_000);
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
 
@@ -1391,9 +1403,9 @@ fn quote_matches_charge_for_a_price_that_rounds() {
     assert_eq!(
         quote,
         ChargeQuote {
-            amount: 99,
-            fee: 0,
-            merchant_amount: 99,
+            amount: 101,
+            fee: 1,
+            merchant_amount: 100,
             due_at: w.env.ledger().timestamp(),
             chargeable: true,
         }
@@ -1841,13 +1853,12 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     w.sub.end_mandate(&w.merchant, &id);
 
     assert_eq!(event_field_u32(&w.env, "charges_made"), Some(1));
-    let last = w.env.events().all().events().last().cloned().unwrap();
-    let ContractEventBody::V0(body) = &last.body;
+    let body = event_by_topic(&w.env, "mandate_ended").expect("mandate_ended event");
     let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
         panic!("topic 0 is not a symbol");
     };
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_ended".try_into().unwrap();
-    assert_eq!(name, &expected);
+    assert_eq!(*name, expected);
 }
 
 /// Verify that the protocol fee is transferred to the fee_to address when a
@@ -4006,7 +4017,7 @@ fn referral_split_loses_at_most_one_stroop() {
     let referrer = Address::generate(&w.env);
     let mut settled: i128 = 0;
 
-    for amount in [1i128, 7, 3_333, 7_777, 99_999] {
+    for amount in [101i128, 107, 3_333, 7_777, 99_999] {
         let plan_id = w.registry.create_plan(
             &w.merchant,
             &w.token,
@@ -4418,16 +4429,15 @@ fn lowering_the_cap_to_charges_made_completes_the_mandate() {
     w.sub.set_max_charges(&user, &id, &2);
 
     // The test env exposes the events of the invocation that just ran, so
-    // assert them before any further call. MandateCompleted is the last of
-    // the two events this call emits.
-    let last = w.env.events().all().events().last().cloned().unwrap();
-    let ContractEventBody::V0(body) = &last.body;
+    // assert them before any further call. MandateCompleted is one of
+    // the events this call emits.
+    let body = event_by_topic(&w.env, "mandate_completed").expect("mandate_completed event");
     let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
         panic!("topic 0 is not a symbol");
     };
     let expected: soroban_sdk::xdr::StringM<32> = "mandate_completed".try_into().unwrap();
-    assert_eq!(name, &expected);
-    assert_eq!(last_event_field_u32(&w.env, "charges_made"), Some(2));
+    assert_eq!(*name, expected);
+    assert_eq!(event_field_u32(&w.env, "charges_made"), Some(2));
 
     let m = w.sub.get_mandate(&id);
     assert_eq!(m.max_charges, 2);

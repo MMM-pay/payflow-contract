@@ -29,6 +29,11 @@ pub const MAX_REFERRAL_BPS: u32 = 2_000;
 /// follow-ups"). At most MAX_DESCRIPTION_LEN bytes; may be empty.
 pub const MAX_DESCRIPTION_LEN: u32 = 280;
 
+/// Protocol-level minimum charge amount in the token's smallest unit.
+/// Plans with an amount below this are rejected at creation to avoid
+/// dust charges that cost more in fees than they transfer.
+pub const MIN_CHARGE_AMOUNT: i128 = 100; // 100 stroops = 0.00001 XLM
+
 #[allow(missing_docs)]
 mod plan {
     use super::*;

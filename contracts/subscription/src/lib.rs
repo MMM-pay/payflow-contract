@@ -27,7 +27,7 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, ContractUpgraded, FeeChanged, MandateCompleted, MandateEnded,
+    Cancelled, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged, MandateCompleted, MandateEnded,
     MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Refunded, SeatsChanged,
     Subscribed, Upgraded,
 };
@@ -422,6 +422,8 @@ mod contract {
             }
             .publish(&env);
 
+            Self::recompute_committed_revenue(&env, plan_id);
+
             Ok(id)
         }
 
@@ -582,6 +584,8 @@ mod contract {
                 }
                 .publish(&env);
             }
+
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
 
             Ok(ChargeResult {
                 merchant_amount,
@@ -758,6 +762,11 @@ mod contract {
             }
             .publish(&env);
 
+            Self::recompute_committed_revenue(&env, old_plan_id);
+            if new_plan_id != old_plan_id {
+                Self::recompute_committed_revenue(&env, new_plan_id);
+            }
+
             Ok(())
         }
 
@@ -857,6 +866,8 @@ mod contract {
                 reason,
             }
             .publish(&env);
+
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
             Ok(())
         }
 
@@ -996,6 +1007,8 @@ mod contract {
                 charges_made: mandate.charges_made,
             }
             .publish(&env);
+
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
             Ok(())
         }
 
@@ -1027,6 +1040,7 @@ mod contract {
             if mandate.subscriber != subscriber {
                 return Err(Error::NotSubscriber);
             }
+            let plan_id = mandate.plan_id;
 
             mandate.status = match (mandate.status, paused) {
                 (MandateStatus::Active, true) => MandateStatus::Paused,
@@ -1051,6 +1065,8 @@ mod contract {
                 paused,
             }
             .publish(&env);
+
+            Self::recompute_committed_revenue(&env, plan_id);
             Ok(())
         }
 
@@ -1094,6 +1110,7 @@ mod contract {
             {
                 return Err(Error::MandateNotActive);
             }
+            let plan_id = mandate.plan_id;
 
             let now = env.ledger().timestamp();
             if until <= now {
@@ -1117,6 +1134,8 @@ mod contract {
                 paused: true,
             }
             .publish(&env);
+
+            Self::recompute_committed_revenue(&env, plan_id);
             Ok(())
         }
 
@@ -1254,6 +1273,7 @@ mod contract {
             }
             .publish(&env);
 
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
             Ok(())
         }
 
@@ -1401,6 +1421,7 @@ mod contract {
 
             let end = start.saturating_add(limit.min(MAX_PAGE));
             let mut cancelled = 0;
+            let mut affected_plans: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
             for position in start..end {
                 let slot = DataKey::SubscriberMandate(subscriber.clone(), position);
                 let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot) else {
@@ -1416,10 +1437,11 @@ mod contract {
                     continue;
                 }
 
+                let plan_id = mandate.plan_id;
                 mandate.status = MandateStatus::Cancelled;
                 // Each cancelled mandate releases its seat (#158); the guard
                 // above skips already-closed ones so no seat dec's twice.
-                Self::plan_open_dec(&env, mandate.plan_id);
+                Self::plan_open_dec(&env, plan_id);
                 Self::write_mandate(&env, &mandate);
                 Cancelled {
                     mandate_id,
@@ -1431,6 +1453,23 @@ mod contract {
                 }
                 .publish(&env);
                 cancelled += 1;
+
+                // Track affected plans for committed revenue recomputation
+                let mut already_tracked = false;
+                for p in affected_plans.iter() {
+                    if p == plan_id {
+                        already_tracked = true;
+                        break;
+                    }
+                }
+                if !already_tracked {
+                    affected_plans.push_back(plan_id);
+                }
+            }
+
+            // Recompute committed revenue for all affected plans
+            for plan_id in affected_plans.iter() {
+                Self::recompute_committed_revenue(&env, plan_id);
             }
 
             Ok(cancelled)
@@ -1568,6 +1607,13 @@ mod contract {
             Self::plan_open_count(&env, plan_id)
         }
 
+        /// Committed revenue per period for `plan_id`. This is the sum of all
+        /// active mandates' per-period amounts, normalized to the plan's billing
+        /// period. Returns 0 if the plan has no active mandates or does not exist.
+        pub fn plan_committed_revenue(env: Env, plan_id: u64) -> i128 {
+            Self::read_committed_revenue(&env, plan_id)
+        }
+
         /// Raise or lower a mandate's `max_charges` (0 = unlimited). Only the
         /// subscriber may change it, and not below the charges already made.
         /// Reaching the new cap completes the mandate and releases its seat.
@@ -1624,6 +1670,7 @@ mod contract {
                 .publish(&env);
             }
 
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
             Ok(())
         }
 
@@ -1904,6 +1951,96 @@ mod contract {
             let p = env.storage().persistent();
             p.set(&key, &count);
             p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        }
+
+        /// Read the stored committed revenue per period for a plan.
+        fn read_committed_revenue(env: &Env, plan_id: u64) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::PlanCommittedRevenue(plan_id))
+                .unwrap_or(0)
+        }
+
+        /// Write the committed revenue per period for a plan and emit a change event
+        /// if the value actually changed.
+        fn write_committed_revenue(
+            env: &Env,
+            plan_id: u64,
+            merchant: &Address,
+            token: &Address,
+            period: u64,
+            new_committed: i128,
+        ) {
+            let old_committed = Self::read_committed_revenue(env, plan_id);
+            if old_committed == new_committed {
+                return;
+            }
+
+            let key = DataKey::PlanCommittedRevenue(plan_id);
+            let p = env.storage().persistent();
+            p.set(&key, &new_committed);
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            CommittedRevenueChanged {
+                plan_id,
+                merchant: merchant.clone(),
+                token: token.clone(),
+                old_committed,
+                new_committed,
+                period,
+            }
+            .publish(env);
+        }
+
+        /// Recalculate the committed revenue for a plan by summing all active mandates'
+        /// per-period amounts and update storage, emitting an event if changed.
+        fn recompute_committed_revenue(env: &Env, plan_id: u64) {
+            let registry: Address = match Self::cfg_address(env, DataKey::PlanRegistry) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let plan_registry = PlanRegistryClient::new(env, &registry);
+            let plan = plan_registry.get_plan(&plan_id);
+
+            let len = Self::index_len(env, DataKey::PlanMandateCount(plan_id));
+            let mut total: i128 = 0;
+            let now = env.ledger().timestamp();
+            for i in 0..len.min(MAX_PAGE) {
+                let slot_key = DataKey::PlanMandate(plan_id, i);
+                let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot_key) else {
+                    continue;
+                };
+                let Some(mandate) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Mandate>(&DataKey::Mandate(mandate_id))
+                else {
+                    continue;
+                };
+                if mandate.token != plan.token
+                    || !Self::active_at(&mandate, now)
+                    || mandate.period == 0
+                {
+                    continue;
+                }
+                // Normalize to the plan's period
+                let contribution = mandate
+                    .amount
+                    .checked_mul(plan.period as i128)
+                    .ok_or(Error::AmountOverflow)
+                    .unwrap_or(0)
+                    / mandate.period as i128;
+                total = total.checked_add(contribution).unwrap_or(total);
+            }
+
+            Self::write_committed_revenue(
+                env,
+                plan_id,
+                &plan.merchant,
+                &plan.token,
+                plan.period,
+                total,
+            );
         }
 
         fn index_len(env: &Env, count_key: DataKey) -> u32 {

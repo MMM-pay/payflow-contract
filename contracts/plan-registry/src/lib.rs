@@ -64,6 +64,11 @@ pub const MAX_TERMS_LEN: u32 = 200;
 /// own storage entry, and a transaction may touch at most 100 entries.
 pub const MAX_PAGE: u32 = 50;
 
+/// Protocol-level minimum charge amount in the token's smallest unit.
+/// Plans with an amount below this are rejected at creation to avoid
+/// dust charges that cost more in fees than they transfer.
+pub const MIN_CHARGE_AMOUNT: i128 = payflow_shared::MIN_CHARGE_AMOUNT;
+
 #[allow(missing_docs)]
 mod contract {
     use super::*;
@@ -111,7 +116,8 @@ mod contract {
         /// Emits [`PlanCreated`].
         ///
         /// # Errors
-        /// Returns [`Error::InvalidAmount`] if `amount <= 0`, [`Error::NameTooLong`]
+        /// Returns [`Error::InvalidAmount`] if `amount <= 0`, [`Error::AmountTooLow`]
+        /// if `amount < MIN_CHARGE_AMOUNT`, [`Error::NameTooLong`]
         /// if `name` exceeds [`MAX_NAME_LEN`], [`Error::DescriptionTooLong`] if `description`
         /// exceeds [`MAX_DESCRIPTION_LEN`], [`Error::InvalidPeriod`] if `period < MIN_PERIOD`,
         /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`,
@@ -138,6 +144,9 @@ mod contract {
 
             if amount <= 0 {
                 return Err(Error::InvalidAmount);
+            }
+            if amount < MIN_CHARGE_AMOUNT {
+                return Err(Error::AmountTooLow);
             }
             if name.len() > MAX_NAME_LEN {
                 return Err(Error::NameTooLong);
@@ -562,6 +571,12 @@ mod contract {
 
         /// Ids of the plans `merchant` published, oldest first, starting at
         /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
+        ///
+        /// This uses a per-merchant index (`MerchantPlanCount` + `MerchantPlan`)
+        /// where each plan occupies a fixed position. Reading a page touches
+        /// exactly `min(limit, MAX_PAGE)` storage entries — one per plan — so
+        /// listing a merchant's plans is O(1) per entry and does not scan
+        /// unrelated merchants' plans.
         pub fn merchant_plans(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
             let len = Self::merchant_plan_count(env.clone(), merchant.clone());
             let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);

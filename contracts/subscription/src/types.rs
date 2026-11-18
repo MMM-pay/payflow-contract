@@ -170,4 +170,6 @@ pub enum DataKey {
     /// Count of simultaneously-open mandates against a plan, checked against
     /// the plan's `max_subscribers` seat cap.
     PlanSubscriberCount(u64),
+    /// Committed revenue per period for a plan (sum of active mandates' per-period amounts).
+    PlanCommittedRevenue(u64),
 }

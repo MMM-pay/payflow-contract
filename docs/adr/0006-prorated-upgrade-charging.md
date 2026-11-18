@@ -63,6 +63,84 @@ plan of the same merchant, denominated in the same token.
   is paid and who may refund; moving between merchants is a cancel and a new
   subscription, not an upgrade.
 
+## Worked Examples
+
+All amounts are in the token's smallest unit (e.g. stroops for XLM). The
+protocol fee and keeper tip are omitted for clarity; they are applied on top
+of the `charged` amount exactly as they would be for a regular charge.
+
+### Example 1: Mid-period upgrade, monthly plans
+
+- Old plan: 10,000 units / 30 days (2,592,000 seconds)
+- New plan: 20,000 units / 30 days (same period)
+- Subscriber upgrades 15 days into the period
+- `now` = 1,000,000
+- `next_charge` = 1,000,000 + 2,592,000 = 3,592,000
+- `period` = 2,592,000
+- `remaining` = min(3,592,000 - 1,000,000, 2,592,000) = 2,592,000 - wait, that's the full period
+
+Actually, let's use concrete timestamps:
+- `created_at` = 1,000,000
+- `period` = 2,592,000 (30 days)
+- `next_charge` = 3,592,000 (created_at + period)
+- `now` = 2,296,000 (15 days after created_at, halfway through the period)
+- `remaining` = min(3,592,000 - 2,296,000, 2,592,000) = 1,296,000 (15 days left)
+- `difference` = 20,000 - 10,000 = 10,000
+- `charged` = 10,000 * 1,296,000 / 2,592,000 = 5,000
+
+The subscriber pays 5,000 units now (half the price difference for half the period
+remaining). The next charge at 3,592,000 will be 20,000 units.
+
+### Example 2: Upgrade near the end of the period
+
+- Same plans as Example 1
+- Subscriber upgrades 29 days into the 30-day period
+- `now` = 3,592,000 - 86,400 = 3,505,600 (1 day left)
+- `remaining` = min(3,592,000 - 3,505,600, 2,592,000) = 86,400
+- `charged` = 10,000 * 86,400 / 2,592,000 = 333 (truncated)
+
+The subscriber pays only 333 units for the last day at the higher rate.
+
+### Example 3: Upgrade to a plan with a different period
+
+- Old plan: 10,000 units / 7 days (604,800 seconds, weekly)
+- New plan: 50,000 units / 30 days (2,592,000 seconds, monthly)
+- Subscriber upgrades 3 days into the weekly period
+- `now` = 1,000,000 + 259,200 = 1,259,200
+- `next_charge` = 1,000,000 + 604,800 = 1,604,800
+- `old_period` = 604,800
+- `remaining` = min(1,604,800 - 1,259,200, 604,800) = 345,600 (4 days left in weekly cycle)
+- `difference` = 50,000 - 10,000 = 40,000
+- `charged` = 40,000 * 345,600 / 604,800 = 22,857 (truncated)
+
+The subscriber pays 22,857 units now for the 4 days remaining in the weekly cycle
+at the monthly-equivalent rate. The next charge at 1,604,800 will be 50,000 units
+and will start the new monthly billing cycle.
+
+### Example 4: Downgrade mid-period
+
+- Old plan: 20,000 units / 30 days
+- New plan: 10,000 units / 30 days
+- Subscriber downgrades 15 days into the period
+- `remaining` = 1,296,000 (same as Example 1)
+- `difference` = 10,000 - 20,000 = -10,000 (negative)
+- `charged` = 0 (negative difference collects nothing)
+
+The subscriber pays nothing now. The next charge will be 10,000 units. No refund
+is issued for the 10,000 units already paid for the first half of the period at
+the higher rate.
+
+### Example 5: Upgrade that prorates to less than one unit
+
+- Old plan: 10,000 units / 30 days
+- New plan: 10,001 units / 30 days (1 unit more)
+- Subscriber upgrades with 1 second left in the period
+- `remaining` = 1
+- `difference` = 1
+- `charged` = 1 * 1 / 2,592,000 = 0 (truncated to zero)
+
+No amount is collected. The 1 unit difference only applies from the next charge.
+
 ## Consequences
 
 - The subscriber is never charged for a period they have not had, and never
