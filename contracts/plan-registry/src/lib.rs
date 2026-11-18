@@ -2,6 +2,34 @@
 //!
 //! Stores merchant plans and profiles. Plans are immutable templates defining
 //! pricing, billing periods, and keeper incentives.
+//!
+//! ## Resource costs
+//!
+//! All storage TTLs are expressed in ledgers (~5s each). Instance storage
+//! (configuration) uses a 30-day bump with a 29-day threshold. Persistent
+//! storage (plans, indexes) uses a 90-day bump with an 89-day threshold.
+//!
+//! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
+//! |---|---|---|---|---|---|
+//! | `__constructor` | 0 | 2 (Admin, NextPlanId) | 0 | 0 | Extends instance TTL |
+//! | `create_plan` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
+//! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_successor` | 0 | 0 | 2 (Plan ×2) | 1 (Plan) | Extends persistent TTL |
+//! | `set_profile` | 0 | 0 | 0 | 1 (Profile) | Extends persistent TTL |
+//! | `profile` | 0 | 0 | 1 (Profile) | 0 | |
+//! | `deactivate_page` | 0 | 0 | ≤100 (index slots + Plans) | ≤50 (Plans) | Page size ≤50, extends persistent TTLs |
+//! | `get_plan` | 0 | 0 | 1 (Plan) | 0 | |
+//! | `merchant_plan_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
+//! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `token_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
+//! | `next_plan_id` | 1 (NextPlanId) | 0 | 0 | 0 | |
+//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
+//! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
+//! | `propose_plan_owner` | 0 | 0 | 1 (Plan) | 1 (Proposal) | Extends persistent TTL |
+//! | `accept_plan_owner` | 0 | 0 | 2 (Proposal, Plan) | 2 (Plan, index slots) | Extends persistent TTLs |
 
 #![no_std]
 #![deny(missing_docs)]

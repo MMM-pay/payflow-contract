@@ -1,4 +1,5 @@
 #![cfg(test)]
+extern crate std;
 
 use super::*;
 
@@ -1680,6 +1681,181 @@ fn index_pages_are_bounded_and_ordered() {
     assert_eq!(w.sub.subscriber_mandates(&user, &0, &0).len(), 0);
 }
 
+/// `subscriber_mandate_summaries` returns summaries with key fields for display.
+#[test]
+fn subscriber_mandate_summaries_returns_key_fields() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
+    assert_eq!(summaries.len(), 2);
+
+    let s1 = summaries.get_unchecked(0);
+    assert_eq!(s1.id, id1);
+    assert_eq!(s1.merchant, w.merchant);
+    assert_eq!(s1.plan_id, plan_id);
+    assert_eq!(s1.amount, PRICE);
+    assert_eq!(s1.period, MONTH);
+    assert_eq!(s1.status, MandateStatus::Active);
+    assert_eq!(s1.next_charge, w.env.ledger().timestamp());
+    assert_eq!(s1.charges_made, 0);
+    assert_eq!(s1.max_charges, 0);
+    assert_eq!(s1.token, w.token);
+
+    let s2 = summaries.get_unchecked(1);
+    assert_eq!(s2.id, id2);
+    assert_eq!(s2.merchant, w.merchant);
+    assert_eq!(s2.plan_id, plan_id);
+}
+
+/// `subscriber_mandate_summaries` pages are bounded and ordered.
+#[test]
+fn subscriber_mandate_summaries_pages_are_bounded() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
+    for _ in 0..5 {
+        ids.push_back(w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>));
+    }
+
+    let page1 = w.sub.subscriber_mandate_summaries(&user, &0, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get_unchecked(0).id, ids.get_unchecked(0));
+    assert_eq!(page1.get_unchecked(1).id, ids.get_unchecked(1));
+
+    let page2 = w.sub.subscriber_mandate_summaries(&user, &2, &2);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2.get_unchecked(0).id, ids.get_unchecked(2));
+    assert_eq!(page2.get_unchecked(1).id, ids.get_unchecked(3));
+
+    let page3 = w.sub.subscriber_mandate_summaries(&user, &4, &2);
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3.get_unchecked(0).id, ids.get_unchecked(4));
+
+    let page4 = w.sub.subscriber_mandate_summaries(&user, &5, &10);
+    assert_eq!(page4.len(), 0);
+
+    // Huge start and limit values must not overflow.
+    assert_eq!(
+        w.sub
+            .subscriber_mandate_summaries(&user, &u32::MAX, &u32::MAX)
+            .len(),
+        0
+    );
+}
+
+/// `subscriber_mandate_summaries` page size is capped at MAX_PAGE.
+#[test]
+fn subscriber_mandate_summaries_page_size_is_capped() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    for _ in 0..(MAX_PAGE + 5) {
+        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    }
+
+    assert_eq!(w.sub.subscriber_mandate_count(&user), MAX_PAGE + 5);
+    assert_eq!(
+        w.sub.subscriber_mandate_summaries(&user, &0, &u32::MAX).len(),
+        MAX_PAGE
+    );
+    assert_eq!(
+        w.sub
+            .subscriber_mandate_summaries(&user, &MAX_PAGE, &MAX_PAGE)
+            .len(),
+        5
+    );
+}
+
+/// `subscriber_mandate_summaries` reflects mandate status changes.
+#[test]
+fn subscriber_mandate_summaries_reflects_status() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let active_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paused_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_paused(&user, &paused_id, &true);
+    w.sub.cancel(&user, &cancelled_id);
+
+    let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
+    assert_eq!(summaries.len(), 3);
+
+    let mut active_count = 0;
+    let mut paused_count = 0;
+    let mut cancelled_count = 0;
+    for s in summaries.iter() {
+        match s.status {
+            MandateStatus::Active => active_count += 1,
+            MandateStatus::Paused => paused_count += 1,
+            MandateStatus::Cancelled => cancelled_count += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(active_count, 1);
+    assert_eq!(paused_count, 1);
+    assert_eq!(cancelled_count, 1);
+
+    // Check specific mandate statuses.
+    for s in summaries.iter() {
+        if s.id == active_id {
+            assert_eq!(s.status, MandateStatus::Active);
+        } else if s.id == paused_id {
+            assert_eq!(s.status, MandateStatus::Paused);
+        } else if s.id == cancelled_id {
+            assert_eq!(s.status, MandateStatus::Cancelled);
+        }
+    }
+}
+
+/// `subscriber_mandate_summaries` works across multiple merchants.
+#[test]
+fn subscriber_mandate_summaries_across_merchants() {
+    let w = world();
+    let plan_id = w.plan();
+    let other_merchant = Address::generate(&w.env);
+    let other_plan = w.registry.create_plan(
+        &other_merchant,
+        &w.token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&w.env, "Other Plan"),
+        &String::from_str(&w.env, ""),
+        &0,
+        &soroban_sdk::Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    let user = w.subscriber(100_000);
+
+    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id2 = w.sub.subscribe(&user, &other_plan, &0, &0, &None::<Address>);
+
+    let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
+    assert_eq!(summaries.len(), 2);
+
+    let mut found_merchant1 = false;
+    let mut found_merchant2 = false;
+    for s in summaries.iter() {
+        if s.merchant == w.merchant {
+            found_merchant1 = true;
+        } else if s.merchant == other_merchant {
+            found_merchant2 = true;
+        }
+    }
+    assert!(found_merchant1);
+    assert!(found_merchant2);
+}
+
 #[test]
 fn index_page_size_is_capped() {
     let w = world();
@@ -2511,6 +2687,103 @@ fn refund_event_links_the_refund_to_the_mandate() {
     // And the amounts travel in the event data, also without a state read.
     assert_eq!(last_event_field_i128(&w.env, "amount"), Some(1_234));
     assert_eq!(last_event_field_i128(&w.env, "refunded_total"), Some(1_234));
+}
+
+/// Regression test for #301: refund cap must account for referral fees.
+/// When a mandate has a referrer, the referral share comes out of the
+/// merchant's proceeds, so the refund cap must be reduced accordingly.
+/// Without the fix, a merchant could refund more than it actually received.
+#[test]
+fn refund_cap_accounts_for_referral_fee() {
+    let w = world();
+    let referrer = Address::generate(&w.env);
+    // 10% referral share of the merchant's proceeds.
+    let plan_id = w.plan_full(0, 1_000, None);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+    let charge_result = w.sub.try_charge(&w.keeper, &id);
+    assert!(charge_result.is_ok(), "charge failed: {:?}", charge_result);
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.charges_made, 1);
+    assert_eq!(w.token_client.balance(&w.merchant), 8_910);
+    std::eprintln!("mandate: {:?}", mandate);
+
+    // Merchant receipt per charge: price - protocol_fee - referral
+    // PRICE = 10_000, FEE_BPS = 100 (1%), referral_bps = 1_000 (10% of merchant gross)
+    // fee = 100, merchant_gross = 9_900, referral = 990, merchant_net = 8_910
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR; // 100
+    let merchant_gross = PRICE - fee; // 9_900
+    let referral = merchant_gross * 1_000 / BPS_DENOMINATOR; // 990
+    let merchant_net = merchant_gross - referral; // 8_910
+
+    // The merchant should only be able to refund up to what it actually received.
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_net);
+
+    // Refunding the full merchant_net should succeed.
+    w.sub.refund(&w.merchant, &id, &merchant_net);
+    let mandate_after_refund = w.sub.get_mandate(&id);
+    std::eprintln!("mandate after refund: {:?}", mandate_after_refund);
+    assert_eq!(mandate_after_refund.refunded, merchant_net);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+
+    // Check what merchant_received returns for this mandate
+    let received = calculate_merchant_received(&mandate_after_refund);
+    std::eprintln!("merchant_received (buggy): {:?}", received);
+
+    // Refunding one more should fail.
+    let refund_result = w.sub.try_refund(&w.merchant, &id, &1);
+    std::eprintln!("refund_result: {:?}", refund_result);
+    assert_eq!(
+        refund_result,
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+}
+
+/// Buggy version of merchant_received that doesn't account for referral (matches current contract)
+fn calculate_merchant_received(m: &Mandate) -> Result<i128, Error> {
+    let fee = m.amount * (m.fee_bps as i128) / BPS_DENOMINATOR;
+    let gross = m.amount - fee;
+    let tip = gross
+        .checked_mul(m.keeper_bps.min(MAX_KEEPER_BPS) as i128)
+        .ok_or(Error::AmountOverflow)?
+        / BPS_DENOMINATOR;
+    (gross - tip)
+        .checked_mul(m.charges_made as i128)
+        .ok_or(Error::AmountOverflow)
+}
+
+/// Regression test for #301: refund cap must account for keeper tips.
+/// When a plan has a keeper tip, the tip comes out of the merchant's proceeds,
+/// so the refund cap must be reduced accordingly.
+#[test]
+fn refund_cap_accounts_for_keeper_tip() {
+    let w = world();
+    // 2% keeper tip of the merchant's proceeds.
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    // Merchant receipt per charge: price - protocol_fee - tip
+    // PRICE = 10_000, FEE_BPS = 100 (1%), KEEPER_BPS = 200 (2% of merchant gross)
+    // fee = 100, merchant_gross = 9_900, tip = 198, merchant_net = 9_702
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR; // 100
+    let merchant_gross = PRICE - fee; // 9_900
+    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR; // 198
+    let merchant_net = merchant_gross - tip; // 9_702
+
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_net);
+
+    // Refunding the full merchant_net should succeed.
+    w.sub.refund(&w.merchant, &id, &merchant_net);
+    assert_eq!(w.sub.get_mandate(&id).refunded, merchant_net);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+
+    // Refunding one more should fail.
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &1),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
 }
 
 #[test]

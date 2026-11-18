@@ -3,6 +3,53 @@
 //! Subscribers open mandates against merchant plans. Charges are triggered
 //! permissionlessly when due, debiting the subscriber's vault balance and
 //! splitting proceeds between merchant, protocol fees, and optional keeper tips.
+//!
+//! ## Resource costs
+//!
+//! All storage TTLs are expressed in ledgers (~5s each). Instance storage
+//! (configuration) uses a 30-day bump with a 29-day threshold. Persistent
+//! storage (mandates, indexes) uses a 90-day bump with an 89-day threshold.
+//!
+//! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
+//! |---|---|---|---|---|---|
+//! | `__constructor` | 0 | 6 (config keys) | 0 | 0 | Extends instance TTL |
+//! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
+//! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
+//! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Plus vault deposit; extends TTLs |
+//! | `charge` | 4 (config) | 0 | 2–3 (Mandate, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
+//! | `upgrade` | 4 (config) | 0 | 2–3 (Mandate, Plan) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
+//! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
+//! | `cancel_page` | 0 | 0 | ≤100 (index + Mandates) | ≤50 (Mandates) | Page ≤50, extends persistent TTLs |
+//! | `propose_mandate_owner` | 0 | 0 | 1 (Mandate) | 2 (PendingOwner, Position) | Extends persistent TTLs |
+//! | `accept_mandate_owner` | 0 | 0 | 3 (PendingOwner, Position, Mandate) | 3 (Mandate, index slots) | Extends persistent TTLs |
+//! | `end_mandate` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
+//! | `set_paused` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Extends persistent TTL |
+//! | `pause_until` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Extends persistent TTL |
+//! | `refund` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Token transfer merchant→subscriber |
+//! | `set_seats` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Extends persistent TTL |
+//! | `set_fee_bps` | 1 (Admin) | 1 (FeeBps) | 0 | 0 | Admin only, extends instance TTL |
+//! | `get_mandate` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `estimated_end` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `is_due` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `quote_charge` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `due_mandates` | 0 | 0 | ≤100 (index + Mandates) | 0 | Page ≤50 |
+//! | `committed_per_period` | 0 | 0 | ≤50 (index + Mandates) | 0 | Page ≤50 |
+//! | `subscriber_mandate_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `subscriber_mandates` | 0 | 0 | ≤50 (index) | 0 | Page ≤50 |
+//! | `subscriber_mandate_summaries` | 0 | 0 | ≤100 (index + Mandates) | 0 | Page ≤50 |
+//! | `merchant_mandate_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `merchant_mandates` | 0 | 0 | ≤50 (index) | 0 | Page ≤50 |
+//! | `plan_mandate_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `plan_mandates` | 0 | 0 | ≤50 (index) | 0 | Page ≤50 |
+//! | `plan_subscriber_count` | 0 | 0 | 1 (count) | 0 | |
+//! | `set_max_charges` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
+//! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
+//! | `next_mandate_id` | 1 (NextMandateId) | 0 | 0 | 0 | |
+//! | `fee_bps` | 1 (FeeBps) | 0 | 0 | 0 | |
+//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
+//! | `plan_registry` | 1 (PlanRegistry) | 0 | 0 | 0 | |
+//! | `vault` | 1 (Vault) | 0 | 0 | 0 | |
 
 #![no_std]
 #![deny(missing_docs)]
@@ -32,7 +79,7 @@ pub use events::{
     Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
-pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, Plan};
+pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, MandateSummary, Plan};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -1534,6 +1581,42 @@ mod contract {
             })
         }
 
+        /// Summaries of the mandates `subscriber` opened, oldest first, starting at
+        /// position `start`. Returns at most `min(limit, MAX_PAGE)` summaries.
+        /// Each summary contains the key fields a wallet needs to display a
+        /// subscription without fetching the full mandate.
+        pub fn subscriber_mandate_summaries(
+            env: Env,
+            subscriber: Address,
+            start: u32,
+            limit: u32,
+        ) -> Vec<MandateSummary> {
+            let len = Self::index_len(&env, DataKey::SubscriberMandateCount(subscriber.clone()));
+            let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+            let mut out = Vec::new(&env);
+            let storage = env.storage().persistent();
+            for i in start..end {
+                let slot_key = DataKey::SubscriberMandate(subscriber.clone(), i);
+                if let Some(mandate_id) = storage.get::<_, u64>(&slot_key) {
+                    if let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(mandate_id)) {
+                        out.push_back(MandateSummary {
+                            id: mandate.id,
+                            merchant: mandate.merchant.clone(),
+                            plan_id: mandate.plan_id,
+                            amount: mandate.amount,
+                            period: mandate.period,
+                            status: mandate.status,
+                            next_charge: mandate.next_charge,
+                            charges_made: mandate.charges_made,
+                            max_charges: mandate.max_charges,
+                            token: mandate.token.clone(),
+                        });
+                    }
+                }
+            }
+            out
+        }
+
         /// How many mandates have been opened against `merchant`'s plans.
         pub fn merchant_mandate_count(env: Env, merchant: Address) -> u32 {
             Self::index_len(&env, DataKey::MerchantMandateCount(merchant))
@@ -1764,17 +1847,33 @@ mod contract {
         }
 
         /// What the merchant has actually collected for this mandate so far: the
-        /// per-charge share (price minus the protocol fee minus the keeper tip,
-        /// all frozen into the mandate at subscribe time) times the number of
-        /// settled charges. This is the hard ceiling on `refund`.
+        /// per-charge share (price minus the protocol fee minus the keeper tip
+        /// minus the referral, all frozen into the mandate at subscribe time)
+        /// times the number of settled charges. This is the hard ceiling on
+        /// `refund`.
         fn merchant_received(m: &Mandate) -> Result<i128, Error> {
-            let fee = m.amount * (m.fee_bps as i128) / BPS_DENOMINATOR;
-            let gross = m.amount - fee;
-            let tip = gross
+            let fee = m
+                .amount
+                .checked_mul(m.fee_bps as i128)
+                .ok_or(Error::AmountOverflow)?
+                / BPS_DENOMINATOR;
+            let merchant_gross = m.amount - fee;
+
+            let tip = merchant_gross
                 .checked_mul(m.keeper_bps.min(MAX_KEEPER_BPS) as i128)
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
-            (gross - tip)
+
+            let referral = if m.referrer.is_some() {
+                merchant_gross
+                    .checked_mul(m.referral_bps.min(MAX_REFERRAL_BPS) as i128)
+                    .ok_or(Error::AmountOverflow)?
+                    / BPS_DENOMINATOR
+            } else {
+                0
+            };
+
+            (merchant_gross - tip - referral)
                 .checked_mul(m.charges_made as i128)
                 .ok_or(Error::AmountOverflow)
         }

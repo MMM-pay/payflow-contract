@@ -771,6 +771,75 @@ fn allowlist_admin_functions_move_no_funds() {
     assert_eq!(h.token_client.balance(&user), 7_000);
 }
 
+/// `can_deposit` returns true when the allowlist is disabled.
+#[test]
+fn can_deposit_returns_true_when_allowlist_disabled() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert!(!h.vault.allowlist_enabled());
+    assert!(h.vault.can_deposit(&user, &h.token));
+}
+
+/// `can_deposit` returns false when the allowlist is enabled but the token is not allowed.
+#[test]
+fn can_deposit_returns_false_when_token_not_allowed() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    assert!(h.vault.allowlist_enabled());
+    assert!(!h.vault.token_allowed(&h.token));
+    assert!(!h.vault.can_deposit(&user, &h.token));
+}
+
+/// `can_deposit` returns true when the allowlist is enabled and the token is allowed.
+#[test]
+fn can_deposit_returns_true_when_token_allowed() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    assert!(h.vault.allowlist_enabled());
+    assert!(h.vault.token_allowed(&h.token));
+    assert!(h.vault.can_deposit(&user, &h.token));
+}
+
+/// `can_deposit` is per-token: allowing one token doesn't affect another.
+#[test]
+fn can_deposit_is_per_token() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let other_token = Address::generate(&h.env);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+
+    assert!(h.vault.can_deposit(&user, &h.token));
+    assert!(!h.vault.can_deposit(&user, &other_token));
+}
+
+/// `can_deposit` ignores the user parameter (allowlist is not per-user).
+#[test]
+fn can_deposit_ignores_user() {
+    let h = setup();
+    let user_a = funded_user(&h, 10_000);
+    let user_b = funded_user(&h, 10_000);
+
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+
+    // Both users get the same result: the allowlist gates tokens, not users.
+    assert!(h.vault.can_deposit(&user_a, &h.token));
+    assert!(h.vault.can_deposit(&user_b, &h.token));
+
+    h.vault.set_token_allowed(&h.token, &false);
+
+    assert!(!h.vault.can_deposit(&user_a, &h.token));
+    assert!(!h.vault.can_deposit(&user_b, &h.token));
+}
+
 #[test]
 fn admin_repoint_of_subscription_does_not_move_funds() {
     let h = setup();

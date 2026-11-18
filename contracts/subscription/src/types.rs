@@ -133,6 +133,33 @@ pub struct ChargeQuote {
     pub chargeable: bool,
 }
 
+/// Summary of a mandate for list views. Contains the fields a wallet needs to
+/// display a subscription without fetching the full mandate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateSummary {
+    /// Unique identifier of the mandate.
+    pub id: u64,
+    /// Merchant receiving payment under this mandate.
+    pub merchant: Address,
+    /// Plan ID this mandate was opened against.
+    pub plan_id: u64,
+    /// Amount charged per period.
+    pub amount: i128,
+    /// Billing period in seconds.
+    pub period: u64,
+    /// Current lifecycle state of the mandate.
+    pub status: MandateStatus,
+    /// Unix seconds when the next charge falls due.
+    pub next_charge: u64,
+    /// Number of charges successfully executed so far.
+    pub charges_made: u32,
+    /// Maximum number of charges (0 = unlimited).
+    pub max_charges: u32,
+    /// Token contract address in which payments are denominated.
+    pub token: Address,
+}
+
 /// Storage keys used by the subscription contract.
 #[contracttype]
 #[derive(Clone)]

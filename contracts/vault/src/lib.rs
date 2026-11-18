@@ -5,6 +5,38 @@
 //! ahead of time, and the subscription contract debits from a balance that is
 //! already committed. Custody is deliberately separated from billing logic so
 //! the two can be audited independently.
+//!
+//! ## Resource costs
+//!
+//! All storage TTLs are expressed in ledgers (~5s each). Instance storage
+//! (configuration) uses a 30-day bump with a 29-day threshold. Persistent
+//! storage (balances, allowlist, caps, spend limits) uses a 90-day bump with
+//! an 89-day threshold.
+//!
+//! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
+//! |---|---|---|---|---|---|
+//! | `__constructor` | 0 | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `set_subscription` | 1 (Admin) | 1 (Subscription) | 0 | 0 | Admin only, extends instance TTL |
+//! | `set_allowlist_enabled` | 1 (Admin) | 1 (AllowlistEnabled) | 0 | 0 | Admin only, extends instance TTL |
+//! | `set_token_allowed` | 1 (Admin) | 0 | 0 | 1 (TokenAllowed) | Admin only, extends persistent TTL |
+//! | `set_deposit_cap` | 1 (Admin) | 0 | 0 | 1 (DepositCap) | Admin only, extends persistent TTL |
+//! | `deposit` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `deposit_for` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `withdraw` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `withdraw_all` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `debit` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
+//! | `debit_split` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
+//! | `balance` | 0 | 0 | 1 (Balance) | 0 | |
+//! | `allowlist_enabled` | 1 (AllowlistEnabled) | 0 | 0 | 0 | |
+//! | `token_allowed` | 0 | 0 | 1 (TokenAllowed) | 0 | |
+//! | `can_deposit` | 1 (AllowlistEnabled) | 0 | 1 (TokenAllowed) | 0 | |
+//! | `subscription` | 1 (Subscription) | 0 | 0 | 0 | |
+//! | `deposit_cap` | 0 | 0 | 1 (DepositCap) | 0 | |
+//! | `set_spend_limit` | 0 | 0 | 0 | 1–2 (SpendLimit, SpendWindow) | User auth, extends persistent TTL |
+//! | `spend_limit` | 0 | 0 | 1 (SpendLimit) | 0 | |
+//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
+//! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
 
 #![no_std]
 #![deny(missing_docs)]
@@ -544,6 +576,17 @@ mod contract {
         /// allowlist is enabled; absent means not allowed.
         pub fn token_allowed(env: Env, token: Address) -> bool {
             Self::token_on(&env, &token)
+        }
+
+        /// Whether `user` may deposit `token` into the vault. Returns `true`
+        /// when the allowlist is disabled, or when it is enabled and `token`
+        /// is explicitly allowed. This is a convenience view so callers do not
+        /// need to read both `allowlist_enabled` and `token_allowed`.
+        pub fn can_deposit(env: Env, user: Address, token: Address) -> bool {
+            // The user parameter is accepted for API symmetry with `deposit`
+            // and `deposit_cap`; the allowlist does not gate by user.
+            let _ = user;
+            !Self::allowlist_on(&env) || Self::token_on(&env, &token)
         }
 
         /// Address of the subscription contract currently allowed to debit funds.

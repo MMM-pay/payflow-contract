@@ -85,3 +85,22 @@ These are understood tradeoffs, not undiscovered bugs:
 - **Timestamp dependence.** Scheduling uses ledger timestamps, which validators
   may skew by a small margin. Periods are bounded below at 60 seconds
   (`MIN_PERIOD`) so skew cannot meaningfully accelerate billing.
+
+## Externally visible behaviour changes
+
+### Refund cap now accounts for referral fees and keeper tips (PR #301)
+
+Previously, the refund cap (`merchant_received`) only subtracted the protocol fee
+and keeper tip from the per-charge amount. It did not account for referral fees,
+which are also paid out of the merchant's share. This meant a merchant with a
+referral-enabled mandate could refund more than it actually received — up to the
+(pre-referral) merchant gross per charge.
+
+The fix updates `merchant_received` to also subtract the referral share (when a
+referrer is set) before multiplying by `charges_made`. The refund cap is now:
+`(amount - fee - tip - referral) * charges_made`
+
+This is a hardening change: it reduces the maximum refundable amount for
+mandates with referrers or keeper tips. No mandate can now refund more than the
+merchant actually collected. Existing mandates without referrers or tips are
+unaffected.
