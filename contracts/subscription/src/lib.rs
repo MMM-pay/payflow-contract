@@ -27,9 +27,9 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged, MandateCompleted, MandateEnded,
-    MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Refunded, SeatsChanged,
-    Subscribed, Upgraded,
+    Cancelled, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged, MandateCompleted,
+    MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Refunded,
+    SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, Plan};
