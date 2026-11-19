@@ -7,6 +7,30 @@ change the contract interface.
 
 ## Unreleased
 
+### Added
+
+- **#295: optional per-mandate reserved balance (vault).** A subscriber can
+  earmark part of a token balance for one mandate with
+  `vault:set_reserve(user, token, mandate_id, amount)` (`0` releases it).
+  Reserved funds can only be spent by that mandate's own charges, through the
+  new `debit_mandate` / `debit_split_mandate`, which draw the reserve down
+  first. Other mandates, plain `debit`/`debit_split`, `withdraw` and
+  `withdraw_all` see only the unreserved balance; the subscriber can release a
+  reserve at any time, so funds are never trapped. New views `reserved`,
+  `reserved_total`, `unreserved_balance` and `can_debit`; new event
+  `ReserveSet`; new error `ReserveExceedsBalance=14`. `subscription:charge`
+  and `upgrade` now settle through the mandate-aware debits, so **the vault
+  and subscription contracts must be upgraded together**.
+
+- **#296: merchant notification on the first failed charge (subscription).**
+  New permissionless `flag_failed_charge(mandate_id)` proves on chain that a
+  due charge would fail (via the vault's `can_debit`: balance, reserves and
+  spend limit) and, the first time in a run of failures, records the time and
+  emits `ChargeFailed` with `merchant` as a topic so off-chain dunning can
+  subscribe to it. Repeat flags return `false` and emit nothing; the next
+  successful `charge` clears the run. New view `first_failed_charge`; new
+  error `ChargeWouldSucceed=35`.
+
 ### Changed
 
 - **Breaking (#158): plan subscriber caps, `set_max_charges`, admin-gated
