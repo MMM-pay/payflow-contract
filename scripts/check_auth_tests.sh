@@ -45,6 +45,7 @@ declare -A allowlist_vault=(
     [balance]=1
     [allowlist_enabled]=1
     [token_allowed]=1
+    [can_deposit]=1
     [subscription]=1
     [admin]=1
     [version]=1

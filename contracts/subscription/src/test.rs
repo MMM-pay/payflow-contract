@@ -1760,7 +1760,9 @@ fn subscriber_mandate_summaries_page_size_is_capped() {
 
     assert_eq!(w.sub.subscriber_mandate_count(&user), MAX_PAGE + 5);
     assert_eq!(
-        w.sub.subscriber_mandate_summaries(&user, &0, &u32::MAX).len(),
+        w.sub
+            .subscriber_mandate_summaries(&user, &0, &u32::MAX)
+            .len(),
         MAX_PAGE
     );
     assert_eq!(
@@ -1837,8 +1839,9 @@ fn subscriber_mandate_summaries_across_merchants() {
     );
     let user = w.subscriber(100_000);
 
-    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let id2 = w.sub.subscribe(&user, &other_plan, &0, &0, &None::<Address>);
+    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &other_plan, &0, &0, &None::<Address>);
 
     let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
     assert_eq!(summaries.len(), 2);
@@ -2700,7 +2703,9 @@ fn refund_cap_accounts_for_referral_fee() {
     // 10% referral share of the merchant's proceeds.
     let plan_id = w.plan_full(0, 1_000, None);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
     let charge_result = w.sub.try_charge(&w.keeper, &id);
     assert!(charge_result.is_ok(), "charge failed: {:?}", charge_result);
     let mandate = w.sub.get_mandate(&id);
@@ -2733,10 +2738,7 @@ fn refund_cap_accounts_for_referral_fee() {
     // Refunding one more should fail.
     let refund_result = w.sub.try_refund(&w.merchant, &id, &1);
     std::eprintln!("refund_result: {:?}", refund_result);
-    assert_eq!(
-        refund_result,
-        Err(Ok(Error::RefundExceedsReceived))
-    );
+    assert_eq!(refund_result, Err(Ok(Error::RefundExceedsReceived)));
 }
 
 /// Buggy version of merchant_received that doesn't account for referral (matches current contract)

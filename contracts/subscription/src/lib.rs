@@ -1598,7 +1598,8 @@ mod contract {
             for i in start..end {
                 let slot_key = DataKey::SubscriberMandate(subscriber.clone(), i);
                 if let Some(mandate_id) = storage.get::<_, u64>(&slot_key) {
-                    if let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(mandate_id)) {
+                    if let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(mandate_id))
+                    {
                         out.push_back(MandateSummary {
                             id: mandate.id,
                             merchant: mandate.merchant.clone(),
