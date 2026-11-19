@@ -58,7 +58,9 @@ mod test;
 mod test_events;
 
 pub use error::Error;
-pub use events::{ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, Withdraw};
+pub use events::{
+    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw,
+};
 pub use types::{DataKey, SpendLimit, SpendWindow};
 
 use soroban_sdk::{
@@ -325,6 +327,11 @@ mod contract {
         /// Return uncommitted funds to the subscriber. Always available: the vault
         /// never locks a balance, so a subscriber can exit at any time.
         ///
+        /// Only the unreserved part of the balance can be withdrawn. A reserve
+        /// is the subscriber's own earmark (#295) and `set_reserve(.., 0)`
+        /// releases it at any time, so reserving never traps funds: it only
+        /// stops them leaving by accident while a mandate is counting on them.
+        ///
         /// # Auth
         /// Requires authorization from `user`.
         ///
@@ -333,7 +340,8 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`, or
-        /// [`Error::InsufficientBalance`] if `amount` exceeds the user's spendable balance.
+        /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
+        /// unreserved balance.
         pub fn withdraw(
             env: Env,
             user: Address,
@@ -346,7 +354,8 @@ mod contract {
             }
 
             let balance = Self::read_balance(&env, &user, &token);
-            if balance < amount {
+            let reserved = Self::read_reserved_total(&env, &user, &token);
+            if balance - reserved < amount {
                 return Err(Error::InsufficientBalance);
             }
 
@@ -374,6 +383,10 @@ mod contract {
         /// instead, so a subscriber leaving the protocol cannot be thwarted by
         /// a keeper.
         ///
+        /// "Entire" means everything not reserved for a mandate (#295): a
+        /// reserve stays behind until the subscriber releases it with
+        /// `set_reserve(.., 0)`, after which this takes the rest.
+        ///
         /// # Auth
         /// Requires authorization from `user`.
         ///
@@ -388,24 +401,26 @@ mod contract {
             user.require_auth();
 
             let balance = Self::read_balance(&env, &user, &token);
-            if balance <= 0 {
+            let reserved = Self::read_reserved_total(&env, &user, &token);
+            let amount = balance - reserved;
+            if amount <= 0 {
                 // Nothing to move: no transfer, no event, no state change.
                 return Ok(0);
             }
 
-            Self::write_balance(&env, &user, &token, 0);
+            Self::write_balance(&env, &user, &token, reserved);
 
             let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&vault, &user, &balance);
+            token::TokenClient::new(&env, &token).transfer(&vault, &user, &amount);
 
             Withdraw {
                 user,
                 token,
-                amount: balance,
-                balance: 0,
+                amount,
+                balance: reserved,
             }
             .publish(&env);
-            Ok(balance)
+            Ok(amount)
         }
 
         /// Debit a subscriber and pay `to`. Restricted to the subscription
@@ -421,7 +436,9 @@ mod contract {
         /// # Errors
         /// Returns [`Error::SubscriptionNotSet`] if no subscription contract is set,
         /// [`Error::InvalidAmount`] if `amount <= 0`, or [`Error::InsufficientBalance`]
-        /// if `amount` exceeds `user`'s spendable balance.
+        /// if `amount` exceeds `user`'s unreserved balance. This entry point
+        /// is not tied to a mandate, so it can never draw on a reserve; use
+        /// [`Vault::debit_mandate`] for a mandate's own charge.
         pub fn debit(
             env: Env,
             user: Address,
@@ -429,39 +446,34 @@ mod contract {
             to: Address,
             amount: i128,
         ) -> Result<(), Error> {
-            let subscription: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::Subscription)
-                .ok_or(Error::SubscriptionNotSet)?;
-            subscription.require_auth();
+            Self::do_debit(&env, &user, &token, None, &to, amount)
+        }
 
-            if amount <= 0 {
-                return Err(Error::InvalidAmount);
-            }
-
-            let balance = Self::read_balance(&env, &user, &token);
-            if balance < amount {
-                return Err(Error::InsufficientBalance);
-            }
-
-            Self::apply_spend_limit(&env, &user, &token, amount)?;
-
-            let new_balance = balance - amount;
-            Self::write_balance(&env, &user, &token, new_balance);
-
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&vault, &to, &amount);
-
-            Debit {
-                user,
-                token,
-                to,
-                amount,
-                balance: new_balance,
-            }
-            .publish(&env);
-            Ok(())
+        /// Debit a subscriber on behalf of one mandate (#295).
+        ///
+        /// Identical to [`Vault::debit`], except that `mandate_id`'s own
+        /// reserve is spendable too and is drawn down first: the mandate can
+        /// spend its reserve plus the unreserved balance, while every other
+        /// mandate's reserve stays out of reach.
+        ///
+        /// # Auth
+        /// Requires authorization from the registered `subscription` contract.
+        ///
+        /// # Events
+        /// Emits [`Debit`].
+        ///
+        /// # Errors
+        /// As [`Vault::debit`], with [`Error::InsufficientBalance`] meaning
+        /// `amount` exceeds the unreserved balance plus this mandate's reserve.
+        pub fn debit_mandate(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            to: Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            Self::do_debit(&env, &user, &token, Some(mandate_id), &to, amount)
         }
 
         /// Debit a subscriber once and pay two recipients from that debit.
@@ -490,7 +502,8 @@ mod contract {
         /// set, [`Error::InvalidAmount`] if `amount_a <= 0` or `amount_b < 0`,
         /// [`Error::AmountOverflow`] if the two amounts overflow `i128`, or
         /// [`Error::InsufficientBalance`] if the total exceeds `user`'s
-        /// spendable balance.
+        /// unreserved balance. Like `debit`, it never draws on a reserve; use
+        /// [`Vault::debit_split_mandate`] for a mandate's own charge.
         pub fn debit_split(
             env: Env,
             user: Address,
@@ -500,68 +513,146 @@ mod contract {
             to_b: Address,
             amount_b: i128,
         ) -> Result<(), Error> {
-            let subscription: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::Subscription)
-                .ok_or(Error::SubscriptionNotSet)?;
-            subscription.require_auth();
+            Self::do_debit_split(&env, &user, &token, None, &to_a, amount_a, &to_b, amount_b)
+        }
 
-            if amount_a <= 0 || amount_b < 0 {
+        /// [`Vault::debit_split`] on behalf of one mandate (#295): the
+        /// mandate's own reserve is spendable too and is drawn down first.
+        ///
+        /// # Auth
+        /// Requires authorization from the registered `subscription` contract.
+        ///
+        /// # Events
+        /// Emits one [`Debit`] per non-empty leg.
+        ///
+        /// # Errors
+        /// As [`Vault::debit_split`], with [`Error::InsufficientBalance`]
+        /// meaning the total exceeds the unreserved balance plus this
+        /// mandate's reserve.
+        #[allow(clippy::too_many_arguments)]
+        pub fn debit_split_mandate(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            to_a: Address,
+            amount_a: i128,
+            to_b: Address,
+            amount_b: i128,
+        ) -> Result<(), Error> {
+            Self::do_debit_split(
+                &env,
+                &user,
+                &token,
+                Some(mandate_id),
+                &to_a,
+                amount_a,
+                &to_b,
+                amount_b,
+            )
+        }
+
+        /// Earmark `amount` of the subscriber's `token` balance for one
+        /// mandate (#295), replacing any reserve it already had. `0` releases
+        /// the reserve.
+        ///
+        /// While reserved, those funds can be spent only by `mandate_id`'s
+        /// own charges (through `debit_mandate` / `debit_split_mandate`, which
+        /// draw the reserve down first). Other mandates' debits, plain
+        /// `debit`/`debit_split`, `withdraw` and `withdraw_all` see only the
+        /// unreserved balance. The subscriber can release a reserve at any
+        /// time, so a reserve never traps funds.
+        ///
+        /// The vault does not know mandates: `mandate_id` is the subscription
+        /// contract's id, which that contract passes on every mandate debit.
+        /// Reserving for an id that is not the subscriber's own mandate only
+        /// ever withholds the subscriber's money from themselves.
+        ///
+        /// # Auth
+        /// Requires authorization from `user`.
+        ///
+        /// # Events
+        /// Emits [`ReserveSet`].
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidAmount`] if `amount < 0`, or
+        /// [`Error::ReserveExceedsBalance`] if the subscriber's total reserve
+        /// for `token` would exceed their balance.
+        pub fn set_reserve(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            amount: i128,
+        ) -> Result<(), Error> {
+            user.require_auth();
+            if amount < 0 {
                 return Err(Error::InvalidAmount);
             }
 
-            // The total is what the subscriber can afford; both legs are
-            // settled from it or neither is. Soroban rolls the invocation back
-            // on error, so a failed transfer cannot leave half a charge.
-            let total = amount_a
-                .checked_add(amount_b)
-                .ok_or(Error::AmountOverflow)?;
-
-            let balance = Self::read_balance(&env, &user, &token);
-            if balance < total {
-                return Err(Error::InsufficientBalance);
+            let old = Self::read_reserved(&env, &user, &token, mandate_id);
+            let total = Self::read_reserved_total(&env, &user, &token);
+            let new_total = (total - old)
+                .checked_add(amount)
+                .ok_or(Error::ReserveExceedsBalance)?;
+            if new_total > Self::read_balance(&env, &user, &token) {
+                return Err(Error::ReserveExceedsBalance);
             }
 
-            // Both legs are one logical charge, so the whole total counts
-            // against the spend limit once (merged from #134, which predates
-            // debit_split; counting the total here keeps the limit from being
-            // bypassed via split settlement).
-            Self::apply_spend_limit(&env, &user, &token, total)?;
+            Self::write_reserved(&env, &user, &token, mandate_id, amount);
+            Self::write_reserved_total(&env, &user, &token, new_total);
 
-            let after_a = balance - amount_a;
-            let after_both = after_a - amount_b;
-            Self::write_balance(&env, &user, &token, after_both);
-
-            let vault = env.current_contract_address();
-            let token_client = token::TokenClient::new(&env, &token);
-
-            token_client.transfer(&vault, &to_a, &amount_a);
-            Debit {
-                user: user.clone(),
-                token: token.clone(),
-                to: to_a,
-                amount: amount_a,
-                balance: after_a,
+            ReserveSet {
+                user,
+                token,
+                mandate_id,
+                amount,
+                reserved_total: new_total,
             }
             .publish(&env);
-
-            if amount_b > 0 {
-                token_client.transfer(&vault, &to_b, &amount_b);
-                Debit {
-                    user,
-                    token,
-                    to: to_b,
-                    amount: amount_b,
-                    balance: after_both,
-                }
-                .publish(&env);
-            }
-
             Ok(())
         }
 
-        /// Spendable balance of `user` in `token` held in the vault.
+        /// The reserve `user` earmarked for `mandate_id` in `token`. 0 when
+        /// none is set.
+        pub fn reserved(env: Env, user: Address, token: Address, mandate_id: u64) -> i128 {
+            Self::read_reserved(&env, &user, &token, mandate_id)
+        }
+
+        /// Total reserved by `user` in `token` across every mandate.
+        pub fn reserved_total(env: Env, user: Address, token: Address) -> i128 {
+            Self::read_reserved_total(&env, &user, &token)
+        }
+
+        /// The part of `user`'s `token` balance not reserved for any mandate:
+        /// what `withdraw` and non-mandate debits can reach.
+        pub fn unreserved_balance(env: Env, user: Address, token: Address) -> i128 {
+            Self::read_balance(&env, &user, &token) - Self::read_reserved_total(&env, &user, &token)
+        }
+
+        /// Whether `debit_mandate(user, token, mandate_id, _, amount)` would
+        /// succeed right now on balance and spend-limit grounds: the
+        /// unreserved balance plus the mandate's reserve covers `amount`, and
+        /// the subscriber's spend limit has room for it. Reads storage only.
+        ///
+        /// The subscription contract uses this to prove on chain that a due
+        /// charge would fail before flagging it (#296).
+        pub fn can_debit(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            amount: i128,
+        ) -> bool {
+            if amount <= 0 {
+                return false;
+            }
+            let spendable = Self::spendable(&env, &user, &token, Some(mandate_id));
+            spendable >= amount && Self::spend_window(&env, &user, &token, amount).is_ok()
+        }
+
+        /// Total balance of `user` in `token` held in the vault, reserved or
+        /// not. See `unreserved_balance` for the part outside every reserve.
         pub fn balance(env: Env, user: Address, token: Address) -> i128 {
             Self::read_balance(&env, &user, &token)
         }
@@ -706,6 +797,190 @@ mod contract {
     }
 
     impl Vault {
+        fn do_debit(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            mandate_id: Option<u64>,
+            to: &Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            Self::require_subscription(env)?;
+
+            if amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            let new_balance = Self::spend(env, user, token, mandate_id, amount)?;
+
+            let vault = env.current_contract_address();
+            token::TokenClient::new(env, token).transfer(&vault, to, &amount);
+
+            Debit {
+                user: user.clone(),
+                token: token.clone(),
+                to: to.clone(),
+                amount,
+                balance: new_balance,
+            }
+            .publish(env);
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn do_debit_split(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            mandate_id: Option<u64>,
+            to_a: &Address,
+            amount_a: i128,
+            to_b: &Address,
+            amount_b: i128,
+        ) -> Result<(), Error> {
+            Self::require_subscription(env)?;
+
+            if amount_a <= 0 || amount_b < 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            // The total is what the subscriber can afford; both legs are
+            // settled from it or neither is. Soroban rolls the invocation back
+            // on error, so a failed transfer cannot leave half a charge.
+            let total = amount_a
+                .checked_add(amount_b)
+                .ok_or(Error::AmountOverflow)?;
+
+            // Both legs are one logical charge, so the whole total counts
+            // against the spend limit once (merged from #134, which predates
+            // debit_split; counting the total here keeps the limit from being
+            // bypassed via split settlement).
+            let after_both = Self::spend(env, user, token, mandate_id, total)?;
+            let after_a = after_both + amount_b;
+
+            let vault = env.current_contract_address();
+            let token_client = token::TokenClient::new(env, token);
+
+            token_client.transfer(&vault, to_a, &amount_a);
+            Debit {
+                user: user.clone(),
+                token: token.clone(),
+                to: to_a.clone(),
+                amount: amount_a,
+                balance: after_a,
+            }
+            .publish(env);
+
+            if amount_b > 0 {
+                token_client.transfer(&vault, to_b, &amount_b);
+                Debit {
+                    user: user.clone(),
+                    token: token.clone(),
+                    to: to_b.clone(),
+                    amount: amount_b,
+                    balance: after_both,
+                }
+                .publish(env);
+            }
+
+            Ok(())
+        }
+
+        fn require_subscription(env: &Env) -> Result<(), Error> {
+            let subscription: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Subscription)
+                .ok_or(Error::SubscriptionNotSet)?;
+            subscription.require_auth();
+            Ok(())
+        }
+
+        /// What a debit for `mandate_id` (or for no mandate) can reach: the
+        /// unreserved balance plus that mandate's own reserve.
+        fn spendable(env: &Env, user: &Address, token: &Address, mandate_id: Option<u64>) -> i128 {
+            let balance = Self::read_balance(env, user, token);
+            let reserved_total = Self::read_reserved_total(env, user, token);
+            let own = mandate_id.map_or(0, |id| Self::read_reserved(env, user, token, id));
+            balance - reserved_total + own
+        }
+
+        /// Take `total` from `user`'s balance for one debit and return the new
+        /// balance. Checks the spendable amount and the spend limit before
+        /// writing anything, then draws `mandate_id`'s reserve down first so
+        /// the invariant `reserved_total <= balance` keeps holding.
+        fn spend(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            mandate_id: Option<u64>,
+            total: i128,
+        ) -> Result<i128, Error> {
+            if Self::spendable(env, user, token, mandate_id) < total {
+                return Err(Error::InsufficientBalance);
+            }
+
+            Self::apply_spend_limit(env, user, token, total)?;
+
+            if let Some(id) = mandate_id {
+                let own = Self::read_reserved(env, user, token, id);
+                let from_reserve = own.min(total);
+                if from_reserve > 0 {
+                    Self::write_reserved(env, user, token, id, own - from_reserve);
+                    let reserved_total = Self::read_reserved_total(env, user, token);
+                    Self::write_reserved_total(env, user, token, reserved_total - from_reserve);
+                }
+            }
+
+            let new_balance = Self::read_balance(env, user, token) - total;
+            Self::write_balance(env, user, token, new_balance);
+            Ok(new_balance)
+        }
+
+        fn read_reserved(env: &Env, user: &Address, token: &Address, mandate_id: u64) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Reserved(user.clone(), token.clone(), mandate_id))
+                .unwrap_or(0)
+        }
+
+        /// Store a mandate's reserve; 0 removes the entry so an unreserved
+        /// mandate costs nothing to keep.
+        fn write_reserved(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            mandate_id: u64,
+            amount: i128,
+        ) {
+            let key = DataKey::Reserved(user.clone(), token.clone(), mandate_id);
+            let p = env.storage().persistent();
+            if amount == 0 {
+                p.remove(&key);
+            } else {
+                p.set(&key, &amount);
+                p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            }
+        }
+
+        fn read_reserved_total(env: &Env, user: &Address, token: &Address) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ReservedTotal(user.clone(), token.clone()))
+                .unwrap_or(0)
+        }
+
+        fn write_reserved_total(env: &Env, user: &Address, token: &Address, amount: i128) {
+            let key = DataKey::ReservedTotal(user.clone(), token.clone());
+            let p = env.storage().persistent();
+            if amount == 0 {
+                p.remove(&key);
+            } else {
+                p.set(&key, &amount);
+                p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            }
+        }
+
         fn require_admin(env: &Env) -> Result<Address, Error> {
             let admin: Address = env
                 .storage()
@@ -747,12 +1022,32 @@ mod contract {
             token: &Address,
             amount: i128,
         ) -> Result<(), Error> {
-            let limit_key = DataKey::SpendLimit(user.clone(), token.clone());
-            let Some(limit) = env.storage().persistent().get::<_, SpendLimit>(&limit_key) else {
+            let Some(window) = Self::spend_window(env, user, token, amount)? else {
                 return Ok(());
             };
+            let window_key = DataKey::SpendWindow(user.clone(), token.clone());
+            let p = env.storage().persistent();
+            p.set(&window_key, &window);
+            p.extend_ttl(&window_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Ok(())
+        }
+
+        /// The spend window `(user, token)` would have after debiting
+        /// `amount`, or `None` when no limit is set. Fails with
+        /// `SpendLimitExceeded` when the ceiling would be crossed. Reads only:
+        /// `apply_spend_limit` writes the result, `can_debit` just checks it.
+        fn spend_window(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            amount: i128,
+        ) -> Result<Option<SpendWindow>, Error> {
+            let limit_key = DataKey::SpendLimit(user.clone(), token.clone());
+            let Some(limit) = env.storage().persistent().get::<_, SpendLimit>(&limit_key) else {
+                return Ok(None);
+            };
             if limit.amount <= 0 {
-                return Ok(());
+                return Ok(None);
             }
 
             let now = env.ledger().timestamp();
@@ -772,14 +1067,10 @@ mod contract {
                 return Err(Error::SpendLimitExceeded);
             }
 
-            let window = SpendWindow {
+            Ok(Some(SpendWindow {
                 start,
                 spent: spent + amount,
-            };
-            let p = env.storage().persistent();
-            p.set(&window_key, &window);
-            p.extend_ttl(&window_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-            Ok(())
+            }))
         }
 
         fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {

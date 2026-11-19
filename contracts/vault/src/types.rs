@@ -25,6 +25,12 @@ pub enum DataKey {
     /// Fixed-window spend tracker for (user, token): where the current window
     /// starts and how much has been debited inside it.
     SpendWindow(Address, Address),
+    /// Amount of (user, token) the subscriber earmarked for one mandate
+    /// (#295). Only that mandate's debits may draw it down. Absent means 0.
+    Reserved(Address, Address, u64),
+    /// Sum of every `Reserved` entry for (user, token). Always at most the
+    /// (user, token) balance, so the unreserved part never goes negative.
+    ReservedTotal(Address, Address),
 }
 
 /// A subscriber's optional ceiling on total debits per fixed time window,

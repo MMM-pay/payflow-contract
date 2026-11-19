@@ -83,6 +83,31 @@ pub struct Debit {
     pub balance: i128,
 }
 
+/// Emitted when a subscriber sets, changes or releases the reserve earmarked
+/// for one mandate (#295). `amount` is the mandate's new reserve (0 means
+/// released) and `reserved_total` the subscriber's total reserve for the
+/// token afterwards, so an indexer can track both without a contract read.
+///
+/// A debit that draws a reserve down does not emit this event; its `Debit`
+/// already reports the movement, and `reserved` returns the remainder.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveSet {
+    /// Subscriber whose balance is earmarked.
+    #[topic]
+    pub user: Address,
+    /// Token the reserve is denominated in.
+    #[topic]
+    pub token: Address,
+    /// Mandate the reserve is earmarked for.
+    #[topic]
+    pub mandate_id: u64,
+    /// New reserve for this mandate. 0 means the reserve was released.
+    pub amount: i128,
+    /// Total reserved by `user` in `token` across all mandates afterwards.
+    pub reserved_total: i128,
+}
+
 /// Emitted when the admin replaces this contract's wasm. Persistent state is
 /// untouched by an upgrade; the new code reads the keys the old code wrote.
 #[contractevent]

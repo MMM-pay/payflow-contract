@@ -41,4 +41,7 @@ pub enum Error {
     SpendLimitExceeded = 12,
     /// `set_spend_limit` was given a positive amount with a zero window.
     InvalidWindow = 13,
+    /// `set_reserve` would earmark more than the subscriber's balance for
+    /// this token across all of their mandates (#295).
+    ReserveExceedsBalance = 14,
 }

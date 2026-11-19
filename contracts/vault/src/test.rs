@@ -1595,3 +1595,500 @@ fn upgrade_wasm_wrong_signer_rejected() {
     // The subscription pointer and balances are untouched.
     assert_eq!(h.vault.subscription(), h.subscription);
 }
+
+// ---------------------------------------------------------------------------
+// Per-mandate reserved balance (#295): a subscriber earmarks part of a balance
+// for one mandate, and no other mandate (nor a plain debit or a withdrawal)
+// can draw it down.
+// ---------------------------------------------------------------------------
+
+const MANDATE_A: u64 = 1;
+const MANDATE_B: u64 = 2;
+
+/// A user with `amount` deposited into the vault.
+fn depositor(h: &Harness, amount: i128) -> Address {
+    let user = funded_user(h, amount);
+    h.vault.deposit(&user, &h.token, &amount);
+    user
+}
+
+/// The `amount` and `reserved_total` fields of the last `reserve_set` event.
+fn last_reserve_set(h: &Harness) -> Option<(i128, i128)> {
+    let mut found = None;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let is_reserve = matches!(
+            body.topics.first(),
+            Some(ScVal::Symbol(ScSymbol(name))) if name.to_utf8_string_lossy() == "reserve_set"
+        );
+        if !is_reserve {
+            continue;
+        }
+        let ScVal::Map(Some(soroban_sdk::xdr::ScMap(entries))) = &body.data else {
+            continue;
+        };
+        let mut amount = None;
+        let mut total = None;
+        for entry in entries.iter() {
+            let (ScVal::Symbol(ScSymbol(name)), ScVal::I128(parts)) = (&entry.key, &entry.val)
+            else {
+                continue;
+            };
+            let value = ((parts.hi as i128) << 64) | (parts.lo as i128);
+            match name.to_utf8_string_lossy().as_str() {
+                "amount" => amount = Some(value),
+                "reserved_total" => total = Some(value),
+                _ => {}
+            }
+        }
+        found = amount.zip(total);
+    }
+    found
+}
+
+#[test]
+fn no_reserve_by_default() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 0);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn set_reserve_earmarks_part_of_the_balance() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_B, &200);
+
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 300);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_B), 200);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 500);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 500);
+    // Reserving moves no tokens and leaves the total balance untouched.
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 1_000);
+}
+
+#[test]
+fn set_reserve_emits_the_new_reserve_and_total() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    assert_eq!(last_reserve_set(&h), Some((300, 300)));
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_B, &100);
+    assert_eq!(last_reserve_set(&h), Some((100, 400)));
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+    assert_eq!(last_reserve_set(&h), Some((0, 100)));
+}
+
+#[test]
+fn set_reserve_replaces_rather_than_adds() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &700);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 700);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 700);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &100);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 100);
+}
+
+#[test]
+fn releasing_a_reserve_restores_the_unreserved_balance() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &600);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 0);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn reserves_cannot_exceed_the_balance() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &1_001),
+        Err(Ok(Error::ReserveExceedsBalance))
+    );
+
+    // Across mandates: the sum is what is capped.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &700);
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_B, &301),
+        Err(Ok(Error::ReserveExceedsBalance))
+    );
+    // Exactly the rest is fine.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_B, &300);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+}
+
+#[test]
+fn set_reserve_rejects_a_negative_amount() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+}
+
+#[test]
+fn a_user_with_no_balance_cannot_reserve() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &1),
+        Err(Ok(Error::ReserveExceedsBalance))
+    );
+    // Zero is a valid no-op release.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+}
+
+#[test]
+fn another_mandate_cannot_draw_down_a_reserve() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &800);
+
+    // Mandate B sees only the unreserved 200.
+    assert_eq!(
+        h.vault
+            .try_debit_mandate(&user, &h.token, &MANDATE_B, &merchant, &201),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault
+        .debit_mandate(&user, &h.token, &MANDATE_B, &merchant, &200);
+
+    // Mandate A's reserve is intact.
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 800);
+    assert_eq!(h.vault.balance(&user, &h.token), 800);
+    assert_eq!(
+        h.vault
+            .try_debit_mandate(&user, &h.token, &MANDATE_B, &merchant, &1),
+        Err(Ok(Error::InsufficientBalance))
+    );
+}
+
+#[test]
+fn plain_debits_cannot_draw_down_a_reserve() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &800);
+
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &merchant, &201),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &merchant, &150, &fee_to, &51),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault
+        .debit_split(&user, &h.token, &merchant, &150, &fee_to, &50);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 800);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+}
+
+#[test]
+fn the_owning_mandate_spends_its_reserve_first() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_B, &200);
+
+    // 250 fits inside A's reserve: only the reserve shrinks.
+    h.vault
+        .debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &250);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 50);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 250);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 500);
+
+    // 150 exhausts A's last 50 and takes 100 of the unreserved balance.
+    h.vault
+        .debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &150);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 0);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_B), 200);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 200);
+    assert_eq!(h.vault.balance(&user, &h.token), 600);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 400);
+    assert_eq!(h.token_client.balance(&merchant), 400);
+}
+
+#[test]
+fn a_mandate_can_spend_its_reserve_plus_the_unreserved_balance_but_no_more() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_B, &500);
+
+    // A can reach its own 300 plus the unreserved 200, never B's 500.
+    assert_eq!(
+        h.vault
+            .try_debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &501),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault
+        .debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &500);
+    assert_eq!(h.vault.balance(&user, &h.token), 500);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_B), 500);
+}
+
+#[test]
+fn debit_split_mandate_draws_the_reserve_for_the_whole_total() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &1_000);
+
+    // Nothing is unreserved, so only mandate A's split settles.
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &merchant, &90, &fee_to, &10),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault
+        .debit_split_mandate(&user, &h.token, &MANDATE_A, &merchant, &90, &fee_to, &10);
+    // Running balances on the two Debit events are unchanged by reserves.
+    assert_eq!(debit_event_balance(&h, 0), Some(910));
+    assert_eq!(debit_event_balance(&h, 1), Some(900));
+
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 900);
+    assert_eq!(h.vault.balance(&user, &h.token), 900);
+    assert_eq!(h.token_client.balance(&merchant), 90);
+    assert_eq!(h.token_client.balance(&fee_to), 10);
+}
+
+#[test]
+fn a_failed_mandate_debit_leaves_the_reserve_untouched() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &400);
+
+    assert!(h
+        .vault
+        .try_debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &1_001)
+        .is_err());
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 400);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 400);
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn spend_limit_still_applies_to_reserved_funds() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &1_000);
+    h.vault.set_spend_limit(&user, &h.token, &100, &THIRTY_DAYS);
+
+    assert_eq!(
+        h.vault
+            .try_debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &101),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+    // The rejected debit consumed nothing from the reserve.
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 1_000);
+}
+
+#[test]
+fn withdraw_reaches_only_the_unreserved_balance() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &600);
+
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &401),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault.withdraw(&user, &h.token, &400);
+    assert_eq!(h.vault.balance(&user, &h.token), 600);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 600);
+}
+
+#[test]
+fn withdraw_all_leaves_reserves_behind_until_released() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &600);
+
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 400);
+    assert_eq!(h.vault.balance(&user, &h.token), 600);
+    // Fully reserved: nothing more to take, and no event or transfer.
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 0);
+
+    // Releasing the reserve lets the subscriber exit completely: a reserve
+    // never traps funds.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 600);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 1_000);
+}
+
+#[test]
+fn reserves_are_scoped_to_user_and_token() {
+    let h = setup();
+    let alice = depositor(&h, 1_000);
+    let bob = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    let other_token = h
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&h.env))
+        .address();
+
+    h.vault.set_reserve(&alice, &h.token, &MANDATE_A, &1_000);
+
+    // Bob's mandate with the same id, and Alice's other token, are unaffected.
+    assert_eq!(h.vault.reserved(&bob, &h.token, &MANDATE_A), 0);
+    assert_eq!(h.vault.reserved(&alice, &other_token, &MANDATE_A), 0);
+    h.vault.debit(&bob, &h.token, &merchant, &1_000);
+    assert_eq!(h.vault.reserved_total(&alice, &h.token), 1_000);
+}
+
+#[test]
+fn can_debit_reports_reserve_aware_headroom() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &700);
+
+    assert!(h.vault.can_debit(&user, &h.token, &MANDATE_A, &1_000));
+    assert!(!h.vault.can_debit(&user, &h.token, &MANDATE_A, &1_001));
+    assert!(h.vault.can_debit(&user, &h.token, &MANDATE_B, &300));
+    assert!(!h.vault.can_debit(&user, &h.token, &MANDATE_B, &301));
+    assert!(!h.vault.can_debit(&user, &h.token, &MANDATE_A, &0));
+
+    // The spend limit narrows it further.
+    h.vault.set_spend_limit(&user, &h.token, &500, &THIRTY_DAYS);
+    assert!(h.vault.can_debit(&user, &h.token, &MANDATE_A, &500));
+    assert!(!h.vault.can_debit(&user, &h.token, &MANDATE_A, &501));
+}
+
+#[test]
+fn can_debit_writes_no_state() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_spend_limit(&user, &h.token, &500, &THIRTY_DAYS);
+
+    for _ in 0..3 {
+        assert!(h.vault.can_debit(&user, &h.token, &MANDATE_A, &400));
+    }
+    // Had the check recorded spend, a real 400 debit would now exceed 500.
+    let merchant = Address::generate(&h.env);
+    h.vault
+        .debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &400);
+}
+
+#[test]
+fn set_reserve_requires_the_user_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let stranger = Address::generate(&h.env);
+
+    // A stranger's signature does not let them earmark someone else's funds.
+    h.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "set_reserve",
+            args: (&user, &h.token, &MANDATE_A, &500i128).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .vault
+        .try_set_reserve(&user, &h.token, &MANDATE_A, &500)
+        .is_err());
+
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_set_reserve(&user, &h.token, &MANDATE_A, &500)
+        .is_err());
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+}
+
+#[test]
+fn debit_mandate_requires_the_subscription_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &500);
+
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_debit_mandate(&user, &h.token, &MANDATE_A, &merchant, &100)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 500);
+}
+
+#[test]
+fn debit_split_mandate_requires_the_subscription_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &500);
+
+    // Not even the subscriber can settle their own mandate's split.
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "debit_split_mandate",
+            args: (
+                &user, &h.token, &MANDATE_A, &merchant, &90i128, &fee_to, &10i128,
+            )
+                .into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .vault
+        .try_debit_split_mandate(&user, &h.token, &MANDATE_A, &merchant, &90, &fee_to, &10)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 500);
+}
+
+#[test]
+fn reserved_internal_balances_still_add_up_to_holdings() {
+    let h = setup();
+    let alice = depositor(&h, 1_000);
+    let bob = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+
+    h.vault.set_reserve(&alice, &h.token, &MANDATE_A, &500);
+    h.vault
+        .debit_mandate(&alice, &h.token, &MANDATE_A, &merchant, &700);
+    h.vault.set_reserve(&bob, &h.token, &MANDATE_B, &300);
+    h.vault.withdraw_all(&bob, &h.token);
+
+    let internal = h.vault.balance(&alice, &h.token) + h.vault.balance(&bob, &h.token);
+    assert_eq!(internal, h.token_client.balance(&h.vault_id));
+    // And every reserve stays inside its balance.
+    assert!(h.vault.reserved_total(&alice, &h.token) <= h.vault.balance(&alice, &h.token));
+    assert!(h.vault.reserved_total(&bob, &h.token) <= h.vault.balance(&bob, &h.token));
+}

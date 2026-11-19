@@ -111,3 +111,20 @@ fn debit_layout() {
         },
     );
 }
+#[test]
+fn reserve_set_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "reserve_set",
+        super::ReserveSet::spec_xdr(),
+        &super::ReserveSet {
+            user: a.clone(),
+            token: a,
+            mandate_id: 7,
+            amount: 3_000,
+            reserved_total: 4_500,
+        },
+    );
+}
