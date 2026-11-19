@@ -93,6 +93,20 @@ fn plan_created_layout() {
 }
 
 #[test]
+fn plans_created_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plans_created",
+        super::PlansCreated::spec_xdr(),
+        &super::PlansCreated {
+            merchant: address(&env),
+            plan_ids: soroban_sdk::vec![&env, 7, 8, 9],
+        },
+    );
+}
+
+#[test]
 fn plan_status_changed_layout() {
     let env = Env::default();
     snapshot(

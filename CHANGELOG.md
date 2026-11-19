@@ -9,37 +9,19 @@ change the contract interface.
 
 ### Added
 
-- **#315: plan-wide charge pause (plan-registry, subscription).** New
-  merchant-only `plan-registry:set_plan_charges_paused(merchant, plan_id,
-  paused)` (alias `set_plan_paused`) pauses charging for every mandate against
-  one plan without deactivating it. New view `plan_charges_paused(plan_id)`
-  (alias `plan_paused`) and `PlanChargesPausedChanged` event. `subscription`
-  now reads the plan before settlement: `charge`, `flag_failed_charge` and
-  `upgrade` into the paused plan return `PlanChargesPaused=36`, while `is_due`
-  and `quote_charge.chargeable` report false. Existing mandates stay open and
-  new subscriptions are still accepted. `due_mandates` remains a local
-  schedule scan, so callers should use `is_due` for the final plan-pause gate.
+- **#309: atomic bulk plan creation (plan-registry).** New
+  `create_plans(merchant, plans: Vec<PlanParams>)` publishes up to
+  `MAX_BATCH_PLANS = 10` plans in one call. Every plan is validated before any
+  is written, so one invalid entry creates none; IDs stay sequential and each
+  plan still emits `PlanCreated`, followed by a `PlansCreated` batch summary.
+  New `PlanParams` type, `PlansCreated` event, and errors
+  `EmptyBatch=1022` / `BatchTooLarge=1023`.
 
-- **#312: mandate grace-period view (plan-registry, subscription).** Plans gain
-  `grace_period_secs` (default `0`) and a merchant-only
-  `set_plan_grace_period(merchant, plan_id, seconds)` setter with a
-  `PlanGracePeriodSet` event. The window is frozen into `Mandate` at sign-up;
-  new `subscription:is_in_grace_period(mandate_id)` reports whether an active
-  mandate is past due but still inside that window. The view is read-only, has
-  an exclusive end at `next_charge + grace_period_secs`, and does not cancel
-  or otherwise move the mandate.
-
-- **#311: test-token documentation.** New [`docs/test-token.md`](docs/test-token.md)
-  explains that `contracts/test-token` is a SAC-like fixture for tests, lists
-  its minting and failure-injection controls, and states that it must never be
-  deployed as a real asset. The test-token crate and README now link to it.
-
-- **#314: vault operation rate limit.** Vault `deposit`, `deposit_for`,
-  `withdraw` and `withdraw_all` now share a fixed, epoch-aligned 60-second
-  window per `(user, token)` with at most 8 operations. Exceeding it fails with
-  the new `RateLimitExceeded=15` before any balance changes or tokens move.
-  This bounds rapid deposit/withdraw cycling that repeatedly rewrites the
-  balance entry and emits events. The window rolls over deterministically.
+- **#307: withdraw to another address (vault).** New
+  `withdraw_to(user, token, to, amount)` lets a subscriber send their
+  unreserved balance to a chosen destination with only the subscriber's
+  authorization. It uses the same reserve rules and limits as `withdraw`, and
+  emits a new `WithdrawTo` event; `withdraw` itself is unchanged.
 
 - **#295: optional per-mandate reserved balance (vault).** A subscriber can
   earmark part of a token balance for one mandate with
@@ -65,12 +47,23 @@ change the contract interface.
 
 ### Changed
 
-- **Breaking (#312, #315): `Plan` and `Mandate` layouts changed.** `Plan` gains
-  `charges_paused` and `grace_period_secs`; `Mandate` gains a trailing
-  `grace_period_secs`. Stored values and the `MandateUpdated` snapshot event
-  change shape, so the testnet suite and bindings must be redeployed and
-  regenerated together. Existing plans and mandates written by older code must
-  be migrated or recreated.
+- **Breaking (#310): contract error ranges are now disjoint.** Every error
+  discriminant moved into a per-contract range: plan-registry `1_001–1_023`,
+  subscription `2_001–2_037`, vault `3_001–3_014`. `payflow-shared` now exposes
+  `ErrorDomain`, `ErrorCode`, the three range bases and `ERROR_RANGE_SIZE`,
+  and each contract implements `From<Error> for ErrorCode`. Clients that
+  hard-coded the old small discriminants must use the new absolute codes.
+  Cross-contract failures are also surfaced as typed errors instead of host
+  traps: subscription maps a missing registry plan to `PlanNotFound=2036` and
+  a rejected vault deposit/debit to `VaultCallFailed=2037`.
+
+- **#308: panic-safe arithmetic and cross-contract reads.** Vault deposits now
+  use checked addition and return `AmountOverflow` instead of trapping when a
+  balance would exceed `i128::MAX`. Subscription no longer calls the plan
+  registry or vault through panicking clients: missing plans and vault
+  rejections become typed errors. New deterministic tests exercise extreme
+  IDs, amounts, schedules and pseudo-random inputs across all public entry
+  points.
 
 - **Breaking (#158): plan subscriber caps, `set_max_charges`, admin-gated
   upgrades.** `Plan` and `PlanCreated` gain `max_subscribers` (0 = unlimited);

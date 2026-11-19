@@ -13,6 +13,7 @@
 //! |---|---|---|---|---|---|
 //! | `__constructor` | 0 | 2 (Admin, NextPlanId) | 0 | 0 | Extends instance TTL |
 //! | `create_plan` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
+//! | `create_plans` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 per plan | Batch ≤10; extends instance + persistent TTLs |
 //! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
@@ -51,15 +52,16 @@ mod types;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_errors;
+#[cfg(test)]
 mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet,
-    PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
-    ProfileUpdated,
+    ContractUpgraded, PlanCreated, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged,
+    PlanSuccessorSet, PlanTransferred, PlansCreated, ProfileUpdated,
 };
-pub use types::{DataKey, Plan, Profile};
+pub use types::{DataKey, Plan, PlanParams, Profile};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -95,6 +97,11 @@ pub const MAX_TERMS_LEN: u32 = 200;
 /// Largest page `merchant_plans` returns in one call. Each id is read from its
 /// own storage entry, and a transaction may touch at most 100 entries.
 pub const MAX_PAGE: u32 = 50;
+
+/// Largest number of plans `create_plans` accepts in one call. Each plan
+/// writes several persistent entries, so the batch is bounded to keep a single
+/// transaction inside Soroban's resource limits.
+pub const MAX_BATCH_PLANS: u32 = 10;
 
 /// Protocol-level minimum charge amount in the token's smallest unit.
 /// Plans with an amount below this are rejected at creation to avoid
@@ -174,100 +181,10 @@ mod contract {
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
-            if amount <= 0 {
-                return Err(Error::InvalidAmount);
-            }
-            if amount < MIN_CHARGE_AMOUNT {
-                return Err(Error::AmountTooLow);
-            }
-            if name.len() > MAX_NAME_LEN {
-                return Err(Error::NameTooLong);
-            }
-            if description.len() > MAX_DESCRIPTION_LEN {
-                return Err(Error::DescriptionTooLong);
-            }
-            if period < MIN_PERIOD {
-                return Err(Error::InvalidPeriod);
-            }
-            if keeper_bps > MAX_KEEPER_BPS {
-                return Err(Error::KeeperBpsTooHigh);
-            }
-            if terms_uri.len() > MAX_TERMS_LEN {
-                return Err(Error::UriTooLong);
-            }
-            if referral_bps > MAX_REFERRAL_BPS {
-                return Err(Error::ReferralBpsTooHigh);
-            }
-            // A payout of None means "pay me"; anything else is an explicit
-            // treasury address, which may be the merchant itself.
-            let payout = payout.unwrap_or_else(|| merchant.clone());
-
-            let id: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)?;
-
-            let plan = Plan {
-                id,
-                merchant: merchant.clone(),
-                payout: payout.clone(),
-                name: name.clone(),
-                description: description.clone(),
-                token: token.clone(),
+            let params = PlanParams {
+                token,
                 amount,
                 period,
-                active: true,
-                keeper_bps,
-                referral_bps,
-                category: category.clone(),
-                successor_id: 0,
-                terms_uri: terms_uri.clone(),
-                available_until,
-                max_subscribers,
-                charges_paused: false,
-                grace_period_secs: 0,
-            };
-
-            env.storage().persistent().set(&DataKey::Plan(id), &plan);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Plan(id),
-                PERSIST_THRESHOLD,
-                PERSIST_BUMP,
-            );
-
-            // One entry per position, so publishing a plan costs the same however
-            // many plans the merchant already has. The position is also recorded
-            // per plan (via `index_push`) so a later ownership transfer can
-            // remove it in constant time.
-            Self::index_push(&env, &merchant, id);
-
-            let p = env.storage().persistent();
-
-            // One entry per position in the per-token index, so publishing a plan
-            // costs constant time and storage footprint regardless of how many
-            // plans already use the token.
-            let token_count_key = DataKey::TokenPlanCount(token.clone());
-            let token_count: u32 = p.get(&token_count_key).unwrap_or(0);
-            let token_slot_key = DataKey::TokenPlan(token.clone(), token_count);
-            p.set(&token_slot_key, &id);
-            p.extend_ttl(&token_slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-            p.set(&token_count_key, &(token_count + 1));
-            p.extend_ttl(&token_count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-
-            env.storage()
-                .instance()
-                .set(&DataKey::NextPlanId, &(id + 1));
-            env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-
-            PlanCreated {
-                merchant,
-                plan_id: id,
-                token: plan.token.clone(),
-                amount: plan.amount,
-                period: plan.period,
                 name,
                 description,
                 keeper_bps,
@@ -277,10 +194,75 @@ mod contract {
                 referral_bps,
                 payout,
                 max_subscribers,
+                charges_paused: false,
+                grace_period_secs: 0,
+            };
+            Self::validate_plan(&params)?;
+
+            let id = Self::read_next_plan_id(&env)?;
+            Self::store_plan(&env, &merchant, id, &params);
+            Self::set_next_plan_id(&env, id + 1);
+
+            Ok(id)
+        }
+
+        /// Publish several plans in one transaction.
+        ///
+        /// Every plan is validated before any is written, so a batch that
+        /// contains one invalid plan creates none of them. IDs are allocated
+        /// sequentially in request order, exactly as if each plan had been
+        /// published with `create_plan`.
+        ///
+        /// The batch is capped at [`MAX_BATCH_PLANS`] plans to stay inside
+        /// Soroban's per-transaction resource limits.
+        ///
+        /// # Auth
+        /// Requires authorization from `merchant`. The same merchant owns every
+        /// plan in the batch.
+        ///
+        /// # Events
+        /// Emits one [`PlanCreated`] per plan, followed by one [`PlansCreated`]
+        /// summarising the batch.
+        ///
+        /// # Errors
+        /// Returns [`Error::EmptyBatch`] if `plans` is empty,
+        /// [`Error::BatchTooLarge`] if it holds more than [`MAX_BATCH_PLANS`]
+        /// plans, and otherwise the same validation errors as `create_plan`
+        /// for the first invalid plan.
+        pub fn create_plans(
+            env: Env,
+            merchant: Address,
+            plans: Vec<PlanParams>,
+        ) -> Result<Vec<u64>, Error> {
+            merchant.require_auth();
+
+            if plans.is_empty() {
+                return Err(Error::EmptyBatch);
+            }
+            if plans.len() > MAX_BATCH_PLANS {
+                return Err(Error::BatchTooLarge);
+            }
+
+            for i in 0..plans.len() {
+                Self::validate_plan(&plans.get(i).unwrap())?;
+            }
+
+            let first_id = Self::read_next_plan_id(&env)?;
+            let mut plan_ids = Vec::new(&env);
+            for i in 0..plans.len() {
+                let id = first_id + i as u64;
+                Self::store_plan(&env, &merchant, id, &plans.get(i).unwrap());
+                plan_ids.push_back(id);
+            }
+            Self::set_next_plan_id(&env, first_id + plans.len() as u64);
+
+            PlansCreated {
+                merchant,
+                plan_ids: plan_ids.clone(),
             }
             .publish(&env);
 
-            Ok(id)
+            Ok(plan_ids)
         }
 
         /// Rename a plan. Only the plan's own merchant may do this, and only
@@ -918,6 +900,118 @@ mod contract {
             }
             .publish(&env);
             Ok(())
+        }
+
+        fn read_next_plan_id(env: &Env) -> Result<u64, Error> {
+            env.storage()
+                .instance()
+                .get(&DataKey::NextPlanId)
+                .ok_or(Error::NotInitialized)
+        }
+
+        fn set_next_plan_id(env: &Env, next: u64) {
+            env.storage().instance().set(&DataKey::NextPlanId, &next);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        }
+
+        fn validate_plan(params: &PlanParams) -> Result<(), Error> {
+            if params.amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+            if params.amount < MIN_CHARGE_AMOUNT {
+                return Err(Error::AmountTooLow);
+            }
+            if params.name.len() > MAX_NAME_LEN {
+                return Err(Error::NameTooLong);
+            }
+            if params.description.len() > MAX_DESCRIPTION_LEN {
+                return Err(Error::DescriptionTooLong);
+            }
+            if params.period < MIN_PERIOD {
+                return Err(Error::InvalidPeriod);
+            }
+            if params.keeper_bps > MAX_KEEPER_BPS {
+                return Err(Error::KeeperBpsTooHigh);
+            }
+            if params.terms_uri.len() > MAX_TERMS_LEN {
+                return Err(Error::UriTooLong);
+            }
+            if params.referral_bps > MAX_REFERRAL_BPS {
+                return Err(Error::ReferralBpsTooHigh);
+            }
+            Ok(())
+        }
+
+        /// Persist one validated plan and emit its `PlanCreated` event.
+        fn store_plan(env: &Env, merchant: &Address, id: u64, params: &PlanParams) {
+            // A payout of None means "pay me"; anything else is an explicit
+            // treasury address, which may be the merchant itself.
+            let payout = params.payout.clone().unwrap_or_else(|| merchant.clone());
+
+            let plan = Plan {
+                id,
+                merchant: merchant.clone(),
+                payout: payout.clone(),
+                name: params.name.clone(),
+                description: params.description.clone(),
+                token: params.token.clone(),
+                amount: params.amount,
+                period: params.period,
+                active: true,
+                keeper_bps: params.keeper_bps,
+                referral_bps: params.referral_bps,
+                category: params.category.clone(),
+                successor_id: 0,
+                terms_uri: params.terms_uri.clone(),
+                available_until: params.available_until,
+                max_subscribers: params.max_subscribers,
+            };
+
+            env.storage().persistent().set(&DataKey::Plan(id), &plan);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Plan(id),
+                PERSIST_THRESHOLD,
+                PERSIST_BUMP,
+            );
+
+            // One entry per position, so publishing a plan costs the same however
+            // many plans the merchant already has. The position is also recorded
+            // per plan (via `index_push`) so a later ownership transfer can
+            // remove it in constant time.
+            Self::index_push(env, merchant, id);
+
+            let p = env.storage().persistent();
+
+            // One entry per position in the per-token index, so publishing a plan
+            // costs constant time and storage footprint regardless of how many
+            // plans already use the token.
+            let token_count_key = DataKey::TokenPlanCount(params.token.clone());
+            let token_count: u32 = p.get(&token_count_key).unwrap_or(0);
+            let token_slot_key = DataKey::TokenPlan(params.token.clone(), token_count);
+            p.set(&token_slot_key, &id);
+            p.extend_ttl(&token_slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            p.set(&token_count_key, &(token_count + 1));
+            p.extend_ttl(&token_count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanCreated {
+                merchant: merchant.clone(),
+                plan_id: id,
+                token: params.token.clone(),
+                amount: params.amount,
+                period: params.period,
+                name: params.name.clone(),
+                description: params.description.clone(),
+                keeper_bps: params.keeper_bps,
+                category: params.category.clone(),
+                terms_uri: params.terms_uri.clone(),
+                available_until: params.available_until,
+                referral_bps: params.referral_bps,
+                payout,
+                max_subscribers: params.max_subscribers,
+            }
+            .publish(env);
         }
 
         /// Append `plan_id` to `merchant`'s plan index, recording the plan's

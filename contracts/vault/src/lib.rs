@@ -20,10 +20,11 @@
 //! | `set_allowlist_enabled` | 1 (Admin) | 1 (AllowlistEnabled) | 0 | 0 | Admin only, extends instance TTL |
 //! | `set_token_allowed` | 1 (Admin) | 0 | 0 | 1 (TokenAllowed) | Admin only, extends persistent TTL |
 //! | `set_deposit_cap` | 1 (Admin) | 0 | 0 | 1 (DepositCap) | Admin only, extends persistent TTL |
-//! | `deposit` | 0 | 0 | 3 (Balance, DepositCap, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
-//! | `deposit_for` | 0 | 0 | 3 (Balance, DepositCap, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
-//! | `withdraw` | 0 | 0 | 2 (Balance, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
-//! | `withdraw_all` | 0 | 0 | 2 (Balance, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
+//! | `deposit` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `deposit_for` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `withdraw` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `withdraw_to` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `withdraw_all` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
 //! | `debit` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `debit_split` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `balance` | 0 | 0 | 1 (Balance) | 0 | |
@@ -55,11 +56,13 @@ mod types;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_errors;
+#[cfg(test)]
 mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw,
+    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw, WithdrawTo,
 };
 pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow};
 
@@ -271,7 +274,9 @@ mod contract {
                 return Err(Error::TokenNotAllowed);
             }
 
-            let new_balance = Self::read_balance(&env, &user, &token) + amount;
+            let new_balance = Self::read_balance(&env, &user, &token)
+                .checked_add(amount)
+                .ok_or(Error::AmountOverflow)?;
             // The cap is checked before the transfer, so a rejected deposit moves
             // no tokens at all.
             let cap = Self::read_deposit_cap(&env, &user, &token);
@@ -320,7 +325,9 @@ mod contract {
                 return Err(Error::TokenNotAllowed);
             }
 
-            let new_balance = Self::read_balance(&env, &user, &token) + amount;
+            let new_balance = Self::read_balance(&env, &user, &token)
+                .checked_add(amount)
+                .ok_or(Error::AmountOverflow)?;
             let cap = Self::read_deposit_cap(&env, &user, &token);
             if cap > 0 && new_balance > cap {
                 return Err(Error::DepositCapExceeded);
@@ -371,26 +378,59 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             user.require_auth();
-            if amount <= 0 {
-                return Err(Error::InvalidAmount);
-            }
-
-            let balance = Self::read_balance(&env, &user, &token);
-            let reserved = Self::read_reserved_total(&env, &user, &token);
-            if balance - reserved < amount {
-                return Err(Error::InsufficientBalance);
-            }
-
-            Self::record_operation(&env, &user, &token)?;
-
-            let new_balance = balance - amount;
-            Self::write_balance(&env, &user, &token, new_balance);
+            let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
 
             let vault = env.current_contract_address();
             token::TokenClient::new(&env, &token).transfer(&vault, &user, &amount);
 
             Withdraw {
                 user,
+                token,
+                amount,
+                balance: new_balance,
+            }
+            .publish(&env);
+            Ok(())
+        }
+
+        /// Return uncommitted funds to a destination chosen by the subscriber.
+        ///
+        /// Identical to [`Vault::withdraw`] except that the tokens are sent to
+        /// `to` instead of the caller. Only `user` authorizes: `to` is a
+        /// destination, not a second signer, so funds can be swept to a
+        /// custody, hardware or treasury address without giving that address
+        /// authority over the vault.
+        ///
+        /// Only the unreserved part of the balance can be withdrawn, exactly as
+        /// with `withdraw`. A destination may be `user` itself, in which case
+        /// this behaves like `withdraw` but reports [`WithdrawTo`].
+        ///
+        /// # Auth
+        /// Requires authorization from `user`. `to` needs no authorization.
+        ///
+        /// # Events
+        /// Emits [`WithdrawTo`].
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidAmount`] if `amount <= 0`, or
+        /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
+        /// unreserved balance.
+        pub fn withdraw_to(
+            env: Env,
+            user: Address,
+            token: Address,
+            to: Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            user.require_auth();
+            let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
+
+            let vault = env.current_contract_address();
+            token::TokenClient::new(&env, &token).transfer(&vault, &to, &amount);
+
+            WithdrawTo {
+                user,
+                to,
                 token,
                 amount,
                 balance: new_balance,
@@ -961,6 +1001,30 @@ mod contract {
             }
 
             let new_balance = Self::read_balance(env, user, token) - total;
+            Self::write_balance(env, user, token, new_balance);
+            Ok(new_balance)
+        }
+
+        /// Validate and debit a withdrawal from `user`'s balance, returning the
+        /// new balance. The token transfer is the caller's responsibility so
+        /// each entry point can emit the event that matches its destination.
+        fn do_withdraw(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            amount: i128,
+        ) -> Result<i128, Error> {
+            if amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            let balance = Self::read_balance(env, user, token);
+            let reserved = Self::read_reserved_total(env, user, token);
+            if balance - reserved < amount {
+                return Err(Error::InsufficientBalance);
+            }
+
+            let new_balance = balance - amount;
             Self::write_balance(env, user, token, new_balance);
             Ok(new_balance)
         }

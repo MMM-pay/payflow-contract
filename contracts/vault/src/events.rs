@@ -50,6 +50,27 @@ pub struct Withdraw {
     pub balance: i128,
 }
 
+/// Emitted when a subscriber pulls funds out to a destination other than
+/// themselves. The subscriber authorizes the call; the destination does not
+/// need to.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawTo {
+    /// Account whose balance was debited.
+    #[topic]
+    pub user: Address,
+    /// Account that received the tokens.
+    #[topic]
+    pub to: Address,
+    /// Token contract address of the withdrawn asset.
+    #[topic]
+    pub token: Address,
+    /// Amount of tokens withdrawn.
+    pub amount: i128,
+    /// Remaining spendable balance of the subscriber for this token.
+    pub balance: i128,
+}
+
 /// Emitted when the admin sets the per-token deposit cap of a subscriber.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

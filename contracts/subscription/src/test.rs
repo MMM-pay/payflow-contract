@@ -5618,3 +5618,172 @@ fn a_non_admin_cannot_allowlist_a_token_to_subscribe() {
         .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>)
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Panic safety (#308): invalid inputs must surface as typed `Error`s, never as
+// a host trap from an unchecked conversion or cross-contract call.
+// ---------------------------------------------------------------------------
+
+fn assert_typed_error<T: core::fmt::Debug>(
+    result: Result<T, Result<Error, soroban_sdk::InvokeError>>,
+) {
+    if let Err(Err(error)) = result {
+        panic!("entry point returned an untyped host error: {error:?}");
+    }
+}
+
+fn next_fuzz_u64(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+#[test]
+fn missing_plans_are_typed_errors_on_every_entry_point() {
+    let w = world();
+    let user = w.subscriber(100_000);
+    let now = w.env.ledger().timestamp();
+
+    for missing in [0, 7, u64::MAX] {
+        assert_eq!(
+            w.sub
+                .try_subscribe(&user, &missing, &0, &0, &None::<Address>),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            w.sub
+                .try_subscribe_at(&user, &missing, &0, &0, &now, &None::<Address>,),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            w.sub
+                .try_subscribe_with_deposit(&user, &missing, &0, &0, &100, &None::<Address>,),
+            Err(Ok(Error::PlanNotFound))
+        );
+    }
+
+    let plan_id = w.plan();
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    for missing in [0, 7, u64::MAX] {
+        assert_eq!(
+            w.sub.try_upgrade(&user, &id, &missing),
+            Err(Ok(Error::PlanNotFound))
+        );
+    }
+    assert_eq!(w.sub.get_mandate(&id).plan_id, plan_id);
+}
+
+#[test]
+fn underfunded_charge_is_a_typed_vault_error() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+
+    // The dunning path proves the same failure and records it without trapping.
+    assert!(w.sub.flag_failed_charge(&id));
+}
+
+#[test]
+fn subscribe_with_deposit_maps_vault_failures_to_a_typed_error() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &100, &None::<Address>),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &0, &None::<Address>),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.sub.next_mandate_id(), 1);
+}
+
+#[test]
+fn upgrade_reports_vault_failure_as_a_typed_error() {
+    let w = world();
+    let plan_id = w.plan();
+    let dearer = w.plan_amount(PRICE * 2, MONTH);
+    let user = Address::generate(&w.env);
+    let start = w.env.ledger().timestamp() + MONTH;
+    let id = w
+        .sub
+        .subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>);
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &dearer),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.sub.get_mandate(&id).plan_id, plan_id);
+}
+
+#[test]
+fn extreme_schedules_return_typed_errors() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let now = w.env.ledger().timestamp();
+
+    for start in [0, now - 1, now + MAX_START_OFFSET + 1, u64::MAX] {
+        assert_eq!(
+            w.sub
+                .try_subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>),
+            Err(Ok(Error::InvalidStart))
+        );
+    }
+
+    let long_plan = w.plan_amount(PRICE, u64::MAX);
+    let id = w
+        .sub
+        .subscribe(&user, &long_plan, &u32::MAX, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_estimated_end(&id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+}
+
+#[test]
+fn deterministic_random_queries_never_reach_a_host_trap() {
+    let w = world();
+    let user = w.subscriber(PRICE);
+    let plan_id = w.plan();
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let now = w.env.ledger().timestamp();
+    let mut seed = 0x5eed_1234_abcd_9876u64;
+
+    for _ in 0..128 {
+        let x = next_fuzz_u64(&mut seed);
+        let plan = next_fuzz_u64(&mut seed);
+        let start = now.saturating_add(x % (MAX_START_OFFSET * 2));
+        let max_total = (x as i128) - (i128::MAX / 2);
+        let max_charges = x as u32;
+
+        assert_typed_error(w.sub.try_subscribe_at(
+            &user,
+            &plan,
+            &max_charges,
+            &max_total,
+            &start,
+            &None::<Address>,
+        ));
+        assert_typed_error(w.sub.try_charge(&w.keeper, &x));
+        assert_typed_error(w.sub.try_get_mandate(&x));
+        assert_typed_error(w.sub.try_estimated_end(&x));
+        assert_typed_error(w.sub.try_quote_charge(&x));
+        assert_typed_error(w.sub.try_upgrade(&user, &id, &plan));
+    }
+}

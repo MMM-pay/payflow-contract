@@ -21,6 +21,23 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     (env, client, admin)
 }
 
+fn batch_plan(env: &Env, token: &Address, amount: i128, name: &str) -> PlanParams {
+    PlanParams {
+        token: token.clone(),
+        amount,
+        period: 2_592_000,
+        name: String::from_str(env, name),
+        description: String::from_str(env, ""),
+        keeper_bps: 0,
+        category: Symbol::new(env, ""),
+        terms_uri: String::from_str(env, ""),
+        available_until: 0,
+        referral_bps: 0,
+        payout: None,
+        max_subscribers: 0,
+    }
+}
+
 #[test]
 fn version_matches_package_version() {
     let (env, client, _) = setup();
@@ -3182,4 +3199,322 @@ fn proposals_are_scoped_to_one_plan() {
     client.accept_plan_owner(&owner_a, &plan_a);
     assert_eq!(client.get_plan(&plan_a).merchant, owner_a);
     assert_eq!(client.get_plan(&plan_b).merchant, merchant_b);
+}
+
+#[test]
+fn create_plans_creates_a_sequential_batch() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let payout = Address::generate(&env);
+    let mut second = batch_plan(&env, &token_b, 2_000, "Second");
+    second.payout = Some(payout.clone());
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token_a, 1_000, "First"),
+        second,
+        batch_plan(&env, &token_a, 3_000, "Third"),
+    ];
+
+    let ids = client.create_plans(&merchant, &plans);
+
+    assert_eq!(ids, soroban_sdk::vec![&env, 1, 2, 3]);
+    assert_eq!(client.next_plan_id(), 4);
+    assert_eq!(client.merchant_plan_count(&merchant), 3);
+    assert_eq!(client.merchant_plans(&merchant, &0, &10), ids);
+
+    let first = client.get_plan(&1);
+    assert_eq!(first.merchant, merchant);
+    assert_eq!(first.token, token_a);
+    assert_eq!(first.amount, 1_000);
+    assert_eq!(first.payout, merchant);
+    assert_eq!(first.name, String::from_str(&env, "First"));
+
+    let second = client.get_plan(&2);
+    assert_eq!(second.token, token_b);
+    assert_eq!(second.payout, payout);
+    assert_eq!(second.amount, 2_000);
+
+    assert_eq!(client.token_plan_count(&token_a), 2);
+    assert_eq!(
+        client.token_plans(&token_a, &0, &10),
+        soroban_sdk::vec![&env, 1, 3]
+    );
+    assert_eq!(client.token_plan_count(&token_b), 1);
+    assert_eq!(
+        client.token_plans(&token_b, &0, &10),
+        soroban_sdk::vec![&env, 2]
+    );
+}
+
+#[test]
+fn create_plans_emits_one_event_per_plan_and_a_batch_summary() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 1_000, "First"),
+        batch_plan(&env, &token, 2_000, "Second"),
+    ];
+
+    let before = env.events().all().events().len();
+    client.create_plans(&merchant, &plans);
+    let all = env.events().all();
+    let events = all.events();
+    assert_eq!(events.len(), before + 3);
+
+    let mut names = std::vec::Vec::new();
+    for event in events.iter().skip(before) {
+        let ContractEventBody::V0(body) = &event.body;
+        let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+            panic!("topic 0 is not a symbol");
+        };
+        names.push(name.to_utf8_string_lossy());
+    }
+    assert_eq!(
+        names,
+        std::vec!["plan_created", "plan_created", "plans_created"]
+    );
+}
+
+#[test]
+fn create_plans_rejects_an_empty_batch() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+
+    assert_eq!(
+        client.try_create_plans(&merchant, &soroban_sdk::Vec::new(&env)),
+        Err(Ok(Error::EmptyBatch))
+    );
+    assert_eq!(client.next_plan_id(), 1);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+}
+
+#[test]
+fn create_plans_accepts_the_maximum_batch_size() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let mut plans = soroban_sdk::Vec::new(&env);
+    for i in 0..MAX_BATCH_PLANS {
+        plans.push_back(batch_plan(&env, &token, 1_000 + i as i128, "Plan"));
+    }
+
+    let ids = client.create_plans(&merchant, &plans);
+
+    assert_eq!(ids.len(), MAX_BATCH_PLANS);
+    assert_eq!(client.next_plan_id(), MAX_BATCH_PLANS as u64 + 1);
+    assert_eq!(client.merchant_plan_count(&merchant), MAX_BATCH_PLANS);
+}
+
+#[test]
+fn create_plans_rejects_a_batch_over_the_maximum_without_writing_anything() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let mut plans = soroban_sdk::Vec::new(&env);
+    for _ in 0..=MAX_BATCH_PLANS {
+        plans.push_back(batch_plan(&env, &token, 1_000, "Plan"));
+    }
+
+    assert_eq!(
+        client.try_create_plans(&merchant, &plans),
+        Err(Ok(Error::BatchTooLarge))
+    );
+    assert_eq!(client.next_plan_id(), 1);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.token_plan_count(&token), 0);
+}
+
+#[test]
+fn an_invalid_plan_makes_the_whole_batch_atomic() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let mut invalid = batch_plan(&env, &token, 2_000, "Second");
+    invalid.period = MIN_PERIOD - 1;
+    let plans = soroban_sdk::vec![&env, batch_plan(&env, &token, 1_000, "First"), invalid,];
+    let before = env.events().all().events().len();
+
+    assert_eq!(
+        client.try_create_plans(&merchant, &plans),
+        Err(Ok(Error::InvalidPeriod))
+    );
+
+    assert_eq!(client.next_plan_id(), 1);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.token_plan_count(&token), 0);
+    assert!(client.try_get_plan(&1).is_err());
+    assert_eq!(env.events().all().events().len(), before);
+}
+
+#[test]
+fn create_plans_requires_the_merchants_auth() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let plans = soroban_sdk::vec![&env, batch_plan(&env, &token, 1_000, "First")];
+
+    env.set_auths(&[]);
+    assert!(client.try_create_plans(&merchant, &plans).is_err());
+    assert_eq!(client.next_plan_id(), 1);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+}
+
+#[test]
+fn create_plans_authorizes_the_exact_merchant_tree() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(PlanRegistry, (admin.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let plans = soroban_sdk::vec![&env, batch_plan(&env, &token, 1_000, "First")];
+
+    env.mock_auths(&[MockAuth {
+        address: &merchant,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create_plans",
+            args: (&merchant, &plans).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_eq!(
+        client.create_plans(&merchant, &plans),
+        soroban_sdk::vec![&env, 1]
+    );
+    assert_eq!(env.auths().len(), 1);
+    assert_eq!(env.auths()[0].0, merchant);
+}
+
+// ---------------------------------------------------------------------------
+// Panic safety (#308): extreme IDs and invalid parameters must return typed
+// errors instead of trapping.
+// ---------------------------------------------------------------------------
+
+fn assert_typed_error<T: core::fmt::Debug>(
+    result: Result<T, Result<Error, soroban_sdk::InvokeError>>,
+) {
+    if let Err(Err(error)) = result {
+        panic!("entry point returned an untyped host error: {error:?}");
+    }
+}
+
+fn next_fuzz_u64(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+#[test]
+fn missing_plan_ids_are_typed_errors_on_every_mutator() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    for missing in [0, u64::MAX] {
+        assert_eq!(client.try_get_plan(&missing), Err(Ok(Error::PlanNotFound)));
+        assert_eq!(
+            client.try_set_plan_name(&merchant, &missing, &String::from_str(&env, "Name"),),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            client.try_set_plan_active(&merchant, &missing, &false),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            client.try_set_successor(&merchant, &missing, &1),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            client.try_propose_plan_owner(&merchant, &missing, &merchant),
+            Err(Ok(Error::PlanNotFound))
+        );
+        assert_eq!(
+            client.try_accept_plan_owner(&merchant, &missing),
+            Err(Ok(Error::PendingOwnershipNotFound))
+        );
+    }
+    assert_eq!(client.token_plan_count(&token), 0);
+}
+
+#[test]
+fn extreme_page_bounds_are_saturating_and_typed() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    assert_eq!(
+        client.merchant_plans(&merchant, &u32::MAX, &u32::MAX),
+        soroban_sdk::Vec::new(&env)
+    );
+    assert_eq!(
+        client.token_plans(&token, &u32::MAX, &u32::MAX),
+        soroban_sdk::Vec::new(&env)
+    );
+    assert_eq!(
+        client.try_deactivate_page(&merchant, &u32::MAX, &u32::MAX),
+        Ok(Ok(0))
+    );
+}
+
+#[test]
+fn deterministic_extreme_plan_inputs_never_trap() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+    let empty = String::from_str(&env, "");
+    let category = Symbol::new(&env, "");
+    let mut seed = 0xfeed_face_0bad_c0deu64;
+
+    for _ in 0..128 {
+        let x = next_fuzz_u64(&mut seed);
+        let amount = match x % 6 {
+            0 => 0,
+            1 => -1,
+            2 => i128::MIN,
+            3 => i128::MAX,
+            4 => MIN_CHARGE_AMOUNT - 1,
+            _ => MIN_CHARGE_AMOUNT,
+        };
+        let period = match x % 5 {
+            0 => 0,
+            1 => 1,
+            2 => MIN_PERIOD - 1,
+            3 => MIN_PERIOD,
+            _ => u64::MAX,
+        };
+        let keeper = match x % 3 {
+            0 => 0,
+            1 => MAX_KEEPER_BPS,
+            _ => u32::MAX,
+        };
+        let referral = match x % 3 {
+            0 => 0,
+            1 => MAX_REFERRAL_BPS,
+            _ => u32::MAX,
+        };
+
+        assert_typed_error(client.try_create_plan(
+            &merchant,
+            &token,
+            &amount,
+            &period,
+            &name,
+            &empty,
+            &keeper,
+            &category,
+            &empty,
+            &0,
+            &referral,
+            &None::<Address>,
+            &(x as u32),
+        ));
+    }
 }

@@ -1,6 +1,6 @@
 //! Events emitted by the plan registry contract.
 
-use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol, Vec};
 
 /// Emitted when a merchant publishes a new plan.
 #[contractevent]
@@ -41,6 +41,19 @@ pub struct PlanCreated {
     /// Seat cap frozen into the plan; 0 means unlimited. Carried in the event
     /// so indexers need no follow-up contract read.
     pub max_subscribers: u32,
+}
+
+/// Emitted once after a successful `create_plans` batch. Individual
+/// [`PlanCreated`] events precede it; this event lets an indexer group the
+/// plans that were created by one call.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlansCreated {
+    /// Account that published the plans.
+    #[topic]
+    pub merchant: Address,
+    /// IDs of the created plans, in request order.
+    pub plan_ids: Vec<u64>,
 }
 
 /// Emitted when a plan's current owner proposes transferring it to a new owner.
