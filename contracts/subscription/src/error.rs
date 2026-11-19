@@ -104,6 +104,9 @@ pub enum Error {
     /// without changing mandate state; the vault's own error code is preserved
     /// in the invocation diagnostics.
     VaultCallFailed = 2037,
+    /// The mandate's plan has charging paused by its merchant (#315). The
+    /// mandate itself is still open; retry after the merchant resumes.
+    PlanChargesPaused = 2038,
 }
 
 impl From<Error> for ErrorCode {

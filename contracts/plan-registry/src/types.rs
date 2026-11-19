@@ -92,4 +92,9 @@ pub enum DataKey {
     /// Pending ownership proposal for a plan: the address the current owner
     /// proposed as the new owner, awaiting their acceptance.
     PlanOwnerProposal(u64),
+    /// Whether charging is paused for a plan (#315). Missing means not paused.
+    PlanChargesPaused(u64),
+    /// Grace window for plans opened after the setting was changed (#312).
+    /// Missing means zero.
+    PlanGracePeriod(u64),
 }

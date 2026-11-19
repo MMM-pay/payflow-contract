@@ -111,10 +111,6 @@ pub struct Mandate {
     pub referral_bps: u32,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
-    /// Grace window in seconds, frozen from the plan's `grace_period_secs` at
-    /// sign-up (#312). `0` disables the grace view. A later plan change never
-    /// shortens the window an open mandate was promised.
-    pub grace_period_secs: u64,
 }
 
 /// Read-only preview of what `charge` would pay right now.
@@ -207,4 +203,7 @@ pub enum DataKey {
     /// was first flagged by `flag_failed_charge` (#296). Cleared by the next
     /// successful `charge`, so the following failure notifies again.
     FirstFailedCharge(u64),
+    /// Grace window in seconds frozen into a mandate at sign-up (#312).
+    /// Missing means zero.
+    MandateGracePeriod(u64),
 }

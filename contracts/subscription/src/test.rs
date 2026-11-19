@@ -4996,8 +4996,8 @@ fn grace_view_uses_the_window_frozen_at_subscribe_time() {
         .sub
         .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
 
-    assert_eq!(w.sub.get_mandate(&before).grace_period_secs, 0);
-    assert_eq!(w.sub.get_mandate(&after).grace_period_secs, 3_600);
+    assert_eq!(w.sub.mandate_grace_period(&before), 0);
+    assert_eq!(w.sub.mandate_grace_period(&after), 3_600);
     assert!(!w.sub.is_in_grace_period(&before));
     assert!(w.sub.is_in_grace_period(&after));
 }
@@ -5060,6 +5060,10 @@ fn grace_view_rejects_an_unknown_mandate() {
     let w = world();
     assert_eq!(
         w.sub.try_is_in_grace_period(&42),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        w.sub.try_mandate_grace_period(&42),
         Err(Ok(Error::MandateNotFound))
     );
 }

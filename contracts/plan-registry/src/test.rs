@@ -612,7 +612,7 @@ fn set_plan_charges_paused_emits_the_change() {
 }
 
 #[test]
-fn set_plan_grace_period_is_frozen_into_new_plans_and_stored() {
+fn set_plan_grace_period_is_stored_and_defaults_to_zero() {
     let (env, client, _admin) = setup();
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
@@ -632,9 +632,9 @@ fn set_plan_grace_period_is_frozen_into_new_plans_and_stored() {
         &0u32,
     );
 
-    assert_eq!(client.get_plan(&id).grace_period_secs, 0);
+    assert_eq!(client.plan_grace_period(&id), 0);
     client.set_plan_grace_period(&merchant, &id, &172_800);
-    assert_eq!(client.get_plan(&id).grace_period_secs, 172_800);
+    assert_eq!(client.plan_grace_period(&id), 172_800);
 
     let attacker = Address::generate(&env);
     assert_eq!(
@@ -645,7 +645,11 @@ fn set_plan_grace_period_is_frozen_into_new_plans_and_stored() {
         client.try_set_plan_grace_period(&merchant, &42, &1),
         Err(Ok(Error::PlanNotFound))
     );
-    assert_eq!(client.get_plan(&id).grace_period_secs, 172_800);
+    assert_eq!(
+        client.try_plan_grace_period(&42),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(client.plan_grace_period(&id), 172_800);
 }
 
 #[test]
@@ -672,7 +676,7 @@ fn set_plan_charges_paused_requires_the_merchants_auth() {
     assert!(client
         .try_set_plan_charges_paused(&merchant, &id, &true)
         .is_err());
-    assert!(!client.get_plan(&id).charges_paused);
+    assert!(!client.plan_charges_paused(&id));
 }
 
 #[test]
@@ -697,7 +701,7 @@ fn set_plan_paused_requires_the_merchants_auth() {
     );
     env.set_auths(&[]);
     assert!(client.try_set_plan_paused(&merchant, &id, &true).is_err());
-    assert!(!client.get_plan(&id).charges_paused);
+    assert!(!client.plan_charges_paused(&id));
 }
 
 #[test]
@@ -724,7 +728,7 @@ fn set_plan_grace_period_requires_the_merchants_auth() {
     assert!(client
         .try_set_plan_grace_period(&merchant, &id, &1_000)
         .is_err());
-    assert_eq!(client.get_plan(&id).grace_period_secs, 0);
+    assert_eq!(client.plan_grace_period(&id), 0);
 }
 
 #[test]

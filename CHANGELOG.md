@@ -9,6 +9,43 @@ change the contract interface.
 
 ### Added
 
+- **#315: plan-wide charge pause (plan-registry, subscription).** New
+  merchant-only `plan-registry:set_plan_charges_paused(merchant, plan_id,
+  paused)` (alias `set_plan_paused`) pauses charging for every mandate against
+  one plan without deactivating it. The flag lives in a new
+  `PlanChargesPaused` side key, so the stored `Plan` layout is unchanged. New
+  views `plan_charges_paused` / `plan_paused` and the
+  `PlanChargesPausedChanged` event. `subscription` now checks the flag before
+  settlement: `charge`, `flag_failed_charge` and `upgrade` into the paused
+  plan return `PlanChargesPaused=2038`, while `is_due` and
+  `quote_charge.chargeable` report false. Existing mandates stay open and new
+  subscriptions are still accepted. `due_mandates` remains a local schedule
+  scan, so callers should use `is_due` for the final plan-pause gate.
+
+- **#312: mandate grace-period view (plan-registry, subscription).** New
+  merchant-only `plan-registry:set_plan_grace_period(merchant, plan_id,
+  seconds)` stores a plan's grace window in a `PlanGracePeriod` side key and
+  emits `PlanGracePeriodSet`; `plan_grace_period` reads it (default `0`).
+  `subscription:subscribe*` freezes the current window into a
+  `MandateGracePeriod` side key for that mandate, so later plan edits cannot
+  shorten an open subscriber's warning period. New read-only views
+  `is_in_grace_period(mandate_id)` and `mandate_grace_period(mandate_id)`.
+  The window starts at `next_charge` and has an exclusive end at
+  `next_charge + grace_period_secs`; it never cancels or otherwise moves the
+  mandate. Neither side key changes the stored `Plan` or `Mandate` layout.
+
+- **#311: test-token documentation.** New [`docs/test-token.md`](docs/test-token.md)
+  explains that `contracts/test-token` is a SAC-like fixture for tests, lists
+  its minting and failure-injection controls, and states that it must never be
+  deployed as a real asset. The test-token crate and README now link to it.
+
+- **#314: vault operation rate limit.** Vault `deposit`, `deposit_for`,
+  `withdraw`, `withdraw_to` and `withdraw_all` now share a fixed, epoch-aligned 60-second
+  window per `(user, token)` with at most 8 operations. Exceeding it fails with
+  the new `RateLimitExceeded=3015` before any balance changes or tokens move.
+  This bounds rapid deposit/withdraw cycling that repeatedly rewrites the
+  balance entry and emits events. The window rolls over deterministically.
+
 - **#309: atomic bulk plan creation (plan-registry).** New
   `create_plans(merchant, plans: Vec<PlanParams>)` publishes up to
   `MAX_BATCH_PLANS = 10` plans in one call. Every plan is validated before any

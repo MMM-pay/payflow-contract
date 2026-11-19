@@ -16,14 +16,15 @@
 //! | `create_plans` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 per plan | Batch ≤10; extends instance + persistent TTLs |
 //! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
-//! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
-//! | `set_plan_grace_period` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (PlanChargesPaused) | Extends persistent TTL |
+//! | `set_plan_grace_period` | 0 | 0 | 1 (Plan) | 1 (PlanGracePeriod) | Extends persistent TTL |
 //! | `set_successor` | 0 | 0 | 2 (Plan ×2) | 1 (Plan) | Extends persistent TTL |
 //! | `set_profile` | 0 | 0 | 0 | 1 (Profile) | Extends persistent TTL |
 //! | `profile` | 0 | 0 | 1 (Profile) | 0 | |
 //! | `deactivate_page` | 0 | 0 | ≤100 (index slots + Plans) | ≤50 (Plans) | Page size ≤50, extends persistent TTLs |
 //! | `get_plan` | 0 | 0 | 1 (Plan) | 0 | |
-//! | `plan_charges_paused` | 0 | 0 | 1 (Plan) | 0 | |
+//! | `plan_charges_paused` | 0 | 0 | 2 (Plan, PlanChargesPaused) | 0 | |
+//! | `plan_grace_period` | 0 | 0 | 2 (Plan, PlanGracePeriod) | 0 | |
 //! | `merchant_plan_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
 //! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
@@ -58,8 +59,9 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, PlanCreated, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged,
-    PlanSuccessorSet, PlanTransferred, PlansCreated, ProfileUpdated,
+    ContractUpgraded, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet,
+    PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
+    PlansCreated, ProfileUpdated,
 };
 pub use types::{DataKey, Plan, PlanParams, Profile};
 
@@ -194,8 +196,6 @@ mod contract {
                 referral_bps,
                 payout,
                 max_subscribers,
-                charges_paused: false,
-                grace_period_secs: 0,
             };
             Self::validate_plan(&params)?;
 
@@ -395,19 +395,18 @@ mod contract {
         ) -> Result<(), Error> {
             merchant.require_auth();
 
-            let key = DataKey::Plan(plan_id);
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .ok_or(Error::PlanNotFound)?;
-
+            let plan = Self::get_plan(env.clone(), plan_id)?;
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
             }
 
-            plan.charges_paused = paused;
-            env.storage().persistent().set(&key, &plan);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Plan(plan_id),
+                PERSIST_THRESHOLD,
+                PERSIST_BUMP,
+            );
+            let key = DataKey::PlanChargesPaused(plan_id);
+            env.storage().persistent().set(&key, &paused);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -458,19 +457,18 @@ mod contract {
         ) -> Result<(), Error> {
             merchant.require_auth();
 
-            let key = DataKey::Plan(plan_id);
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .ok_or(Error::PlanNotFound)?;
-
+            let plan = Self::get_plan(env.clone(), plan_id)?;
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
             }
 
-            plan.grace_period_secs = grace_period_secs;
-            env.storage().persistent().set(&key, &plan);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Plan(plan_id),
+                PERSIST_THRESHOLD,
+                PERSIST_BUMP,
+            );
+            let key = DataKey::PlanGracePeriod(plan_id);
+            env.storage().persistent().set(&key, &grace_period_secs);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -490,12 +488,32 @@ mod contract {
         /// # Errors
         /// Returns [`Error::PlanNotFound`] if the plan does not exist.
         pub fn plan_charges_paused(env: Env, plan_id: u64) -> Result<bool, Error> {
-            Ok(Self::get_plan(env, plan_id)?.charges_paused)
+            let _ = Self::get_plan(env.clone(), plan_id)?;
+            Ok(env
+                .storage()
+                .persistent()
+                .get(&DataKey::PlanChargesPaused(plan_id))
+                .unwrap_or(false))
         }
 
         /// Alias for [`PlanRegistry::plan_charges_paused`].
         pub fn plan_paused(env: Env, plan_id: u64) -> Result<bool, Error> {
             Self::plan_charges_paused(env, plan_id)
+        }
+
+        /// Grace window in seconds for new mandates against `plan_id` (#312).
+        /// Existing mandates keep the window frozen into them at sign-up.
+        /// Defaults to `0`, which disables the grace view.
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist.
+        pub fn plan_grace_period(env: Env, plan_id: u64) -> Result<u64, Error> {
+            let _ = Self::get_plan(env.clone(), plan_id)?;
+            Ok(env
+                .storage()
+                .persistent()
+                .get(&DataKey::PlanGracePeriod(plan_id))
+                .unwrap_or(0))
         }
 
         /// Point a plan at the plan that replaces it, if any.

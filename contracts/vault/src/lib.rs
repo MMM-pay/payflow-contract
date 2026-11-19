@@ -412,9 +412,11 @@ mod contract {
         /// Emits [`WithdrawTo`].
         ///
         /// # Errors
-        /// Returns [`Error::InvalidAmount`] if `amount <= 0`, or
+        /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance.
+        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// (user, token) pair has used its deposit/withdraw budget for this
+        /// window (#314).
         pub fn withdraw_to(
             env: Env,
             user: Address,
@@ -1023,6 +1025,8 @@ mod contract {
             if balance - reserved < amount {
                 return Err(Error::InsufficientBalance);
             }
+
+            Self::record_operation(env, user, token)?;
 
             let new_balance = balance - amount;
             Self::write_balance(env, user, token, new_balance);

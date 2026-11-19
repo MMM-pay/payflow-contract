@@ -201,6 +201,26 @@ fn withdraw_to_allows_the_user_to_name_themselves() {
 }
 
 #[test]
+fn withdraw_to_shares_the_operation_window() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    let destination = Address::generate(&h.env);
+
+    for _ in 0..4 {
+        h.vault.deposit(&user, &h.token, &1_000);
+        h.vault.withdraw_to(&user, &h.token, &destination, &500);
+    }
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+
+    assert_eq!(
+        h.vault.try_withdraw_to(&user, &h.token, &destination, &500),
+        Err(Ok(Error::RateLimitExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+    assert_eq!(h.token_client.balance(&destination), 2_000);
+}
+
+#[test]
 fn withdraw_beyond_balance_fails() {
     let h = setup();
     let user = funded_user(&h, 10_000);

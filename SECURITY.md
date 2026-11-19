@@ -90,7 +90,7 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ### Vault bounds deposit/withdraw cycling (#314)
 
-`vault:deposit`, `deposit_for`, `withdraw` and `withdraw_all` now share a
+`vault:deposit`, `deposit_for`, `withdraw`, `withdraw_to` and `withdraw_all` now share a
 fixed 60-second window per `(user, token)`. At most 8 operations are accepted
 inside one window; a ninth fails with `RateLimitExceeded` before any balance is
 written or any token moves. Windows are aligned to the Unix epoch and reset

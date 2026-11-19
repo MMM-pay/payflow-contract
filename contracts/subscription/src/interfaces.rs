@@ -9,6 +9,12 @@ use soroban_sdk::{contractclient, Address, Env};
 pub trait PlanRegistryInterface {
     /// Retrieve a plan by ID from the plan registry.
     fn get_plan(env: Env, plan_id: u64) -> Plan;
+
+    /// Whether the merchant paused charging for this plan (#315).
+    fn plan_charges_paused(env: Env, plan_id: u64) -> bool;
+
+    /// Grace window for new mandates against this plan (#312).
+    fn plan_grace_period(env: Env, plan_id: u64) -> u64;
 }
 
 /// Debit side of `payflow-vault`.
