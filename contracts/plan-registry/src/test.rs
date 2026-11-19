@@ -2689,3 +2689,278 @@ fn upgrade_wasm_wrong_signer_rejected() {
 
     assert_eq!(client.next_plan_id(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// A replaced ownership proposal is dead (#297): proposing a new owner
+// invalidates any pending proposal, and the stale proposee can never accept.
+// ---------------------------------------------------------------------------
+
+/// A plan owned by a fresh merchant, returned with that merchant.
+fn owned_plan(env: &Env, client: &PlanRegistryClient) -> (u64, Address) {
+    let merchant = Address::generate(env);
+    let token = Address::generate(env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(env, "Plan"),
+        &String::from_str(env, ""),
+        &0,
+        &Symbol::new(env, ""),
+        &String::from_str(env, ""),
+        &0u64,
+        &0,
+        &None::<Address>,
+        &0u32,
+    );
+    (id, merchant)
+}
+
+/// The `new_owner` field of the last `plan_ownership_proposed` event.
+fn last_proposed_owner(env: &Env) -> Option<Address> {
+    let mut found = None;
+    for event in env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() else {
+            continue;
+        };
+        if name.to_utf8_string_lossy() != "plan_ownership_proposed" {
+            continue;
+        }
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries.iter() {
+            if let ScVal::Symbol(ScSymbol(key)) = &entry.key {
+                if key.to_utf8_string_lossy() == "new_owner" {
+                    found = Address::try_from_val(env, &entry.val).ok();
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_replaced_proposal_cannot_be_accepted_and_nothing_moves() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let stale = Address::generate(&env);
+    let current = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &stale);
+    client.propose_plan_owner(&merchant, &id, &current);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&stale, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+
+    // The rejected accept changed nothing: owner, both indexes, and the live
+    // proposal are exactly as before.
+    assert_eq!(client.get_plan(&id).merchant, merchant);
+    assert_eq!(client.merchant_plan_count(&merchant), 1);
+    assert_eq!(client.merchant_plan_count(&stale), 0);
+    assert_eq!(client.try_accept_plan_owner(&current, &id), Ok(Ok(())));
+}
+
+#[test]
+fn a_stale_proposee_cannot_accept_after_the_replacement_is_accepted() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let stale = Address::generate(&env);
+    let current = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &stale);
+    client.propose_plan_owner(&merchant, &id, &current);
+    client.accept_plan_owner(&current, &id);
+
+    // No proposal is pending any more, so the stale one finds nothing.
+    assert_eq!(
+        client.try_accept_plan_owner(&stale, &id),
+        Err(Ok(Error::PendingOwnershipNotFound))
+    );
+    assert_eq!(client.get_plan(&id).merchant, current);
+    assert_eq!(client.merchant_plans(&current, &0, &10).len(), 1);
+    assert_eq!(client.merchant_plan_count(&stale), 0);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+}
+
+#[test]
+fn only_the_latest_of_many_proposals_stands() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let candidates: [Address; 4] = core::array::from_fn(|_| Address::generate(&env));
+
+    for candidate in candidates.iter() {
+        client.propose_plan_owner(&merchant, &id, candidate);
+    }
+
+    for stale in candidates[..3].iter() {
+        assert_eq!(
+            client.try_accept_plan_owner(stale, &id),
+            Err(Ok(Error::NotPendingOwner))
+        );
+    }
+    client.accept_plan_owner(&candidates[3], &id);
+    assert_eq!(client.get_plan(&id).merchant, candidates[3]);
+}
+
+#[test]
+fn re_proposing_a_previously_replaced_owner_revives_only_that_proposal() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &first);
+    client.propose_plan_owner(&merchant, &id, &second);
+    // The merchant changes its mind back: `first` is the pending owner again
+    // and `second` is now the stale one.
+    client.propose_plan_owner(&merchant, &id, &first);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&second, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    client.accept_plan_owner(&first, &id);
+    assert_eq!(client.get_plan(&id).merchant, first);
+}
+
+#[test]
+fn every_replacement_emits_a_proposal_naming_the_new_owner() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let stale = Address::generate(&env);
+    let current = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &stale);
+    assert_eq!(last_proposed_owner(&env), Some(stale));
+
+    // Indexers learn of the replacement from the event alone.
+    client.propose_plan_owner(&merchant, &id, &current);
+    assert_eq!(last_proposed_owner(&env), Some(current));
+}
+
+#[test]
+fn a_stranger_cannot_replace_a_pending_proposal() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let intended = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &intended);
+
+    // Logic check: the attacker is not the plan's merchant.
+    assert_eq!(
+        client.try_propose_plan_owner(&attacker, &id, &attacker),
+        Err(Ok(Error::NotPlanOwner))
+    );
+
+    // Auth check: naming the real merchant without its signature fails too.
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "propose_plan_owner",
+            args: (&merchant, &id, &attacker).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client
+        .try_propose_plan_owner(&merchant, &id, &attacker)
+        .is_err());
+
+    // The original proposal survived both attempts.
+    env.mock_all_auths();
+    assert_eq!(
+        client.try_accept_plan_owner(&attacker, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    client.accept_plan_owner(&intended, &id);
+    assert_eq!(client.get_plan(&id).merchant, intended);
+}
+
+#[test]
+fn a_stale_proposee_signing_for_itself_still_cannot_accept() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let stale = Address::generate(&env);
+    let current = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &stale);
+    client.propose_plan_owner(&merchant, &id, &current);
+
+    // A real, exact signature from the stale proposee: authorization passes
+    // and the logic check is what rejects it.
+    env.mock_auths(&[MockAuth {
+        address: &stale,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "accept_plan_owner",
+            args: (&stale, &id).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(
+        client.try_accept_plan_owner(&stale, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+
+    env.mock_all_auths();
+    assert_eq!(client.get_plan(&id).merchant, merchant);
+}
+
+#[test]
+fn the_new_owner_can_propose_and_the_old_owners_proposals_are_gone() {
+    let (env, client, _admin) = setup();
+    let (id, merchant) = owned_plan(&env, &client);
+    let stale = Address::generate(&env);
+    let current = Address::generate(&env);
+    let next = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant, &id, &stale);
+    client.propose_plan_owner(&merchant, &id, &current);
+    client.accept_plan_owner(&current, &id);
+
+    // The previous owner lost the right to propose...
+    assert_eq!(
+        client.try_propose_plan_owner(&merchant, &id, &stale),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    // ...and the new owner's proposal is the only one that counts.
+    client.propose_plan_owner(&current, &id, &next);
+    assert_eq!(
+        client.try_accept_plan_owner(&stale, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    client.accept_plan_owner(&next, &id);
+    assert_eq!(client.get_plan(&id).merchant, next);
+}
+
+#[test]
+fn proposals_are_scoped_to_one_plan() {
+    let (env, client, _admin) = setup();
+    let (plan_a, merchant_a) = owned_plan(&env, &client);
+    let (plan_b, merchant_b) = owned_plan(&env, &client);
+    let owner_a = Address::generate(&env);
+    let owner_b = Address::generate(&env);
+
+    client.propose_plan_owner(&merchant_a, &plan_a, &owner_a);
+    client.propose_plan_owner(&merchant_b, &plan_b, &owner_b);
+    // Replacing plan B's proposal does not touch plan A's.
+    client.propose_plan_owner(&merchant_b, &plan_b, &merchant_b);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&owner_a, &plan_b),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    assert_eq!(
+        client.try_accept_plan_owner(&owner_b, &plan_b),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    client.accept_plan_owner(&owner_a, &plan_a);
+    assert_eq!(client.get_plan(&plan_a).merchant, owner_a);
+    assert_eq!(client.get_plan(&plan_b).merchant, merchant_b);
+}
