@@ -97,4 +97,7 @@ pub enum Error {
     /// succeed right now: the subscriber's vault covers it. Only a charge
     /// that would really fail can be flagged (#296).
     ChargeWouldSucceed = 35,
+    /// The mandate's plan has charging paused by its merchant (#315). The
+    /// mandate itself is still open; retry after the merchant resumes.
+    PlanChargesPaused = 36,
 }

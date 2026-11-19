@@ -81,6 +81,37 @@ pub struct PlanStatusChanged {
     pub active: bool,
 }
 
+/// Emitted when a merchant pauses or resumes charging for one plan (#315).
+/// Every mandate against the plan is affected; the plan itself stays active and
+/// keeps accepting new subscribers.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanChargesPausedChanged {
+    /// Merchant owning the plan.
+    #[topic]
+    pub merchant: Address,
+    /// ID of the plan whose charge status changed.
+    #[topic]
+    pub plan_id: u64,
+    /// Whether charging is now paused (`true`) or resumed (`false`).
+    pub paused: bool,
+}
+
+/// Emitted when a merchant changes a plan's grace window (#312). Only new
+/// mandates opened after the change carry the new window.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanGracePeriodSet {
+    /// Merchant owning the plan.
+    #[topic]
+    pub merchant: Address,
+    /// ID of the plan whose grace window changed.
+    #[topic]
+    pub plan_id: u64,
+    /// Grace window in seconds. `0` disables the grace view.
+    pub grace_period_secs: u64,
+}
+
 /// Emitted when a merchant points a plan at the plan that replaces it, if any.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

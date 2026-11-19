@@ -31,6 +31,9 @@ pub enum DataKey {
     /// Sum of every `Reserved` entry for (user, token). Always at most the
     /// (user, token) balance, so the unreserved part never goes negative.
     ReservedTotal(Address, Address),
+    /// Fixed-window counter for deposit/withdraw operations (#314): where the
+    /// current window starts and how many operations it already contains.
+    OperationWindow(Address, Address),
 }
 
 /// A subscriber's optional ceiling on total debits per fixed time window,
@@ -55,4 +58,14 @@ pub struct SpendLimit {
 pub struct SpendWindow {
     pub start: u64,
     pub spent: i128,
+}
+
+/// How many deposit/withdraw operations (user, token) has performed in the
+/// current fixed window (#314). The window resets at deterministic,
+/// epoch-aligned boundaries so repeated cycling cannot keep a counter alive.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationWindow {
+    pub start: u64,
+    pub operations: u32,
 }

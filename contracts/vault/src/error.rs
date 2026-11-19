@@ -44,4 +44,9 @@ pub enum Error {
     /// `set_reserve` would earmark more than the subscriber's balance for
     /// this token across all of their mandates (#295).
     ReserveExceedsBalance = 14,
+    /// The (user, token) pair has reached the per-window limit on
+    /// deposit/withdraw operations (#314). The limit bounds rapid cycling that
+    /// repeatedly rewrites balances and emits events; it resets when the
+    /// window rolls over.
+    RateLimitExceeded = 15,
 }

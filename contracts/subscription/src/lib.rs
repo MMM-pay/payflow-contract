@@ -16,7 +16,7 @@
 //! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
 //! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
 //! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Plus vault deposit; extends TTLs |
-//! | `charge` | 4 (config) | 0 | 2–3 (Mandate, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
+//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
 //! | `upgrade` | 4 (config) | 0 | 2–3 (Mandate, Plan) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
 //! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
 //! | `cancel_page` | 0 | 0 | ≤100 (index + Mandates) | ≤50 (Mandates) | Page ≤50, extends persistent TTLs |
@@ -30,8 +30,9 @@
 //! | `set_fee_bps` | 1 (Admin) | 1 (FeeBps) | 0 | 0 | Admin only, extends instance TTL |
 //! | `get_mandate` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `estimated_end` | 0 | 0 | 1 (Mandate) | 0 | |
-//! | `is_due` | 0 | 0 | 1 (Mandate) | 0 | |
-//! | `quote_charge` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `is_due` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
+//! | `quote_charge` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
+//! | `is_in_grace_period` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `due_mandates` | 0 | 0 | ≤100 (index + Mandates) | 0 | Page ≤50 |
 //! | `committed_per_period` | 0 | 0 | ≤50 (index + Mandates) | 0 | Page ≤50 |
 //! | `subscriber_mandate_count` | 0 | 0 | 1 (count) | 0 | |
@@ -412,6 +413,7 @@ mod contract {
                 referrer: referrer.clone(),
                 referral_bps,
                 status: MandateStatus::Active,
+                grace_period_secs: plan.grace_period_secs,
             };
 
             Self::write_mandate(&env, &mandate);
@@ -502,8 +504,9 @@ mod contract {
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
         /// [`Error::MandateNotActive`] if the mandate is not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
-        /// [`Error::MaxChargesReached`] if the mandate reached its cap, or
-        /// [`Error::AmountOverflow`] if math overflows.
+        /// [`Error::MaxChargesReached`] if the mandate reached its cap,
+        /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
+        /// or [`Error::AmountOverflow`] if math overflows.
         pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<ChargeResult, Error> {
             keeper.require_auth();
 
@@ -529,6 +532,9 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
+            }
+            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+                return Err(Error::PlanChargesPaused);
             }
 
             let (fee, tip, referral, merchant_amount) = Self::fee_split(&mandate)?;
@@ -695,6 +701,7 @@ mod contract {
         /// [`Error::MandateNotActive`] if it is not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if it reached a cap,
+        /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
         /// [`Error::ChargeWouldSucceed`] if the vault covers the charge, or
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
@@ -719,6 +726,9 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
+            }
+            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+                return Err(Error::PlanChargesPaused);
             }
 
             // The subscriber is debited exactly `amount` across all legs, so
@@ -769,6 +779,29 @@ mod contract {
                 .get(&DataKey::FirstFailedCharge(mandate_id))
         }
 
+        /// Whether `mandate_id` is inside the grace window it was opened with
+        /// (#312), so a wallet can warn the subscriber before the mandate
+        /// lapses.
+        ///
+        /// The window starts when the charge falls due (`next_charge`), not
+        /// when a keeper gets around to flagging the failure, and lasts for the
+        /// mandate's frozen `grace_period_secs`. A mandate with a zero window is
+        /// never in grace. Indefinitely paused, cancelled and completed
+        /// mandates are not in grace either; a scheduled pause that has run its
+        /// course is treated as active, matching `charge`.
+        ///
+        /// The window is inclusive of its start and exclusive of its end: at
+        /// exactly `next_charge + grace_period_secs` the grace period has
+        /// elapsed. This is a pure read: no storage writes and no events.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist.
+        pub fn is_in_grace_period(env: Env, mandate_id: u64) -> Result<bool, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let now = env.ledger().timestamp();
+            Ok(Self::in_grace_period_at(&mandate, now))
+        }
+
         /// Move a mandate onto a different plan.
         ///
         /// Moving to a more expensive plan collects the price difference for the
@@ -805,6 +838,7 @@ mod contract {
         /// [`Error::NotSubscriber`] if the caller is not the subscriber,
         /// [`Error::MandateNotActive`] if the mandate is not active,
         /// [`Error::PlanInactive`] if the new plan is inactive,
+        /// [`Error::PlanChargesPaused`] if the new plan has charging paused,
         /// [`Error::DifferentToken`] if the new plan is denominated in a different token,
         /// [`Error::DifferentMerchant`] if the new plan belongs to a different merchant, or
         /// [`Error::AmountOverflow`] if math overflows.
@@ -836,6 +870,9 @@ mod contract {
             }
             if plan.merchant != mandate.merchant {
                 return Err(Error::DifferentMerchant);
+            }
+            if plan.charges_paused {
+                return Err(Error::PlanChargesPaused);
             }
 
             let old_plan_id = mandate.plan_id;
@@ -1537,7 +1574,10 @@ mod contract {
         /// check vault balance; a funded-ness check is the caller's job.
         pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
-            Ok(Self::mandate_is_due(&m, env.ledger().timestamp()))
+            if !Self::mandate_is_due(&m, env.ledger().timestamp()) {
+                return Ok(false);
+            }
+            Ok(!Self::plan_charges_paused(&env, m.plan_id)?)
         }
 
         /// Read-only preview of what `charge` would pay right now.
@@ -1560,7 +1600,8 @@ mod contract {
             let chargeable = Self::active_at(&m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)
                 && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
-                && now >= m.next_charge;
+                && now >= m.next_charge
+                && !Self::plan_charges_paused(&env, m.plan_id)?;
 
             Ok(ChargeQuote {
                 amount: m.amount,
@@ -1654,8 +1695,11 @@ mod contract {
         /// order. A keeper settling one merchant otherwise has to read every
         /// mandate the merchant has ever had and test each one itself.
         ///
-        /// Reads at most one page of index slots and their mandate entries,
-        /// and answers exactly what `is_due` would for each.
+        /// Reads at most one page of index slots and their mandate entries.
+        /// It cannot afford a plan-registry read per candidate within the
+        /// ledger's 100-entry budget, so it reports the mandates whose own
+        /// schedule is due; `is_due` and `charge` add the plan-pause check and
+        /// are the final authority before settlement (#315).
         pub fn due_mandates(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
             let end = start.saturating_add(limit.min(MAX_PAGE));
             let now = env.ledger().timestamp();
@@ -2004,9 +2048,26 @@ mod contract {
             Ok((fee, tip, referral, merchant_gross - tip - referral))
         }
 
-        /// Whether `charge` would settle this mandate at `now`: active,
-        /// inside both caps and past its next charge date. `is_due` and
-        /// `due_mandates` both answer from this, so they cannot disagree.
+        /// Whether the plan's merchant has paused charging for it (#315).
+        fn plan_charges_paused(env: &Env, plan_id: u64) -> Result<bool, Error> {
+            let registry: Address = Self::cfg_address(env, DataKey::PlanRegistry)?;
+            Ok(PlanRegistryClient::new(env, &registry)
+                .get_plan(&plan_id)
+                .charges_paused)
+        }
+
+        /// Grace state at `now`, using the window frozen into the mandate.
+        fn in_grace_period_at(m: &Mandate, now: u64) -> bool {
+            if m.grace_period_secs == 0 || !Self::active_at(m, now) || now < m.next_charge {
+                return false;
+            }
+            now < m.next_charge.saturating_add(m.grace_period_secs)
+        }
+
+        /// Whether `charge` would settle this mandate at `now` from its own
+        /// terms: active, inside both caps and past its next charge date.
+        /// `is_due` adds the plan-pause check on top; `due_mandates` cannot
+        /// afford that cross-contract read and answers from these local terms.
         fn mandate_is_due(m: &Mandate, now: u64) -> bool {
             Self::active_at(m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)

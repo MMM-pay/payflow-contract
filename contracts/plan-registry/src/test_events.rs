@@ -108,6 +108,36 @@ fn plan_status_changed_layout() {
 }
 
 #[test]
+fn plan_charges_paused_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_charges_paused_changed",
+        super::PlanChargesPausedChanged::spec_xdr(),
+        &super::PlanChargesPausedChanged {
+            merchant: address(&env),
+            plan_id: 7,
+            paused: true,
+        },
+    );
+}
+
+#[test]
+fn plan_grace_period_set_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_grace_period_set",
+        super::PlanGracePeriodSet::spec_xdr(),
+        &super::PlanGracePeriodSet {
+            merchant: address(&env),
+            plan_id: 7,
+            grace_period_secs: 172_800,
+        },
+    );
+}
+
+#[test]
 fn profile_updated_layout() {
     let env = Env::default();
     snapshot(

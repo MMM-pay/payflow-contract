@@ -492,6 +492,225 @@ fn set_plan_active_rejects_non_owner() {
 }
 
 #[test]
+fn set_plan_charges_paused_toggles_without_deactivating() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    assert!(!client.plan_charges_paused(&id));
+    assert!(!client.plan_paused(&id));
+
+    client.set_plan_charges_paused(&merchant, &id, &true);
+    assert!(client.plan_charges_paused(&id));
+    // Pausing charges is not deactivation: the plan still accepts sign-ups.
+    assert!(client.get_plan(&id).active);
+
+    // The short alias controls the same flag.
+    client.set_plan_paused(&merchant, &id, &false);
+    assert!(!client.plan_charges_paused(&id));
+    assert!(client.get_plan(&id).active);
+}
+
+#[test]
+fn set_plan_charges_paused_rejects_a_non_owner_and_missing_plan() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    let attacker = Address::generate(&env);
+    assert_eq!(
+        client.try_set_plan_charges_paused(&attacker, &id, &true),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    assert_eq!(
+        client.try_set_plan_charges_paused(&merchant, &42, &true),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        client.try_plan_charges_paused(&42),
+        Err(Ok(Error::PlanNotFound))
+    );
+}
+
+#[test]
+fn set_plan_charges_paused_emits_the_change() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    client.set_plan_charges_paused(&merchant, &id, &true);
+    assert_eq!(env.events().all().events().len(), 1);
+    let last = env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_charges_paused_changed".try_into().unwrap();
+    assert_eq!(name, &expected);
+}
+
+#[test]
+fn set_plan_grace_period_is_frozen_into_new_plans_and_stored() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    assert_eq!(client.get_plan(&id).grace_period_secs, 0);
+    client.set_plan_grace_period(&merchant, &id, &172_800);
+    assert_eq!(client.get_plan(&id).grace_period_secs, 172_800);
+
+    let attacker = Address::generate(&env);
+    assert_eq!(
+        client.try_set_plan_grace_period(&attacker, &id, &1),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    assert_eq!(
+        client.try_set_plan_grace_period(&merchant, &42, &1),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(client.get_plan(&id).grace_period_secs, 172_800);
+}
+
+#[test]
+fn set_plan_charges_paused_requires_the_merchants_auth() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    env.set_auths(&[]);
+    assert!(client
+        .try_set_plan_charges_paused(&merchant, &id, &true)
+        .is_err());
+    assert!(!client.get_plan(&id).charges_paused);
+}
+
+#[test]
+fn set_plan_paused_requires_the_merchants_auth() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    env.set_auths(&[]);
+    assert!(client.try_set_plan_paused(&merchant, &id, &true).is_err());
+    assert!(!client.get_plan(&id).charges_paused);
+}
+
+#[test]
+fn set_plan_grace_period_requires_the_merchants_auth() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    env.set_auths(&[]);
+    assert!(client
+        .try_set_plan_grace_period(&merchant, &id, &1_000)
+        .is_err());
+    assert_eq!(client.get_plan(&id).grace_period_secs, 0);
+}
+
+#[test]
 fn merchant_plans_empty_for_unknown_merchant() {
     let (env, client, _admin) = setup();
     let stranger = Address::generate(&env);

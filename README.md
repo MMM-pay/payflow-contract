@@ -103,6 +103,15 @@ subscriber pays.
   current period that is still ahead, prorated and rounded in the subscriber's
   favour; a cheaper plan takes effect at the next charge and never refunds
   anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+- A merchant can pause charging for one plan without ending its mandates or
+  closing it to new subscribers. Pausing only blocks settlement; resuming
+  restores the same mandates.
+- A plan's grace window is copied into each mandate at sign-up.
+  `is_in_grace_period` lets a wallet warn the subscriber between the due time
+  and the end of that window. The view never changes or cancels the mandate.
+- Vault deposits and withdrawals are limited to 8 operations per `(user,
+  token)` in each 60-second window. Charges are not affected, and the window
+  resets on a fixed epoch-aligned boundary.
 
 ## Design notes
 
@@ -262,6 +271,8 @@ contracts/
   plan-registry/   merchant plan catalogue
   vault/           subscriber custody
   subscription/    mandates, scheduling, fee split
+  test-token/      test-only SEP-41 fixture (never deploy as a real asset)
+  shared/          types shared across contract boundaries
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test
@@ -274,6 +285,10 @@ deployments/
 Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
 (storage types), `error.rs` (`contracterror`), `events.rs` (`contractevent`),
 `test.rs`.
+
+The extra `contracts/test-token` crate is not part of the deployed suite: it is
+a test-only token fixture with minting and failure injection, documented in
+[`docs/test-token.md`](docs/test-token.md). Never deploy it as a real asset.
 
 ## Related repositories
 

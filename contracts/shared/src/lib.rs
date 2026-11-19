@@ -102,6 +102,16 @@ mod plan {
         /// Maximum number of simultaneously-open mandates the plan accepts; 0
         /// means unlimited. Frozen into the plan, checked on each new sign-up.
         pub max_subscribers: u32,
+        /// Whether the merchant has paused charging for this plan (#315).
+        /// Paused plans still accept new subscriptions and their mandates stay
+        /// open, but `charge` and `flag_failed_charge` refuse to settle them
+        /// until the merchant resumes. Defaults to `false`.
+        pub charges_paused: bool,
+        /// Grace window in seconds after a charge falls due before a mandate is
+        /// considered at risk of lapsing (#312). Frozen into each mandate at
+        /// sign-up so a later plan edit cannot shorten a subscriber's warning
+        /// period. `0` disables the grace view.
+        pub grace_period_secs: u64,
     }
 }
 pub use plan::Plan;

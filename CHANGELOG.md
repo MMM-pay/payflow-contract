@@ -9,6 +9,38 @@ change the contract interface.
 
 ### Added
 
+- **#315: plan-wide charge pause (plan-registry, subscription).** New
+  merchant-only `plan-registry:set_plan_charges_paused(merchant, plan_id,
+  paused)` (alias `set_plan_paused`) pauses charging for every mandate against
+  one plan without deactivating it. New view `plan_charges_paused(plan_id)`
+  (alias `plan_paused`) and `PlanChargesPausedChanged` event. `subscription`
+  now reads the plan before settlement: `charge`, `flag_failed_charge` and
+  `upgrade` into the paused plan return `PlanChargesPaused=36`, while `is_due`
+  and `quote_charge.chargeable` report false. Existing mandates stay open and
+  new subscriptions are still accepted. `due_mandates` remains a local
+  schedule scan, so callers should use `is_due` for the final plan-pause gate.
+
+- **#312: mandate grace-period view (plan-registry, subscription).** Plans gain
+  `grace_period_secs` (default `0`) and a merchant-only
+  `set_plan_grace_period(merchant, plan_id, seconds)` setter with a
+  `PlanGracePeriodSet` event. The window is frozen into `Mandate` at sign-up;
+  new `subscription:is_in_grace_period(mandate_id)` reports whether an active
+  mandate is past due but still inside that window. The view is read-only, has
+  an exclusive end at `next_charge + grace_period_secs`, and does not cancel
+  or otherwise move the mandate.
+
+- **#311: test-token documentation.** New [`docs/test-token.md`](docs/test-token.md)
+  explains that `contracts/test-token` is a SAC-like fixture for tests, lists
+  its minting and failure-injection controls, and states that it must never be
+  deployed as a real asset. The test-token crate and README now link to it.
+
+- **#314: vault operation rate limit.** Vault `deposit`, `deposit_for`,
+  `withdraw` and `withdraw_all` now share a fixed, epoch-aligned 60-second
+  window per `(user, token)` with at most 8 operations. Exceeding it fails with
+  the new `RateLimitExceeded=15` before any balance changes or tokens move.
+  This bounds rapid deposit/withdraw cycling that repeatedly rewrites the
+  balance entry and emits events. The window rolls over deterministically.
+
 - **#295: optional per-mandate reserved balance (vault).** A subscriber can
   earmark part of a token balance for one mandate with
   `vault:set_reserve(user, token, mandate_id, amount)` (`0` releases it).
@@ -32,6 +64,13 @@ change the contract interface.
   error `ChargeWouldSucceed=35`.
 
 ### Changed
+
+- **Breaking (#312, #315): `Plan` and `Mandate` layouts changed.** `Plan` gains
+  `charges_paused` and `grace_period_secs`; `Mandate` gains a trailing
+  `grace_period_secs`. Stored values and the `MandateUpdated` snapshot event
+  change shape, so the testnet suite and bindings must be redeployed and
+  regenerated together. Existing plans and mandates written by older code must
+  be migrated or recreated.
 
 - **Breaking (#158): plan subscriber caps, `set_max_charges`, admin-gated
   upgrades.** `Plan` and `PlanCreated` gain `max_subscribers` (0 = unlimited);

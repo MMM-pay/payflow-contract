@@ -15,11 +15,14 @@
 //! | `create_plan` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
 //! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_plan_grace_period` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_successor` | 0 | 0 | 2 (Plan ×2) | 1 (Plan) | Extends persistent TTL |
 //! | `set_profile` | 0 | 0 | 0 | 1 (Profile) | Extends persistent TTL |
 //! | `profile` | 0 | 0 | 1 (Profile) | 0 | |
 //! | `deactivate_page` | 0 | 0 | ≤100 (index slots + Plans) | ≤50 (Plans) | Page size ≤50, extends persistent TTLs |
 //! | `get_plan` | 0 | 0 | 1 (Plan) | 0 | |
+//! | `plan_charges_paused` | 0 | 0 | 1 (Plan) | 0 | |
 //! | `merchant_plan_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
 //! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
@@ -52,8 +55,9 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, PlanCreated, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged,
-    PlanSuccessorSet, PlanTransferred, ProfileUpdated,
+    ContractUpgraded, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet,
+    PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
+    ProfileUpdated,
 };
 pub use types::{DataKey, Plan, Profile};
 
@@ -221,6 +225,8 @@ mod contract {
                 terms_uri: terms_uri.clone(),
                 available_until,
                 max_subscribers,
+                charges_paused: false,
+                grace_period_secs: 0,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -379,6 +385,135 @@ mod contract {
             .publish(&env);
 
             Ok(())
+        }
+
+        /// Pause or resume charging for every mandate against one plan (#315).
+        ///
+        /// Pausing does not deactivate the plan: it keeps accepting new
+        /// subscribers, and its open mandates are not cancelled or moved. Both
+        /// `charge` and `flag_failed_charge` reject a mandate whose plan is
+        /// paused, so no charge settles until the merchant resumes. This lets a
+        /// merchant stop billing during a dispute without forcing subscribers
+        /// to re-subscribe afterwards.
+        ///
+        /// # Auth
+        /// Requires authorization from the plan's merchant.
+        ///
+        /// # Events
+        /// Emits [`PlanChargesPausedChanged`].
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist, or
+        /// [`Error::NotPlanOwner`] if `merchant` does not own it.
+        pub fn set_plan_charges_paused(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            paused: bool,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+
+            let key = DataKey::Plan(plan_id);
+            let mut plan: Plan = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(Error::PlanNotFound)?;
+
+            if plan.merchant != merchant {
+                return Err(Error::NotPlanOwner);
+            }
+
+            plan.charges_paused = paused;
+            env.storage().persistent().set(&key, &plan);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanChargesPausedChanged {
+                merchant,
+                plan_id,
+                paused,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
+        /// Alias for [`PlanRegistry::set_plan_charges_paused`].
+        pub fn set_plan_paused(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            paused: bool,
+        ) -> Result<(), Error> {
+            Self::set_plan_charges_paused(env, merchant, plan_id, paused)
+        }
+
+        /// Set a plan's grace window in seconds (#312). The window is copied
+        /// into each new mandate at sign-up, so a later change affects only
+        /// subscriptions opened after it. `0` disables the grace view.
+        ///
+        /// The window is only a warning period: subscription's
+        /// `is_in_grace_period` reports a mandate as recoverable between its
+        /// due time and the end of the frozen window. It does not cancel or
+        /// otherwise change the mandate.
+        ///
+        /// # Auth
+        /// Requires authorization from the plan's merchant.
+        ///
+        /// # Events
+        /// Emits [`PlanGracePeriodSet`].
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist, or
+        /// [`Error::NotPlanOwner`] if `merchant` does not own it.
+        pub fn set_plan_grace_period(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            grace_period_secs: u64,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+
+            let key = DataKey::Plan(plan_id);
+            let mut plan: Plan = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(Error::PlanNotFound)?;
+
+            if plan.merchant != merchant {
+                return Err(Error::NotPlanOwner);
+            }
+
+            plan.grace_period_secs = grace_period_secs;
+            env.storage().persistent().set(&key, &plan);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanGracePeriodSet {
+                merchant,
+                plan_id,
+                grace_period_secs,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
+        /// Whether charging is paused for `plan_id` (#315).
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist.
+        pub fn plan_charges_paused(env: Env, plan_id: u64) -> Result<bool, Error> {
+            Ok(Self::get_plan(env, plan_id)?.charges_paused)
+        }
+
+        /// Alias for [`PlanRegistry::plan_charges_paused`].
+        pub fn plan_paused(env: Env, plan_id: u64) -> Result<bool, Error> {
+            Self::plan_charges_paused(env, plan_id)
         }
 
         /// Point a plan at the plan that replaces it, if any.

@@ -4853,6 +4853,235 @@ fn upgrade_wasm_wrong_signer_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Plan-wide charge pause (#315).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paused_plan_blocks_charges_until_resumed() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+
+    // The mandate stays open, but nothing may settle it while the plan is
+    // paused: neither charge nor the failure flag.
+    assert!(!w.sub.is_due(&id));
+    assert!(!w.sub.quote_charge(&id).chargeable);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&id),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+    // `due_mandates` is a local schedule scan and still lists the candidate;
+    // `is_due` is the view that knows about the plan-wide pause.
+    assert_eq!(
+        w.sub.due_mandates(&w.merchant, &0, &10),
+        soroban_sdk::vec![&w.env, id]
+    );
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+    assert_eq!(w.vault.balance(&user, &w.token), PRICE);
+
+    // Resuming makes the same mandate chargeable again.
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &false);
+    assert!(w.sub.is_due(&id));
+    assert!(w.sub.quote_charge(&id).chargeable);
+    assert_eq!(
+        w.sub.due_mandates(&w.merchant, &0, &10),
+        soroban_sdk::vec![&w.env, id]
+    );
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn pausing_one_plan_leaves_other_plans_chargeable() {
+    let w = world();
+    let paused_plan = w.plan();
+    let running_plan = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let paused = w
+        .sub
+        .subscribe(&user, &paused_plan, &0, &0, &None::<Address>);
+    let running = w
+        .sub
+        .subscribe(&user, &running_plan, &0, &0, &None::<Address>);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &paused_plan, &true);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &paused),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+    w.sub.charge(&w.keeper, &running);
+    assert_eq!(w.sub.get_mandate(&running).charges_made, 1);
+    assert_eq!(w.sub.get_mandate(&paused).charges_made, 0);
+}
+
+#[test]
+fn pausing_a_plan_does_not_block_new_subscriptions() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+
+    // Pausing charges is not deactivation: a subscriber can still sign up, and
+    // the new mandate waits for the merchant to resume.
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &false);
+    w.sub.charge(&w.keeper, &id);
+}
+
+#[test]
+fn upgrading_into_a_paused_plan_is_rejected() {
+    let w = world();
+    let old_plan = w.plan_priced(PRICE);
+    let new_plan = w.plan_priced(PRICE * 2);
+    let user = w.subscriber(PRICE * 3);
+    let id = w.sub.subscribe(&user, &old_plan, &0, &0, &None::<Address>);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &new_plan, &true);
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &new_plan),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+    assert_eq!(w.sub.get_mandate(&id).plan_id, old_plan);
+}
+
+#[test]
+fn plan_pause_only_affects_the_plan_it_names() {
+    let w = world();
+    let plan_a = w.plan();
+    let plan_b = w.plan();
+    assert!(!w.registry.plan_charges_paused(&plan_a));
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_a, &true);
+    assert!(w.registry.plan_charges_paused(&plan_a));
+    assert!(!w.registry.plan_charges_paused(&plan_b));
+}
+
+// ---------------------------------------------------------------------------
+// Grace-period state (#312).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn grace_view_uses_the_window_frozen_at_subscribe_time() {
+    let w = world();
+    let plan_id = w.plan();
+
+    // Existing mandates keep the zero window they were opened with even if
+    // the merchant later configures one.
+    let before = w
+        .sub
+        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let after = w
+        .sub
+        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(w.sub.get_mandate(&before).grace_period_secs, 0);
+    assert_eq!(w.sub.get_mandate(&after).grace_period_secs, 3_600);
+    assert!(!w.sub.is_in_grace_period(&before));
+    assert!(w.sub.is_in_grace_period(&after));
+}
+
+#[test]
+fn grace_view_starts_at_the_due_time_and_expires_at_the_boundary() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let id = w
+        .sub
+        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+    let due = w.sub.get_mandate(&id).next_charge;
+
+    // Due now: the window has just opened.
+    assert!(w.sub.is_in_grace_period(&id));
+
+    // One second before the advertised end is still grace.
+    w.env.ledger().set_timestamp(due + 3_599);
+    assert!(w.sub.is_in_grace_period(&id));
+
+    // The end is exclusive.
+    w.env.ledger().set_timestamp(due + 3_600);
+    assert!(!w.sub.is_in_grace_period(&id));
+}
+
+#[test]
+fn successful_charges_leave_the_grace_view_false() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.charge(&w.keeper, &id);
+    assert!(!w.sub.is_in_grace_period(&id));
+}
+
+#[test]
+fn cancelled_and_paused_mandates_are_not_in_grace() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let user = Address::generate(&w.env);
+    let other = Address::generate(&w.env);
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paused = w.sub.subscribe(&other, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.cancel(&user, &cancelled);
+    w.sub.set_paused(&other, &paused, &true);
+    assert!(!w.sub.is_in_grace_period(&cancelled));
+    assert!(!w.sub.is_in_grace_period(&paused));
+}
+
+#[test]
+fn grace_view_rejects_an_unknown_mandate() {
+    let w = world();
+    assert_eq!(
+        w.sub.try_is_in_grace_period(&42),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn grace_view_is_a_pure_read() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let id = w
+        .sub
+        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+    let before = w.sub.get_mandate(&id);
+
+    assert!(w.sub.is_in_grace_period(&id));
+
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert!(w.env.events().all().events().is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // Merchant notification on the first failed charge (#296).
 // ---------------------------------------------------------------------------
 

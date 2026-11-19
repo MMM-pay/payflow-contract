@@ -88,6 +88,22 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ## Externally visible behaviour changes
 
+### Vault bounds deposit/withdraw cycling (#314)
+
+`vault:deposit`, `deposit_for`, `withdraw` and `withdraw_all` now share a
+fixed 60-second window per `(user, token)`. At most 8 operations are accepted
+inside one window; a ninth fails with `RateLimitExceeded` before any balance is
+written or any token moves. Windows are aligned to the Unix epoch and reset
+deterministically, so a caller cannot keep extending one. The limit is per user
+and token: other users, and the same user's other tokens, are unaffected.
+`debit` and the mandate-aware debit paths used by charges are not counted, so
+billing is unaffected.
+
+This is a hardening change: an address that cycled tiny deposits and
+withdrawals could otherwise rewrite the balance entry and emit events
+indefinitely. Normal subscribers can still deposit and withdraw several times
+a minute. A wallet that hits the limit should wait for the next window.
+
 ### Refund cap now accounts for referral fees and keeper tips (PR #301)
 
 Previously, the refund cap (`merchant_received`) only subtracted the protocol fee

@@ -20,10 +20,10 @@
 //! | `set_allowlist_enabled` | 1 (Admin) | 1 (AllowlistEnabled) | 0 | 0 | Admin only, extends instance TTL |
 //! | `set_token_allowed` | 1 (Admin) | 0 | 0 | 1 (TokenAllowed) | Admin only, extends persistent TTL |
 //! | `set_deposit_cap` | 1 (Admin) | 0 | 0 | 1 (DepositCap) | Admin only, extends persistent TTL |
-//! | `deposit` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
-//! | `deposit_for` | 0 | 0 | 2 (Balance, DepositCap) | 1 (Balance) | Extends persistent TTL; token transfer |
-//! | `withdraw` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
-//! | `withdraw_all` | 0 | 0 | 1 (Balance) | 1 (Balance) | Extends persistent TTL; token transfer |
+//! | `deposit` | 0 | 0 | 3 (Balance, DepositCap, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
+//! | `deposit_for` | 0 | 0 | 3 (Balance, DepositCap, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
+//! | `withdraw` | 0 | 0 | 2 (Balance, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
+//! | `withdraw_all` | 0 | 0 | 2 (Balance, OperationWindow) | 2 (Balance, OperationWindow) | Extends persistent TTLs; token transfer |
 //! | `debit` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `debit_split` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `balance` | 0 | 0 | 1 (Balance) | 0 | |
@@ -61,7 +61,7 @@ pub use error::Error;
 pub use events::{
     ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw,
 };
-pub use types::{DataKey, SpendLimit, SpendWindow};
+pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
@@ -72,6 +72,19 @@ const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
 const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
 const PERSIST_BUMP: u32 = 90 * DAY_IN_LEDGERS;
 const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
+
+/// Length of the fixed window that bounds repeated deposit/withdraw cycling
+/// (#314). Windows are aligned to the Unix epoch, so every caller sees the
+/// same boundaries and a fresh window cannot be opened by waiting less than
+/// this long.
+pub const VAULT_OPERATION_WINDOW_SECS: u64 = 60;
+
+/// Maximum deposit, deposit_for, withdraw and withdraw_all calls one
+/// (user, token) pair may make in a single operation window (#314). The limit
+/// is deliberately generous for normal use: a subscriber can deposit and
+/// withdraw several times a minute, but cannot loop the pair indefinitely to
+/// rewrite the balance entry and spam events.
+pub const MAX_VAULT_OPERATIONS_PER_WINDOW: u32 = 8;
 
 #[allow(missing_docs)]
 mod contract {
@@ -239,8 +252,11 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`, [`Error::TokenNotAllowed`]
-        /// if the allowlist is enabled and `token` is not allowed, or
-        /// [`Error::DepositCapExceeded`] if the deposit would exceed the subscriber's cap.
+        /// if the allowlist is enabled and `token` is not allowed,
+        /// [`Error::DepositCapExceeded`] if the deposit would exceed the
+        /// subscriber's cap, or [`Error::RateLimitExceeded`] if the
+        /// (user, token) pair has used its deposit/withdraw budget for this
+        /// window (#314).
         pub fn deposit(env: Env, user: Address, token: Address, amount: i128) -> Result<(), Error> {
             user.require_auth();
             if amount <= 0 {
@@ -263,6 +279,8 @@ mod contract {
                 return Err(Error::DepositCapExceeded);
             }
 
+            Self::record_operation(&env, &user, &token)?;
+
             let vault = env.current_contract_address();
             token::TokenClient::new(&env, &token).transfer(&user, &vault, &amount);
 
@@ -282,10 +300,10 @@ mod contract {
         /// `from` — third-party funding (merged from #136). `from` authorizes
         /// and pays; `user` receives the spendable balance.
         ///
-        /// Applies the same allowlist and deposit-cap checks as `deposit`, so
-        /// funding on someone's behalf cannot bypass either. (#136 predated both
-        /// features; enforcing them here keeps third-party funding consistent
-        /// with a direct deposit.)
+        /// Applies the same allowlist, deposit-cap and per-window operation
+        /// checks as `deposit`, so funding on someone's behalf cannot bypass
+        /// them. (#136 predated those features; enforcing them here keeps
+        /// third-party funding consistent with a direct deposit.)
         pub fn deposit_for(
             env: Env,
             from: Address,
@@ -307,6 +325,8 @@ mod contract {
             if cap > 0 && new_balance > cap {
                 return Err(Error::DepositCapExceeded);
             }
+
+            Self::record_operation(&env, &user, &token)?;
 
             let vault = env.current_contract_address();
             token::TokenClient::new(&env, &token).transfer(&from, &vault, &amount);
@@ -339,9 +359,11 @@ mod contract {
         /// Emits [`Withdraw`].
         ///
         /// # Errors
-        /// Returns [`Error::InvalidAmount`] if `amount <= 0`, or
+        /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance.
+        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// (user, token) pair has used its deposit/withdraw budget for this
+        /// window (#314).
         pub fn withdraw(
             env: Env,
             user: Address,
@@ -358,6 +380,8 @@ mod contract {
             if balance - reserved < amount {
                 return Err(Error::InsufficientBalance);
             }
+
+            Self::record_operation(&env, &user, &token)?;
 
             let new_balance = balance - amount;
             Self::write_balance(&env, &user, &token, new_balance);
@@ -396,7 +420,9 @@ mod contract {
         ///
         /// # Errors
         /// Never fails on the balance itself: an empty balance returns `0`
-        /// without a token transfer.
+        /// without a token transfer. Returns [`Error::RateLimitExceeded`] if the
+        /// (user, token) pair has used its deposit/withdraw budget for this
+        /// window (#314).
         pub fn withdraw_all(env: Env, user: Address, token: Address) -> Result<i128, Error> {
             user.require_auth();
 
@@ -407,6 +433,8 @@ mod contract {
                 // Nothing to move: no transfer, no event, no state change.
                 return Ok(0);
             }
+
+            Self::record_operation(&env, &user, &token)?;
 
             Self::write_balance(&env, &user, &token, reserved);
 
@@ -1071,6 +1099,33 @@ mod contract {
                 start,
                 spent: spent + amount,
             }))
+        }
+
+        /// Charge one deposit/withdraw operation against `(user, token)`'s
+        /// current fixed window (#314), failing before any balance is written
+        /// when the budget is exhausted. The window is epoch-aligned and rolls
+        /// over deterministically, so cycling cannot keep extending it.
+        fn record_operation(env: &Env, user: &Address, token: &Address) -> Result<(), Error> {
+            let now = env.ledger().timestamp();
+            let start = now - (now % VAULT_OPERATION_WINDOW_SECS);
+            let key = DataKey::OperationWindow(user.clone(), token.clone());
+            let p = env.storage().persistent();
+            let operations = match p.get::<_, OperationWindow>(&key) {
+                Some(window) if window.start == start => window.operations,
+                _ => 0,
+            };
+            if operations >= MAX_VAULT_OPERATIONS_PER_WINDOW {
+                return Err(Error::RateLimitExceeded);
+            }
+            p.set(
+                &key,
+                &OperationWindow {
+                    start,
+                    operations: operations + 1,
+                },
+            );
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Ok(())
         }
 
         fn read_balance(env: &Env, user: &Address, token: &Address) -> i128 {

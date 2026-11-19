@@ -2,6 +2,12 @@
 //!
 //! Provides a configurable token contract with minting and failure injection
 //! to verify contract behavior under error conditions.
+//!
+//! This is a test fixture, not a production asset. It is excluded from the
+//! deploy script, release artifacts and TypeScript bindings. Its admin can
+//! mint without limit and force transfers to fail, so it must never be
+//! deployed as a real token. See `docs/test-token.md` for its full intended
+//! use and limitations.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -60,9 +66,11 @@ mod contract {
 
     /// A test-only token contract that can be configured to fail transfers.
     ///
-    /// Implements the subset of the SEP-41 token interface used by Payflow contracts
-    /// (`transfer`, `balance`, `decimals`, `name`, `symbol`), plus minting and failure injection
-    /// toggles for testing behaviour with misbehaving tokens.
+    /// Implements the subset of the SEP-41 token interface used by Payflow
+    /// contracts (`transfer`, `balance`, `decimals`, `name`, `symbol`), plus
+    /// minting and failure injection toggles for testing behaviour with
+    /// misbehaving tokens. It is never deployed by the protocol and must never
+    /// be used to hold real funds; see `docs/test-token.md`.
     #[contract]
     pub struct TestToken;
 
