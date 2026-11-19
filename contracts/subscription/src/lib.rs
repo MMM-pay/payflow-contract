@@ -74,9 +74,9 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged, MandateCompleted,
-    MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Refunded,
-    SeatsChanged, Subscribed, Upgraded,
+    Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged,
+    MandateCompleted, MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged,
+    PauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, MandateSummary, Plan};
@@ -557,9 +557,14 @@ mod contract {
             // a later payout change or a plan-ownership transfer never redirects
             // an open mandate's funds. Every leg is debited from the subscriber,
             // so each counts against any vault spend limit on its own.
-            vault.debit_split(
+            //
+            // Every leg goes through the mandate-aware debits, so a reserve the
+            // subscriber earmarked for this mandate (#295) pays for it first,
+            // and no other mandate's reserve is ever touched.
+            vault.debit_split_mandate(
                 &mandate.subscriber,
                 &mandate.token,
+                &mandate_id,
                 &mandate.payout,
                 &merchant_amount,
                 &fee_to,
@@ -567,7 +572,13 @@ mod contract {
             );
 
             if tip > 0 {
-                vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
+                vault.debit_mandate(
+                    &mandate.subscriber,
+                    &mandate.token,
+                    &mandate_id,
+                    &keeper,
+                    &tip,
+                );
             }
 
             // Referral is a share of the merchant's own money paid to the
@@ -576,7 +587,13 @@ mod contract {
             // below always binds.
             if referral > 0 {
                 if let Some(referrer) = &mandate.referrer {
-                    vault.debit(&mandate.subscriber, &mandate.token, referrer, &referral);
+                    vault.debit_mandate(
+                        &mandate.subscriber,
+                        &mandate.token,
+                        &mandate_id,
+                        referrer,
+                        &referral,
+                    );
                 }
             }
 
@@ -600,6 +617,9 @@ mod contract {
             }
 
             Self::write_mandate(&env, &mandate);
+            // A settled charge ends any run of failures (#296), so the next
+            // failure notifies the merchant again.
+            Self::clear_failed_charge(&env, mandate_id);
 
             MandateUpdated {
                 mandate_id,
@@ -641,6 +661,112 @@ mod contract {
                 next_charge,
                 completed,
             })
+        }
+
+        /// Record that a due charge fails, and notify the merchant the first
+        /// time it does (#296).
+        ///
+        /// A failed `charge` is rolled back together with any event it would
+        /// emit, so a keeper whose charge fails calls this instead. It proves
+        /// the failure on chain before recording anything: the mandate must be
+        /// due exactly as `charge` requires, and the vault must be unable to
+        /// cover the charge right now (balance, this mandate's reserve and the
+        /// subscriber's spend limit all considered). A flag can therefore
+        /// never be raised against a mandate that would have paid.
+        ///
+        /// The first flag in a run of failures stores the timestamp and emits
+        /// [`ChargeFailed`] with the merchant as a topic, so off-chain dunning
+        /// can react promptly. Further flags return `false` and emit nothing,
+        /// so retries cannot spam the merchant. The next successful `charge`
+        /// ends the run; the failure after that notifies again.
+        ///
+        /// Permissionless, like `charge`: it moves no money and only records
+        /// a fact anyone can check.
+        ///
+        /// # Auth
+        /// None.
+        ///
+        /// # Events
+        /// Emits [`ChargeFailed`] on the first flag of a run of failures, and
+        /// nothing otherwise.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::MandateNotActive`] if it is not active,
+        /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
+        /// [`Error::MaxChargesReached`] if it reached a cap,
+        /// [`Error::ChargeWouldSucceed`] if the vault covers the charge, or
+        /// [`Error::AmountOverflow`] if math overflows.
+        pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+
+            // The same gates `charge` applies, in the same order, so a mandate
+            // that `charge` would reject for timing, status or caps is
+            // rejected here for the same reason, not flagged as unpaid.
+            let now = env.ledger().timestamp();
+            if !Self::active_at(&mandate, now) {
+                return Err(Error::MandateNotActive);
+            }
+            if now < mandate.next_charge {
+                return Err(Error::NotDue);
+            }
+            if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
+                return Err(Error::MaxChargesReached);
+            }
+            let next_total = mandate
+                .total_spent
+                .checked_add(mandate.amount)
+                .ok_or(Error::AmountOverflow)?;
+            if mandate.max_total != 0 && next_total > mandate.max_total {
+                return Err(Error::MaxChargesReached);
+            }
+
+            // The subscriber is debited exactly `amount` across all legs, so
+            // one check for the full price covers merchant, fee, tip and
+            // referral together.
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            if VaultClient::new(&env, &vault_addr).can_debit(
+                &mandate.subscriber,
+                &mandate.token,
+                &mandate_id,
+                &mandate.amount,
+            ) {
+                return Err(Error::ChargeWouldSucceed);
+            }
+
+            let key = DataKey::FirstFailedCharge(mandate_id);
+            if env.storage().persistent().has(&key) {
+                // Already notified for this run of failures.
+                return Ok(false);
+            }
+            env.storage().persistent().set(&key, &now);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            ChargeFailed {
+                mandate_id,
+                merchant: mandate.merchant,
+                subscriber: mandate.subscriber,
+                plan_id: mandate.plan_id,
+                token: mandate.token,
+                amount: mandate.amount,
+                due_at: mandate.next_charge,
+                failed_at: now,
+                charges_made: mandate.charges_made,
+            }
+            .publish(&env);
+
+            Ok(true)
+        }
+
+        /// When the mandate's current run of failed charges was first flagged
+        /// by `flag_failed_charge`, or `None` if its last charge attempt has
+        /// not been flagged as failed (#296).
+        pub fn first_failed_charge(env: Env, mandate_id: u64) -> Option<u64> {
+            env.storage()
+                .persistent()
+                .get(&DataKey::FirstFailedCharge(mandate_id))
         }
 
         /// Move a mandate onto a different plan.
@@ -760,10 +886,12 @@ mod contract {
                 let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
                 let vault = VaultClient::new(&env, &vault_addr);
                 // The prorated difference is settled the same way a charge is:
-                // merchant share and protocol fee from one debit.
-                vault.debit_split(
+                // merchant share and protocol fee from one debit, drawing on
+                // this mandate's reserve (#295) first.
+                vault.debit_split_mandate(
                     &subscriber,
                     &mandate.token,
+                    &mandate_id,
                     &mandate.merchant,
                     &merchant_gross,
                     &fee_to,
@@ -2001,6 +2129,14 @@ mod contract {
             storage.set(&count_key, &new_len);
             storage.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
             Ok(())
+        }
+
+        /// End a mandate's run of failed charges (#296). Removing an absent
+        /// key is a no-op, so this is safe on every settled charge.
+        fn clear_failed_charge(env: &Env, mandate_id: u64) {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::FirstFailedCharge(mandate_id));
         }
 
         fn write_pending_owner(env: &Env, mandate_id: u64, owner: &Address) {

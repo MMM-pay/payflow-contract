@@ -210,3 +210,24 @@ fn refunded_layout() {
         },
     );
 }
+#[test]
+fn charge_failed_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "charge_failed",
+        super::ChargeFailed::spec_xdr(),
+        &super::ChargeFailed {
+            mandate_id: 11,
+            merchant: a.clone(),
+            subscriber: a.clone(),
+            plan_id: 3,
+            token: a,
+            amount: 4_000,
+            due_at: 1_700_000_000,
+            failed_at: 1_700_003_600,
+            charges_made: 2,
+        },
+    );
+}

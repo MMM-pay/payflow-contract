@@ -93,4 +93,8 @@ pub enum Error {
     /// A new subscription was rejected because the plan is at its
     /// `max_subscribers` seat cap.
     PlanFull = 34,
+    /// `flag_failed_charge` was called for a due mandate whose charge would
+    /// succeed right now: the subscriber's vault covers it. Only a charge
+    /// that would really fail can be flagged (#296).
+    ChargeWouldSucceed = 35,
 }

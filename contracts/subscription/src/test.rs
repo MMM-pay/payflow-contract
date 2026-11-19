@@ -4851,3 +4851,541 @@ fn upgrade_wasm_wrong_signer_rejected() {
     // Configuration is untouched by the rejected upgrades.
     assert_eq!(w.sub.fee_bps(), FEE_BPS);
 }
+
+// ---------------------------------------------------------------------------
+// Merchant notification on the first failed charge (#296).
+// ---------------------------------------------------------------------------
+
+/// The `charge_failed` events emitted by the most recent invocation.
+fn charge_failed_events(env: &Env) -> std::vec::Vec<soroban_sdk::xdr::ContractEvent> {
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|event| {
+            let ContractEventBody::V0(body) = &event.body;
+            matches!(
+                body.topics.first(),
+                Some(ScVal::Symbol(ScSymbol(name))) if name.to_utf8_string_lossy() == "charge_failed"
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// A subscriber whose vault covers exactly one charge, with that first charge
+/// already settled, and the clock moved to when the second one falls due.
+fn lapsed_mandate(w: &World) -> (Address, u64) {
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    (user, id)
+}
+
+#[test]
+fn flagging_a_failed_charge_notifies_the_merchant_once() {
+    let w = world();
+    let (user, id) = lapsed_mandate(&w);
+    let due_at = w.sub.get_mandate(&id).next_charge;
+    let now = w.env.ledger().timestamp();
+
+    // The keeper's charge fails and rolls back...
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert_eq!(w.sub.first_failed_charge(&id), None);
+
+    // ...so it flags the failure instead.
+    assert!(w.sub.flag_failed_charge(&id));
+    let events = charge_failed_events(&w.env);
+    assert_eq!(events.len(), 1);
+
+    let ContractEventBody::V0(body) = &events[0].body;
+    // Topics: name, mandate_id, merchant, subscriber. The merchant topic is
+    // what a dunning service filters on.
+    assert_eq!(body.topics.len(), 4);
+    assert_eq!(body.topics[1], ScVal::U64(id));
+    assert_eq!(
+        Address::try_from_val(&w.env, &body.topics[2]).unwrap(),
+        w.merchant
+    );
+    assert_eq!(
+        Address::try_from_val(&w.env, &body.topics[3]).unwrap(),
+        user
+    );
+    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(PRICE));
+    assert_eq!(last_event_field_u64(&w.env, "due_at"), Some(due_at));
+    assert_eq!(last_event_field_u64(&w.env, "failed_at"), Some(now));
+    assert_eq!(event_field_u32(&w.env, "charges_made"), Some(1));
+    assert_eq!(
+        event_field_address(&w.env, "charge_failed", "token"),
+        Some(w.token.clone())
+    );
+
+    assert_eq!(w.sub.first_failed_charge(&id), Some(now));
+}
+
+#[test]
+fn repeated_flags_in_one_run_of_failures_emit_nothing() {
+    let w = world();
+    let (_user, id) = lapsed_mandate(&w);
+    let first = w.env.ledger().timestamp();
+
+    assert!(w.sub.flag_failed_charge(&id));
+
+    w.advance(3_600);
+    assert!(!w.sub.flag_failed_charge(&id));
+    assert!(charge_failed_events(&w.env).is_empty());
+
+    w.advance(86_400);
+    assert!(!w.sub.flag_failed_charge(&id));
+    assert!(charge_failed_events(&w.env).is_empty());
+
+    // The recorded time is the first failure, not the latest retry.
+    assert_eq!(w.sub.first_failed_charge(&id), Some(first));
+}
+
+#[test]
+fn a_successful_charge_ends_the_run_and_the_next_failure_notifies_again() {
+    let w = world();
+    let (user, id) = lapsed_mandate(&w);
+    assert!(w.sub.flag_failed_charge(&id));
+
+    // The subscriber tops up; the retry settles and clears the flag.
+    w.vault.deposit(&user, &w.token, &PRICE);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.first_failed_charge(&id), None);
+
+    // Next period the vault is empty again: a fresh notification.
+    w.advance(MONTH);
+    let now = w.env.ledger().timestamp();
+    assert!(w.sub.flag_failed_charge(&id));
+    assert_eq!(charge_failed_events(&w.env).len(), 1);
+    assert_eq!(w.sub.first_failed_charge(&id), Some(now));
+}
+
+#[test]
+fn a_charge_that_would_succeed_cannot_be_flagged() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&id),
+        Err(Ok(Error::ChargeWouldSucceed))
+    );
+    assert_eq!(w.sub.first_failed_charge(&id), None);
+    // The charge indeed succeeds.
+    w.sub.charge(&w.keeper, &id);
+}
+
+#[test]
+fn a_charge_that_is_not_due_cannot_be_flagged() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    // Vault is empty, but nothing is owed until next_charge.
+    w.advance(MONTH - 1);
+    assert_eq!(w.sub.try_flag_failed_charge(&id), Err(Ok(Error::NotDue)));
+    assert_eq!(w.sub.first_failed_charge(&id), None);
+}
+
+#[test]
+fn inactive_mandates_cannot_be_flagged() {
+    let w = world();
+    let plan_id = w.plan();
+
+    let cancelled_user = Address::generate(&w.env);
+    let cancelled = w
+        .sub
+        .subscribe(&cancelled_user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&cancelled_user, &cancelled);
+
+    let paused_user = Address::generate(&w.env);
+    let paused = w
+        .sub
+        .subscribe(&paused_user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_paused(&paused_user, &paused, &true);
+
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&cancelled),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&paused),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn a_mandate_at_its_spend_cap_cannot_be_flagged() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    // Room for one and a half charges: the second would cross the cap, so
+    // charge refuses it on caps grounds, not funds.
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &(PRICE + PRICE / 2), &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&id),
+        Err(Ok(Error::MaxChargesReached))
+    );
+}
+
+#[test]
+fn a_spend_limit_shortfall_counts_as_a_failed_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(10 * PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    // Funded, but the subscriber's own spend limit is below the price.
+    w.vault
+        .set_spend_limit(&user, &w.token, &(PRICE - 1), &MONTH);
+
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    assert!(w.sub.flag_failed_charge(&id));
+}
+
+#[test]
+fn flag_failed_charge_is_permissionless() {
+    let w = world();
+    let (_user, id) = lapsed_mandate(&w);
+
+    // No signature from anyone: the flag only records a provable fact.
+    w.env.set_auths(&[]);
+    assert!(w.sub.flag_failed_charge(&id));
+    assert!(w.sub.first_failed_charge(&id).is_some());
+}
+
+#[test]
+fn flagging_never_moves_money_or_changes_the_mandate() {
+    let w = world();
+    let (user, id) = lapsed_mandate(&w);
+    let before = w.sub.get_mandate(&id);
+    let merchant_before = w.token_client.balance(&w.merchant);
+
+    w.vault.deposit(&user, &w.token, &(PRICE / 2));
+    assert!(w.sub.flag_failed_charge(&id));
+
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(w.vault.balance(&user, &w.token), PRICE / 2);
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_before);
+}
+
+// ---------------------------------------------------------------------------
+// Per-mandate reserves (#295) through the subscription contract.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_reserve_pays_its_own_mandate_and_starves_no_other() {
+    let w = world();
+    let plan_id = w.plan();
+    // Enough for one charge plus a little.
+    let user = w.subscriber(PRICE + 100);
+    let reserved = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let other = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.vault.set_reserve(&user, &w.token, &reserved, &PRICE);
+
+    // The other mandate sees only the unreserved 100 and fails...
+    assert!(w.sub.try_charge(&w.keeper, &other).is_err());
+    assert_eq!(w.vault.reserved(&user, &w.token, &reserved), PRICE);
+    // ...and its failure is provable, so it can be flagged.
+    assert!(w.sub.flag_failed_charge(&other));
+
+    // The reserved mandate settles from its reserve.
+    w.sub.charge(&w.keeper, &reserved);
+    assert_eq!(w.vault.reserved(&user, &w.token, &reserved), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 100);
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&reserved),
+        Err(Ok(Error::NotDue))
+    );
+}
+
+#[test]
+fn a_tipped_referred_charge_draws_every_leg_from_the_reserve() {
+    let w = world();
+    let referrer = Address::generate(&w.env);
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
+    let user = w.subscriber(PRICE);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+    // Everything is reserved: only this mandate's own legs may spend it.
+    w.vault.set_reserve(&user, &w.token, &id, &PRICE);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.vault.reserved(&user, &w.token, &id), 0);
+    assert_eq!(w.vault.reserved_total(&user, &w.token), 0);
+    assert!(w.token_client.balance(&w.keeper) > 0);
+    assert!(w.token_client.balance(&referrer) > 0);
+}
+
+#[test]
+fn an_upgrade_proration_can_draw_on_the_mandates_reserve() {
+    let w = world();
+    let cheap = w.plan_priced(PRICE);
+    let dear = w.plan_priced(PRICE * 2);
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &cheap, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    // The remaining PRICE is all reserved for this mandate.
+    w.vault.set_reserve(&user, &w.token, &id, &PRICE);
+
+    w.advance(MONTH / 2);
+    w.sub.upgrade(&user, &id, &dear);
+
+    // Half a period of the PRICE difference came out of the reserve.
+    assert_eq!(w.vault.reserved(&user, &w.token, &id), PRICE / 2);
+    assert_eq!(w.vault.balance(&user, &w.token), PRICE / 2);
+}
+
+// ---------------------------------------------------------------------------
+// The vault's token allowlist gates `subscribe_with_deposit` (#300).
+// ---------------------------------------------------------------------------
+
+/// A fresh account holding `amount` of the world's token in its wallet, with
+/// nothing deposited.
+fn wallet_holder(w: &World, amount: i128) -> Address {
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &amount);
+    user
+}
+
+#[test]
+fn allowlist_off_by_default_leaves_subscribe_open() {
+    let w = world();
+    assert!(!w.vault.allowlist_enabled());
+    let plan_id = w.plan();
+    let user = wallet_holder(&w, 100_000);
+
+    let id = w
+        .sub
+        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn enabling_the_allowlist_blocks_subscribing_with_an_unlisted_token() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = wallet_holder(&w, 100_000);
+    w.vault.set_allowlist_enabled(&true);
+
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>)
+        .is_err());
+    // The vault refused for the allowlist, not some other reason.
+    assert_eq!(
+        w.vault.try_deposit(&user, &w.token, &40_000),
+        Err(Ok(payflow_vault::Error::TokenNotAllowed))
+    );
+
+    // Atomic: no mandate, no seat, no credit, no tokens moved, no id burned.
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&user), 100_000);
+    assert_eq!(w.sub.next_mandate_id(), 1);
+}
+
+#[test]
+fn an_allowlisted_token_subscribes_while_the_allowlist_is_on() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = wallet_holder(&w, 100_000);
+    w.vault.set_allowlist_enabled(&true);
+    w.vault.set_token_allowed(&w.token, &true);
+
+    let id = w
+        .sub
+        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    assert_eq!(w.vault.balance(&user, &w.token), 40_000);
+    assert_eq!(w.sub.get_mandate(&id).subscriber, user);
+}
+
+#[test]
+fn disabling_the_allowlist_restores_open_subscribe() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = wallet_holder(&w, 100_000);
+
+    w.vault.set_allowlist_enabled(&true);
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>)
+        .is_err());
+
+    // The token was never listed: turning the allowlist off alone reopens it.
+    w.vault.set_allowlist_enabled(&false);
+    assert!(!w.vault.token_allowed(&w.token));
+    let id = w
+        .sub
+        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    assert_eq!(id, 1);
+    assert_eq!(w.vault.balance(&user, &w.token), 40_000);
+}
+
+#[test]
+fn toggling_the_allowlist_repeatedly_gates_subscribe_each_time() {
+    let w = world();
+    let plan_id = w.plan();
+
+    for round in 0..3 {
+        w.vault.set_allowlist_enabled(&true);
+        let blocked = wallet_holder(&w, 100_000);
+        assert!(
+            w.sub
+                .try_subscribe_with_deposit(&blocked, &plan_id, &0, &0, &PRICE, &None::<Address>)
+                .is_err(),
+            "round {round}: allowlist on must block"
+        );
+
+        w.vault.set_allowlist_enabled(&false);
+        let open = wallet_holder(&w, 100_000);
+        w.sub
+            .subscribe_with_deposit(&open, &plan_id, &0, &0, &PRICE, &None::<Address>);
+    }
+    // Exactly the three open-window sign-ups went through.
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 3);
+}
+
+#[test]
+fn delisting_a_token_blocks_new_subscribers_but_existing_mandates_keep_billing() {
+    let w = world();
+    let plan_id = w.plan();
+    w.vault.set_allowlist_enabled(&true);
+    w.vault.set_token_allowed(&w.token, &true);
+
+    let existing = wallet_holder(&w, 100_000);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&existing, &plan_id, &0, &0, &(2 * PRICE), &None::<Address>);
+
+    w.vault.set_token_allowed(&w.token, &false);
+
+    let newcomer = wallet_holder(&w, 100_000);
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&newcomer, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .is_err());
+
+    // The allowlist gates new funds only: the open mandate still settles from
+    // the balance already in the vault, and the subscriber can still exit.
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    w.vault.withdraw_all(&existing, &w.token);
+    assert_eq!(w.vault.balance(&existing, &w.token), 0);
+}
+
+#[test]
+fn allowlist_gates_new_funds_not_balances_already_held() {
+    let w = world();
+    let plan_id = w.plan();
+    // Funded before the allowlist was switched on.
+    let user = w.subscriber(PRICE);
+    w.vault.set_allowlist_enabled(&true);
+
+    // A plain subscribe deposits nothing, so it is not gated...
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    // ...but adding funds for the next charge is.
+    assert_eq!(
+        w.vault.try_deposit(&user, &w.token, &PRICE),
+        Err(Ok(payflow_vault::Error::TokenNotAllowed))
+    );
+}
+
+#[test]
+fn a_non_admin_cannot_enable_the_allowlist_to_block_subscribers() {
+    let w = world();
+    let plan_id = w.plan();
+    let stranger = Address::generate(&w.env);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &w.vault.address,
+            fn_name: "set_allowlist_enabled",
+            args: (true,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.vault.try_set_allowlist_enabled(&true).is_err());
+
+    w.env.mock_all_auths();
+    assert!(!w.vault.allowlist_enabled());
+    let user = wallet_holder(&w, 100_000);
+    w.sub
+        .subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>);
+}
+
+#[test]
+fn a_non_admin_cannot_disable_the_allowlist_to_reopen_subscribe() {
+    let w = world();
+    let plan_id = w.plan();
+    let stranger = Address::generate(&w.env);
+    w.vault.set_allowlist_enabled(&true);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &w.vault.address,
+            fn_name: "set_allowlist_enabled",
+            args: (false,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.vault.try_set_allowlist_enabled(&false).is_err());
+
+    w.env.mock_all_auths();
+    assert!(w.vault.allowlist_enabled());
+    let user = wallet_holder(&w, 100_000);
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .is_err());
+}
+
+#[test]
+fn a_non_admin_cannot_allowlist_a_token_to_subscribe() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = wallet_holder(&w, 100_000);
+    w.vault.set_allowlist_enabled(&true);
+
+    // The would-be subscriber cannot vouch for their own token.
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.vault.address,
+            fn_name: "set_token_allowed",
+            args: (&w.token, true).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.vault.try_set_token_allowed(&w.token, &true).is_err());
+
+    w.env.mock_all_auths();
+    assert!(!w.vault.token_allowed(&w.token));
+    assert!(w
+        .sub
+        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .is_err());
+}

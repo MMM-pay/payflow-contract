@@ -199,4 +199,8 @@ pub enum DataKey {
     PlanSubscriberCount(u64),
     /// Committed revenue per period for a plan (sum of active mandates' per-period amounts).
     PlanCommittedRevenue(u64),
+    /// Ledger timestamp at which the mandate's current run of failed charges
+    /// was first flagged by `flag_failed_charge` (#296). Cleared by the next
+    /// successful `charge`, so the following failure notifies again.
+    FirstFailedCharge(u64),
 }

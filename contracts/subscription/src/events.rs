@@ -92,6 +92,43 @@ pub struct Charged {
     pub referrer: Option<Address>,
 }
 
+/// Merchant notification hook (#296): emitted the first time a due mandate's
+/// charge fails, so off-chain dunning can react promptly.
+///
+/// A failed `charge` is rolled back together with any event it would emit, so
+/// the failure is recorded by `flag_failed_charge`, which proves on chain that
+/// the charge would fail right now. The event fires once per run of failures:
+/// further flags are no-ops until a successful `charge` clears the run, after
+/// which the next failure notifies again.
+///
+/// `merchant` is a topic so a merchant's dunning service can subscribe to its
+/// own failures with a single topic filter.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeFailed {
+    /// ID of the mandate whose charge failed.
+    #[topic]
+    pub mandate_id: u64,
+    /// Merchant owed the charge; the topic a dunning service filters on.
+    #[topic]
+    pub merchant: Address,
+    /// Subscriber whose vault could not cover the charge.
+    #[topic]
+    pub subscriber: Address,
+    /// Plan the mandate bills against.
+    pub plan_id: u64,
+    /// Token the charge is denominated in.
+    pub token: Address,
+    /// Amount the charge needed: the mandate's frozen price.
+    pub amount: i128,
+    /// Unix seconds the charge fell due (`next_charge`).
+    pub due_at: u64,
+    /// Unix seconds the failure was flagged.
+    pub failed_at: u64,
+    /// Charges settled so far under this mandate.
+    pub charges_made: u32,
+}
+
 /// Emitted when a subscriber cancels a mandate.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
