@@ -70,6 +70,8 @@ mod types;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_errors;
+#[cfg(test)]
 mod test_events;
 
 pub use error::Error;
@@ -262,10 +264,15 @@ mod contract {
             subscriber.require_auth();
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
-            let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
+            let plan = Self::read_plan(&env, &registry, plan_id)?;
 
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
-            VaultClient::new(&env, &vault_addr).deposit(&subscriber, &plan.token, &deposit);
+            if VaultClient::new(&env, &vault_addr)
+                .try_deposit(&subscriber, &plan.token, &deposit)
+                .is_err()
+            {
+                return Err(Error::VaultCallFailed);
+            }
 
             let now = env.ledger().timestamp();
             Self::do_subscribe_at(
@@ -348,7 +355,7 @@ mod contract {
             }
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
-            let plan = PlanRegistryClient::new(&env, &registry).get_plan(&plan_id);
+            let plan = Self::read_plan(&env, &registry, plan_id)?;
 
             // A plan that is switched off, or whose availability window has
             // passed, accepts no new subscribers. Existing mandates never
@@ -561,24 +568,33 @@ mod contract {
             // Every leg goes through the mandate-aware debits, so a reserve the
             // subscriber earmarked for this mandate (#295) pays for it first,
             // and no other mandate's reserve is ever touched.
-            vault.debit_split_mandate(
-                &mandate.subscriber,
-                &mandate.token,
-                &mandate_id,
-                &mandate.payout,
-                &merchant_amount,
-                &fee_to,
-                &fee,
-            );
-
-            if tip > 0 {
-                vault.debit_mandate(
+            if vault
+                .try_debit_split_mandate(
                     &mandate.subscriber,
                     &mandate.token,
                     &mandate_id,
-                    &keeper,
-                    &tip,
-                );
+                    &mandate.payout,
+                    &merchant_amount,
+                    &fee_to,
+                    &fee,
+                )
+                .is_err()
+            {
+                return Err(Error::VaultCallFailed);
+            }
+
+            if tip > 0
+                && vault
+                    .try_debit_mandate(
+                        &mandate.subscriber,
+                        &mandate.token,
+                        &mandate_id,
+                        &keeper,
+                        &tip,
+                    )
+                    .is_err()
+            {
+                return Err(Error::VaultCallFailed);
             }
 
             // Referral is a share of the merchant's own money paid to the
@@ -587,13 +603,18 @@ mod contract {
             // below always binds.
             if referral > 0 {
                 if let Some(referrer) = &mandate.referrer {
-                    vault.debit_mandate(
-                        &mandate.subscriber,
-                        &mandate.token,
-                        &mandate_id,
-                        referrer,
-                        &referral,
-                    );
+                    if vault
+                        .try_debit_mandate(
+                            &mandate.subscriber,
+                            &mandate.token,
+                            &mandate_id,
+                            referrer,
+                            &referral,
+                        )
+                        .is_err()
+                    {
+                        return Err(Error::VaultCallFailed);
+                    }
                 }
             }
 
@@ -725,12 +746,16 @@ mod contract {
             // one check for the full price covers merchant, fee, tip and
             // referral together.
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
-            if VaultClient::new(&env, &vault_addr).can_debit(
+            let can_debit = match VaultClient::new(&env, &vault_addr).try_can_debit(
                 &mandate.subscriber,
                 &mandate.token,
                 &mandate_id,
                 &mandate.amount,
             ) {
+                Ok(Ok(value)) => value,
+                _ => return Err(Error::VaultCallFailed),
+            };
+            if can_debit {
                 return Err(Error::ChargeWouldSucceed);
             }
 
@@ -827,7 +852,7 @@ mod contract {
             }
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
-            let plan = PlanRegistryClient::new(&env, &registry).get_plan(&new_plan_id);
+            let plan = Self::read_plan(&env, &registry, new_plan_id)?;
             if !plan.active {
                 return Err(Error::PlanInactive);
             }
@@ -888,15 +913,20 @@ mod contract {
                 // The prorated difference is settled the same way a charge is:
                 // merchant share and protocol fee from one debit, drawing on
                 // this mandate's reserve (#295) first.
-                vault.debit_split_mandate(
-                    &subscriber,
-                    &mandate.token,
-                    &mandate_id,
-                    &mandate.merchant,
-                    &merchant_gross,
-                    &fee_to,
-                    &fee,
-                );
+                if vault
+                    .try_debit_split_mandate(
+                        &subscriber,
+                        &mandate.token,
+                        &mandate_id,
+                        &mandate.merchant,
+                        &merchant_gross,
+                        &fee_to,
+                        &fee,
+                    )
+                    .is_err()
+                {
+                    return Err(Error::VaultCallFailed);
+                }
             }
 
             // The mandate carries the new plan's terms from now on. A downgrade
@@ -2054,6 +2084,15 @@ mod contract {
                 .ok_or(Error::AmountOverflow)
         }
 
+        /// Read a plan from the registry, turning any cross-contract failure
+        /// into a typed error instead of letting the client panic.
+        fn read_plan(env: &Env, registry: &Address, plan_id: u64) -> Result<Plan, Error> {
+            match PlanRegistryClient::new(env, registry).try_get_plan(&plan_id) {
+                Ok(Ok(plan)) => Ok(plan),
+                _ => Err(Error::PlanNotFound),
+            }
+        }
+
         fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
             env.storage()
                 .instance()
@@ -2236,7 +2275,11 @@ mod contract {
                 Err(_) => return,
             };
             let plan_registry = PlanRegistryClient::new(env, &registry);
-            let plan = plan_registry.get_plan(&plan_id);
+            let Ok(Ok(plan)) = plan_registry.try_get_plan(&plan_id) else {
+                // The revenue cache is advisory; never fail the state change
+                // that triggered the recomputation because a plan read failed.
+                return;
+            };
 
             let len = Self::index_len(env, DataKey::PlanMandateCount(plan_id));
             let mut total: i128 = 0;

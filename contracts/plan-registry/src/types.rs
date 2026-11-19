@@ -1,6 +1,6 @@
 //! Data types and storage keys for the plan registry contract.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, String, Symbol};
 
 /// `Plan` is defined once in `payflow-shared` and used by both this contract
 /// and the subscription contract that decodes it, so the two cannot drift.
@@ -14,6 +14,43 @@ use soroban_sdk::{contracttype, Address, String};
 /// change to the struct is required here. The subscription contract's mirror
 /// of `Plan` must be updated in lockstep with `payflow-shared`.
 pub use payflow_shared::Plan;
+
+/// The mutable inputs shared by `create_plan` and `create_plans`.
+///
+/// The merchant is supplied separately to the batch call and is the same for
+/// every plan in it; everything else that defines a plan is carried here.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanParams {
+    /// Token contract address this plan is denominated in.
+    pub token: Address,
+    /// Amount charged per billing period, in the token's smallest unit.
+    pub amount: i128,
+    /// Billing period in seconds. At least `MIN_PERIOD`.
+    pub period: u64,
+    /// Display name, at most `MAX_NAME_LEN` bytes.
+    pub name: String,
+    /// Short summary, at most `MAX_DESCRIPTION_LEN` bytes.
+    pub description: String,
+    /// Keeper tip in basis points of the merchant share. At most
+    /// `MAX_KEEPER_BPS`.
+    pub keeper_bps: u32,
+    /// Discovery category; may be empty.
+    pub category: Symbol,
+    /// Link to the plan's terms, at most `MAX_TERMS_LEN` bytes.
+    pub terms_uri: String,
+    /// Unix seconds after which the plan stops accepting subscribers;
+    /// 0 means forever.
+    pub available_until: u64,
+    /// Referral share in basis points of the merchant's share; 0 disables
+    /// referrals for this plan.
+    pub referral_bps: u32,
+    /// Account that receives the merchant's share of each charge. `None`
+    /// defaults to the merchant.
+    pub payout: Option<Address>,
+    /// Maximum number of simultaneously-open mandates; 0 means unlimited.
+    pub max_subscribers: u32,
+}
 
 /// A merchant's self-declared profile, shown to subscribers alongside the
 /// merchant's plans so they can tell who they are paying. The profile is

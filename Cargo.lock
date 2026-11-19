@@ -1217,6 +1217,7 @@ dependencies = [
 name = "payflow-vault"
 version = "0.2.0"
 dependencies = [
+ "payflow-shared",
  "payflow-test-token",
  "soroban-sdk",
 ]

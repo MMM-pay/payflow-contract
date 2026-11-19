@@ -9,6 +9,20 @@ change the contract interface.
 
 ### Added
 
+- **#309: atomic bulk plan creation (plan-registry).** New
+  `create_plans(merchant, plans: Vec<PlanParams>)` publishes up to
+  `MAX_BATCH_PLANS = 10` plans in one call. Every plan is validated before any
+  is written, so one invalid entry creates none; IDs stay sequential and each
+  plan still emits `PlanCreated`, followed by a `PlansCreated` batch summary.
+  New `PlanParams` type, `PlansCreated` event, and errors
+  `EmptyBatch=1022` / `BatchTooLarge=1023`.
+
+- **#307: withdraw to another address (vault).** New
+  `withdraw_to(user, token, to, amount)` lets a subscriber send their
+  unreserved balance to a chosen destination with only the subscriber's
+  authorization. It uses the same reserve rules and limits as `withdraw`, and
+  emits a new `WithdrawTo` event; `withdraw` itself is unchanged.
+
 - **#295: optional per-mandate reserved balance (vault).** A subscriber can
   earmark part of a token balance for one mandate with
   `vault:set_reserve(user, token, mandate_id, amount)` (`0` releases it).
@@ -32,6 +46,24 @@ change the contract interface.
   error `ChargeWouldSucceed=35`.
 
 ### Changed
+
+- **Breaking (#310): contract error ranges are now disjoint.** Every error
+  discriminant moved into a per-contract range: plan-registry `1_001–1_023`,
+  subscription `2_001–2_037`, vault `3_001–3_014`. `payflow-shared` now exposes
+  `ErrorDomain`, `ErrorCode`, the three range bases and `ERROR_RANGE_SIZE`,
+  and each contract implements `From<Error> for ErrorCode`. Clients that
+  hard-coded the old small discriminants must use the new absolute codes.
+  Cross-contract failures are also surfaced as typed errors instead of host
+  traps: subscription maps a missing registry plan to `PlanNotFound=2036` and
+  a rejected vault deposit/debit to `VaultCallFailed=2037`.
+
+- **#308: panic-safe arithmetic and cross-contract reads.** Vault deposits now
+  use checked addition and return `AmountOverflow` instead of trapping when a
+  balance would exceed `i128::MAX`. Subscription no longer calls the plan
+  registry or vault through panicking clients: missing plans and vault
+  rejections become typed errors. New deterministic tests exercise extreme
+  IDs, amounts, schedules and pseudo-random inputs across all public entry
+  points.
 
 - **Breaking (#158): plan subscriber caps, `set_max_charges`, admin-gated
   upgrades.** `Plan` and `PlanCreated` gain `max_subscribers` (0 = unlimited);

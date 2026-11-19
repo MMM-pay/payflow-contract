@@ -151,6 +151,56 @@ fn withdraw_returns_tokens() {
 }
 
 #[test]
+fn withdraw_to_sends_tokens_to_the_destination() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    h.vault.withdraw_to(&user, &h.token, &destination, &1_500);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 2_500);
+    assert_eq!(h.token_client.balance(&user), 6_000);
+    assert_eq!(h.token_client.balance(&destination), 1_500);
+    assert_eq!(h.token_client.balance(&h.vault_id), 2_500);
+}
+
+#[test]
+fn withdraw_to_rejects_non_positive_and_excess_amounts() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    for amount in [0, -5] {
+        assert_eq!(
+            h.vault
+                .try_withdraw_to(&user, &h.token, &destination, &amount),
+            Err(Ok(Error::InvalidAmount))
+        );
+    }
+    assert_eq!(
+        h.vault
+            .try_withdraw_to(&user, &h.token, &destination, &1_001),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&destination), 0);
+}
+
+#[test]
+fn withdraw_to_allows_the_user_to_name_themselves() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    h.vault.withdraw_to(&user, &h.token, &user, &1_000);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 10_000);
+}
+
+#[test]
 fn withdraw_beyond_balance_fails() {
     let h = setup();
     let user = funded_user(&h, 10_000);
@@ -1239,6 +1289,51 @@ fn withdraw_requires_the_user_auth() {
 }
 
 #[test]
+fn withdraw_to_requires_the_user_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_withdraw_to(&user, &h.token, &destination, &1_000)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&destination), 0);
+}
+
+#[test]
+fn withdraw_to_does_not_require_the_destination_auth() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "withdraw_to",
+            args: (
+                user.clone(),
+                h.token.clone(),
+                destination.clone(),
+                1_000i128,
+            )
+                .into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    h.vault.withdraw_to(&user, &h.token, &destination, &1_000);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(h.token_client.balance(&destination), 1_000);
+}
+
+#[test]
 fn withdraw_all_requires_the_user_auth() {
     let h = setup();
     let user = funded_user(&h, 10_000);
@@ -1928,6 +2023,23 @@ fn withdraw_reaches_only_the_unreserved_balance() {
 }
 
 #[test]
+fn withdraw_to_reaches_only_the_unreserved_balance() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let destination = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &600);
+
+    assert_eq!(
+        h.vault.try_withdraw_to(&user, &h.token, &destination, &401),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    h.vault.withdraw_to(&user, &h.token, &destination, &400);
+    assert_eq!(h.vault.balance(&user, &h.token), 600);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 600);
+    assert_eq!(h.token_client.balance(&destination), 400);
+}
+
+#[test]
 fn withdraw_all_leaves_reserves_behind_until_released() {
     let h = setup();
     let user = depositor(&h, 1_000);
@@ -2091,4 +2203,167 @@ fn reserved_internal_balances_still_add_up_to_holdings() {
     // And every reserve stays inside its balance.
     assert!(h.vault.reserved_total(&alice, &h.token) <= h.vault.balance(&alice, &h.token));
     assert!(h.vault.reserved_total(&bob, &h.token) <= h.vault.balance(&bob, &h.token));
+}
+
+// ---------------------------------------------------------------------------
+// Panic safety (#308): extreme amounts must be rejected with typed errors, not
+// overflow traps.
+// ---------------------------------------------------------------------------
+
+fn assert_typed_error<T: core::fmt::Debug>(
+    result: Result<T, Result<Error, soroban_sdk::InvokeError>>,
+) {
+    if let Err(Err(error)) = result {
+        panic!("entry point returned an untyped host error: {error:?}");
+    }
+}
+
+fn next_fuzz_u64(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+#[test]
+fn deposit_overflow_is_a_typed_error() {
+    let h = setup();
+    let user = funded_user(&h, 100);
+    let payer = funded_user(&h, 100);
+    let near_max = i128::MAX - 1;
+
+    h.env.as_contract(&h.vault_id, || {
+        h.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Balance(user.clone(), h.token.clone()), &near_max);
+    });
+
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &2),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(
+        h.vault.try_deposit_for(&payer, &user, &h.token, &2),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), near_max);
+    assert_eq!(h.token_client.balance(&payer), 100);
+    assert_eq!(h.token_client.balance(&user), 100);
+}
+
+#[test]
+fn extreme_debit_and_reserve_amounts_are_typed() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    assert_eq!(
+        h.vault.try_debit_split(
+            &user,
+            &h.token,
+            &destination,
+            &i128::MAX,
+            &destination,
+            &i128::MAX,
+        ),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &destination, &i128::MIN, &destination, &1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &1, &i128::MAX),
+        Err(Ok(Error::ReserveExceedsBalance))
+    );
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &1, &i128::MIN),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        h.vault.try_set_spend_limit(&user, &h.token, &i128::MAX, &0),
+        Err(Ok(Error::InvalidWindow))
+    );
+    assert_eq!(
+        h.vault.try_set_deposit_cap(&user, &h.token, &i128::MIN),
+        Err(Ok(Error::InvalidAmount))
+    );
+}
+
+#[test]
+fn extreme_withdrawals_are_typed() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    for amount in [0, -1, i128::MIN] {
+        assert_eq!(
+            h.vault.try_withdraw(&user, &h.token, &amount),
+            Err(Ok(Error::InvalidAmount))
+        );
+        assert_eq!(
+            h.vault
+                .try_withdraw_to(&user, &h.token, &destination, &amount),
+            Err(Ok(Error::InvalidAmount))
+        );
+    }
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &i128::MAX),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(
+        h.vault
+            .try_withdraw_to(&user, &h.token, &destination, &i128::MAX),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&destination), 0);
+}
+
+#[test]
+fn deterministic_random_amounts_never_reach_a_host_trap() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    let destination = Address::generate(&h.env);
+    h.vault.deposit(&user, &h.token, &5_000);
+    let mut seed = 0x0ddc_0ffe_e15e_beefu64;
+
+    for _ in 0..128 {
+        let x = next_fuzz_u64(&mut seed);
+        let amount = match x % 8 {
+            0 => 0,
+            1 => -1,
+            2 => i128::MIN,
+            3 => i128::MAX,
+            4 => 1,
+            5 => 10_000,
+            6 => -10_000,
+            _ => x as i128,
+        };
+        let window = x % 100;
+        let other = (next_fuzz_u64(&mut seed) % 20_000) as i128;
+
+        assert_typed_error(h.vault.try_withdraw(&user, &h.token, &amount));
+        assert_typed_error(
+            h.vault
+                .try_withdraw_to(&user, &h.token, &destination, &amount),
+        );
+        assert_typed_error(
+            h.vault
+                .try_set_spend_limit(&user, &h.token, &amount, &window),
+        );
+        assert_typed_error(h.vault.try_set_reserve(&user, &h.token, &(x % 3), &amount));
+        assert_typed_error(h.vault.try_debit_split(
+            &user,
+            &h.token,
+            &destination,
+            &amount,
+            &destination,
+            &other,
+        ));
+    }
 }

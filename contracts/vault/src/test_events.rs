@@ -95,6 +95,23 @@ fn withdraw_layout() {
     );
 }
 #[test]
+fn withdraw_to_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "withdraw_to",
+        super::WithdrawTo::spec_xdr(),
+        &super::WithdrawTo {
+            user: a.clone(),
+            to: a.clone(),
+            token: a,
+            amount: 250,
+            balance: 9_500,
+        },
+    );
+}
+#[test]
 fn debit_layout() {
     let env = Env::default();
     let a = address(&env);
