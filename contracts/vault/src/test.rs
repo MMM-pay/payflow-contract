@@ -2354,6 +2354,33 @@ fn debit_split_mandate_requires_the_subscription_auth() {
 }
 
 #[test]
+fn debit_multi_mandate_requires_the_subscription_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let merchant = Address::generate(&h.env);
+    let fee_to = Address::generate(&h.env);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &500);
+
+    // Not even the subscriber can settle their own mandate's multi-debit.
+    let legs = soroban_sdk::vec![&h.env, (merchant.clone(), 90i128), (fee_to.clone(), 10i128)];
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "debit_multi_mandate",
+            args: (&user, &h.token, &MANDATE_A, &legs).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .vault
+        .try_debit_multi_mandate(&user, &h.token, &MANDATE_A, &legs)
+        .is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 500);
+}
+
+#[test]
 fn reserved_internal_balances_still_add_up_to_holdings() {
     let h = setup();
     let alice = depositor(&h, 1_000);
