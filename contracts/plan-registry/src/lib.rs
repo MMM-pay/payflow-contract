@@ -63,7 +63,7 @@ pub use events::{
     PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
     PlansCreated, ProfileUpdated,
 };
-pub use types::{DataKey, Plan, PlanParams, Profile};
+pub use types::{DataKey, Plan, PlanParams, Profile, UpgradeRecord};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -820,6 +820,9 @@ mod contract {
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
         /// admin may upgrade; persistent state is untouched. (From #158.)
+        ///
+        /// Records the upgrade in the contract's upgrade history, which can be
+        /// queried via `upgrade_history` for transparency.
         pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
             let admin: Address = Self::admin(env.clone())?;
             admin.require_auth();
@@ -829,11 +832,50 @@ mod contract {
 
             ContractUpgraded {
                 admin,
-                new_wasm_hash,
+                new_wasm_hash: new_wasm_hash.clone(),
             }
             .publish(&env);
 
+            // Record the upgrade in history.
+            Self::record_upgrade(&env, new_wasm_hash);
+
             Ok(())
+        }
+
+        /// Record an upgrade in the contract's upgrade history.
+        fn record_upgrade(env: &Env, wasm_hash: BytesN<32>) {
+            let version = String::from_str(env, env!("CARGO_PKG_VERSION"));
+            let ledger = env.ledger().sequence();
+            let record = UpgradeRecord {
+                version,
+                ledger,
+                wasm_hash,
+            };
+            let mut history: soroban_sdk::Vec<UpgradeRecord> = env
+                .storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+            history.push_back(record);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeHistory, &history);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        }
+
+        /// Get the contract's upgrade history.
+        ///
+        /// Returns a vector of upgrade records, oldest first. Each record
+        /// contains the version, ledger sequence, and wasm hash. The initial
+        /// deployment is not recorded; only explicit upgrades via `upgrade_wasm`
+        /// appear here.
+        pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
+            env.storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
 
         /// Propose transferring a plan to `new_owner`. Step one of a two-step

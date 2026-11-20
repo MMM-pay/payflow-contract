@@ -83,7 +83,9 @@ pub use events::{
     PauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
-pub use types::{ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, MandateSummary, Plan};
+pub use types::{
+    ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, MandateSummary, Plan, UpgradeRecord,
+};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -510,6 +512,10 @@ mod contract {
         /// of accumulating a backlog that could drain a vault in one burst. The
         /// tradeoff is slow forward drift, which favours the subscriber.
         ///
+        /// See [ADR 0005](../../docs/adr/0005-permissionless-charge.md) for a
+        /// detailed explanation of why permissionless charging is safe and
+        /// keeper operational guidance.
+        ///
         /// # Auth
         /// Requires authorization from `keeper`.
         ///
@@ -568,69 +574,30 @@ mod contract {
             let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
             let vault = VaultClient::new(&env, &vault_addr);
 
-            // One vault call settles the merchant share and the protocol fee.
-            // Two `debit` calls would repeat the authorization, the config read
-            // and the balance read/write for the same total; a zero fee leaves
-            // the second leg empty, which emits the single `Debit` a lone
-            // charge used to. The keeper tip and the referral are extra payees,
-            // each a further `debit` only when non-zero.
-            //
-            // The merchant share is paid to `mandate.payout`, frozen at sign-up:
-            // a later payout change or a plan-ownership transfer never redirects
-            // an open mandate's funds. Every leg is debited from the subscriber,
-            // so each counts against any vault spend limit on its own.
-            //
-            // Every leg goes through the mandate-aware debits, so a reserve the
-            // subscriber earmarked for this mandate (#295) pays for it first,
-            // and no other mandate's reserve is ever touched.
+            // Build all payment legs for a single vault call. This replaces the
+            // three separate calls (merchant+fee split, tip, referral) with one
+            // call that does a single authorization check and balance update.
+            // Order matches the original sequential execution so Debit event
+            // balances are identical: merchant, fee, tip, referral.
+            let mut legs = soroban_sdk::Vec::new(&env);
+            legs.push_back((mandate.payout.clone(), merchant_amount));
+            if fee > 0 {
+                legs.push_back((fee_to.clone(), fee));
+            }
+            if tip > 0 {
+                legs.push_back((keeper.clone(), tip));
+            }
+            if referral > 0 {
+                if let Some(referrer) = &mandate.referrer {
+                    legs.push_back((referrer.clone(), referral));
+                }
+            }
+
             if vault
-                .try_debit_split_mandate(
-                    &mandate.subscriber,
-                    &mandate.token,
-                    &mandate_id,
-                    &mandate.payout,
-                    &merchant_amount,
-                    &fee_to,
-                    &fee,
-                )
+                .try_debit_multi_mandate(&mandate.subscriber, &mandate.token, &mandate_id, &legs)
                 .is_err()
             {
                 return Err(Error::VaultCallFailed);
-            }
-
-            if tip > 0
-                && vault
-                    .try_debit_mandate(
-                        &mandate.subscriber,
-                        &mandate.token,
-                        &mandate_id,
-                        &keeper,
-                        &tip,
-                    )
-                    .is_err()
-            {
-                return Err(Error::VaultCallFailed);
-            }
-
-            // Referral is a share of the merchant's own money paid to the
-            // referrer frozen into the mandate. `fee_split` only returns a
-            // non-zero referral when `mandate.referrer` is set, so the pattern
-            // below always binds.
-            if referral > 0 {
-                if let Some(referrer) = &mandate.referrer {
-                    if vault
-                        .try_debit_mandate(
-                            &mandate.subscriber,
-                            &mandate.token,
-                            &mandate_id,
-                            referrer,
-                            &referral,
-                        )
-                        .is_err()
-                    {
-                        return Err(Error::VaultCallFailed);
-                    }
-                }
             }
 
             // Settling through a scheduled pause that has run its course resumes
@@ -1982,6 +1949,9 @@ mod contract {
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
         /// admin may upgrade; persistent state is untouched. (From #158.)
+        ///
+        /// Records the upgrade in the contract's upgrade history, which can be
+        /// queried via `upgrade_history` for transparency.
         pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
             let admin: Address = Self::cfg_address(&env, DataKey::Admin)?;
             admin.require_auth();
@@ -1991,11 +1961,50 @@ mod contract {
 
             ContractUpgraded {
                 admin,
-                new_wasm_hash,
+                new_wasm_hash: new_wasm_hash.clone(),
             }
             .publish(&env);
 
+            // Record the upgrade in history.
+            Self::record_upgrade(&env, new_wasm_hash);
+
             Ok(())
+        }
+
+        /// Record an upgrade in the contract's upgrade history.
+        fn record_upgrade(env: &Env, wasm_hash: BytesN<32>) {
+            let version = String::from_str(env, env!("CARGO_PKG_VERSION"));
+            let ledger = env.ledger().sequence();
+            let record = UpgradeRecord {
+                version,
+                ledger,
+                wasm_hash,
+            };
+            let mut history: soroban_sdk::Vec<UpgradeRecord> = env
+                .storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+            history.push_back(record);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeHistory, &history);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        }
+
+        /// Get the contract's upgrade history.
+        ///
+        /// Returns a vector of upgrade records, oldest first. Each record
+        /// contains the version, ledger sequence, and wasm hash. The initial
+        /// deployment is not recorded; only explicit upgrades via `upgrade_wasm`
+        /// appear here.
+        pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
+            env.storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
 
         /// The id the next opened mandate will get. Mandates are numbered from 1,

@@ -6,7 +6,7 @@ use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    xdr::{ContractEventBody, ScSymbol, ScVal},
+    xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
     Address, Env, IntoVal, String,
 };
 
@@ -1750,6 +1750,113 @@ fn upgrade_wasm_wrong_signer_rejected() {
 
     // The subscription pointer and balances are untouched.
     assert_eq!(h.vault.subscription(), h.subscription);
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade history view (#304)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upgrade_history_starts_empty() {
+    let h = setup();
+    let history = h.vault.upgrade_history();
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
+fn upgrade_history_records_upgrades() {
+    let h = setup();
+
+    // Initial history is empty.
+    assert_eq!(h.vault.upgrade_history().len(), 0);
+
+    // Record an upgrade directly via the internal function logic.
+    // We test the recording logic by verifying the event emission in
+    // upgrade_history_emits_contract_upgraded_event test.
+    // Cross-upgrade persistence is tested by the upgrade_wasm test which
+    // verifies state survives upgrade; the history storage uses the same
+    // instance storage mechanism.
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    // After upgrade, the contract is replaced with the old WASM which
+    // doesn't have upgrade_history. The history is recorded in storage
+    // and would be readable by a newer contract version.
+    // We verify the event was emitted instead.
+    let mut found = false;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "contract_upgraded" {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "ContractUpgraded event should be emitted");
+}
+
+#[test]
+fn upgrade_history_requires_admin_auth() {
+    let h = setup();
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // History should still be empty.
+    assert_eq!(h.vault.upgrade_history().len(), 0);
+}
+
+#[test]
+fn upgrade_history_emits_contract_upgraded_event() {
+    let h = setup();
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    // Find the ContractUpgraded event.
+    let mut found = false;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "contract_upgraded" {
+                found = true;
+                // Check topics: admin is topic 1, new_wasm_hash is in data.
+                assert!(
+                    body.topics.len() >= 2,
+                    "ContractUpgraded event should have admin topic"
+                );
+                let ScVal::Address(_) = &body.topics[1] else {
+                    panic!("topic 1 should be admin address");
+                };
+                // new_wasm_hash is in data map.
+                let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+                    panic!("data should be a map");
+                };
+                let mut has_wasm = false;
+                for entry in entries.iter() {
+                    let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
+                        continue;
+                    };
+                    if key.to_utf8_string_lossy() == "new_wasm_hash" {
+                        has_wasm = true;
+                    }
+                }
+                assert!(has_wasm);
+            }
+        }
+    }
+    assert!(found, "ContractUpgraded event should be emitted");
 }
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ pub use error::Error;
 pub use events::{
     ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw, WithdrawTo,
 };
-pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow};
+pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow, UpgradeRecord};
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
@@ -622,6 +622,45 @@ mod contract {
             )
         }
 
+        /// Debit a subscriber once and pay multiple recipients from that debit.
+        ///
+        /// This generalizes [`Vault::debit_split_mandate`] to an arbitrary
+        /// number of recipients, so a single charge can settle the merchant
+        /// share, the protocol fee, a keeper tip and a referral share in one
+        /// cross-contract call. The subscription contract uses this to avoid
+        /// repeating the authorization check and balance read/write for each
+        /// leg.
+        ///
+        /// `legs` is a vector of `(to, amount)` pairs. The first amount must
+        /// be positive; subsequent amounts may be zero (they are skipped). The
+        /// sum of all amounts is checked against the subscriber's spendable
+        /// balance and spend limit exactly once.
+        ///
+        /// # Auth
+        /// Requires authorization from the registered `subscription` contract.
+        ///
+        /// # Events
+        /// Emits one [`Debit`] per non-zero leg, with balances reflecting the
+        /// running total after each leg (matching what sequential `debit`
+        /// calls would produce).
+        ///
+        /// # Errors
+        /// Returns [`Error::SubscriptionNotSet`] if no subscription contract is
+        /// set, [`Error::InvalidAmount`] if `legs` is empty, the first amount
+        /// is not positive, or any amount is negative, [`Error::AmountOverflow`]
+        /// if the sum overflows `i128`, or [`Error::InsufficientBalance`] if
+        /// the total exceeds the unreserved balance plus this mandate's reserve.
+        #[allow(clippy::too_many_arguments)]
+        pub fn debit_multi_mandate(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            legs: soroban_sdk::Vec<(Address, i128)>,
+        ) -> Result<(), Error> {
+            Self::do_debit_multi(&env, &user, &token, Some(mandate_id), legs)
+        }
+
         /// Earmark `amount` of the subscriber's `token` balance for one
         /// mandate (#295), replacing any reserve it already had. `0` releases
         /// the reserve.
@@ -787,6 +826,9 @@ mod contract {
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
         /// admin may upgrade; persistent state is untouched. (From #158.)
+        ///
+        /// Records the upgrade in the contract's upgrade history, which can be
+        /// queried via `upgrade_history` for transparency.
         pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
             let admin: Address = env
                 .storage()
@@ -800,11 +842,50 @@ mod contract {
 
             ContractUpgraded {
                 admin,
-                new_wasm_hash,
+                new_wasm_hash: new_wasm_hash.clone(),
             }
             .publish(&env);
 
+            // Record the upgrade in history.
+            Self::record_upgrade(&env, new_wasm_hash);
+
             Ok(())
+        }
+
+        /// Record an upgrade in the contract's upgrade history.
+        fn record_upgrade(env: &Env, wasm_hash: BytesN<32>) {
+            let version = String::from_str(env, env!("CARGO_PKG_VERSION"));
+            let ledger = env.ledger().sequence();
+            let record = UpgradeRecord {
+                version,
+                ledger,
+                wasm_hash,
+            };
+            let mut history: soroban_sdk::Vec<UpgradeRecord> = env
+                .storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+            history.push_back(record);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeHistory, &history);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        }
+
+        /// Get the contract's upgrade history.
+        ///
+        /// Returns a vector of upgrade records, oldest first. Each record
+        /// contains the version, ledger sequence, and wasm hash. The initial
+        /// deployment is not recorded; only explicit upgrades via `upgrade_wasm`
+        /// appear here.
+        pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
+            env.storage()
+                .instance()
+                .get(&DataKey::UpgradeHistory)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
 
         /// Set or replace a per-period ceiling on total debits for
@@ -951,6 +1032,80 @@ mod contract {
                     balance: after_both,
                 }
                 .publish(env);
+            }
+
+            Ok(())
+        }
+
+        /// Internal implementation of [`Vault::debit_multi_mandate`].
+        fn do_debit_multi(
+            env: &Env,
+            user: &Address,
+            token: &Address,
+            mandate_id: Option<u64>,
+            legs: soroban_sdk::Vec<(Address, i128)>,
+        ) -> Result<(), Error> {
+            Self::require_subscription(env)?;
+
+            if legs.is_empty() {
+                return Err(Error::InvalidAmount);
+            }
+
+            let first = legs.get_unchecked(0);
+            if first.1 <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            for i in 1..legs.len() {
+                let leg = legs.get_unchecked(i);
+                if leg.1 < 0 {
+                    return Err(Error::InvalidAmount);
+                }
+            }
+
+            // Sum all amounts and check against spendable balance and spend limit once.
+            let mut total: i128 = 0;
+            for i in 0..legs.len() {
+                let leg = legs.get_unchecked(i);
+                total = total.checked_add(leg.1).ok_or(Error::AmountOverflow)?;
+            }
+
+            // The whole total counts against the spend limit once.
+            let after_all = Self::spend(env, user, token, mandate_id, total)?;
+
+            let vault = env.current_contract_address();
+            let token_client = token::TokenClient::new(env, token);
+
+            // Track running balance for events: start from after_all and add back
+            // each leg's amount as we go backwards, or track forward.
+            // We want the first event to show balance after first leg, etc.
+            // after_all is the balance after ALL legs.
+            // after_first = after_all + sum(legs[1..])
+            let mut running_balance = after_all;
+            for i in (1..legs.len()).rev() {
+                let leg = legs.get_unchecked(i);
+                running_balance += leg.1;
+            }
+
+            for i in 0..legs.len() {
+                let leg = legs.get_unchecked(i);
+                let to = &leg.0;
+                let amount = leg.1;
+
+                if amount > 0 {
+                    token_client.transfer(&vault, to, &amount);
+
+                    Debit {
+                        user: user.clone(),
+                        token: token.clone(),
+                        to: to.clone(),
+                        amount,
+                        balance: running_balance,
+                    }
+                    .publish(env);
+
+                    running_balance -= amount;
+                }
             }
 
             Ok(())

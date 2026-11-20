@@ -1,6 +1,6 @@
 //! Data types and storage keys for the subscription contract.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, String};
 
 /// Values from a settled charge. `merchant_amount` matches `Charged.amount`:
 /// the merchant's share after the protocol fee and keeper tip.
@@ -160,6 +160,18 @@ pub struct MandateSummary {
     pub token: Address,
 }
 
+/// A single contract upgrade record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeRecord {
+    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    pub version: String,
+    /// Ledger sequence number when the upgrade was applied.
+    pub ledger: u32,
+    /// Hash of the new wasm code.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
+}
+
 /// Storage keys used by the subscription contract.
 #[contracttype]
 #[derive(Clone)]
@@ -206,4 +218,7 @@ pub enum DataKey {
     /// Grace window in seconds frozen into a mandate at sign-up (#312).
     /// Missing means zero.
     MandateGracePeriod(u64),
+    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Append-only; the initial deployment is not recorded.
+    UpgradeHistory,
 }

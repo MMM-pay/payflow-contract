@@ -1,6 +1,6 @@
 //! Storage keys for the vault contract.
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, String};
 
 /// Keys used to partition the vault's instance and persistent storage.
 #[contracttype]
@@ -34,6 +34,9 @@ pub enum DataKey {
     /// Fixed-window counter for deposit/withdraw operations (#314): where the
     /// current window starts and how many operations it already contains.
     OperationWindow(Address, Address),
+    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Append-only; the initial deployment is not recorded.
+    UpgradeHistory,
 }
 
 /// A subscriber's optional ceiling on total debits per fixed time window,
@@ -68,4 +71,16 @@ pub struct SpendWindow {
 pub struct OperationWindow {
     pub start: u64,
     pub operations: u32,
+}
+
+/// A single contract upgrade record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeRecord {
+    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    pub version: String,
+    /// Ledger sequence number when the upgrade was applied.
+    pub ledger: u32,
+    /// Hash of the new wasm code.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
 }

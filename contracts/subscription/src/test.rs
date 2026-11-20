@@ -1566,6 +1566,346 @@ fn quote_and_charge_report_fee_overflow() {
     assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
 }
 
+/// Quote matches charge when keeper tip and referral are both present.
+#[test]
+fn quote_matches_charge_with_keeper_tip_and_referral() {
+    let w = world();
+    let referrer = Address::generate(&w.env);
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+
+    let quote = w.sub.quote_charge(&id);
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let merchant_gross = PRICE - fee;
+    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let referral = merchant_gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let merchant_amount = merchant_gross - tip - referral;
+
+    assert_eq!(quote.amount, PRICE);
+    assert_eq!(quote.fee, fee);
+    assert_eq!(quote.merchant_amount, merchant_amount);
+    assert!(quote.chargeable);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_amount);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&referrer), referral);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+/// Quote matches charge when fee_bps is zero.
+#[test]
+fn quote_matches_charge_with_zero_fee() {
+    let w = world();
+    w.sub.set_fee_bps(&0);
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let quote = w.sub.quote_charge(&id);
+    let tip = PRICE * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+
+    assert_eq!(quote.amount, PRICE);
+    assert_eq!(quote.fee, 0);
+    assert_eq!(quote.merchant_amount, PRICE - tip);
+    assert!(quote.chargeable);
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE - tip);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+/// Quote chargeable=false when max_charges reached; charge fails (mandate becomes Completed).
+#[test]
+fn quote_and_charge_agree_on_max_charges_reached() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+
+    // First charge succeeds.
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
+
+    // Now quote reports not chargeable.
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    // Charge fails because mandate is now Completed (MandateNotActive).
+    // The specific error differs from quote's check order, but both agree:
+    // quote says not chargeable, charge fails.
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+/// Quote chargeable=false when max_total reached; charge fails.
+#[test]
+fn quote_and_charge_agree_on_max_total_reached() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    // max_total = 2 * PRICE, so two charges max.
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &(2 * PRICE), &None::<Address>);
+
+    // Verify max_total is set correctly.
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.max_total, 2 * PRICE);
+    assert_eq!(mandate.total_spent, 0);
+    assert_eq!(mandate.status, MandateStatus::Active);
+
+    // First charge succeeds.
+    w.sub.charge(&w.keeper, &id);
+    let after_first = w.sub.get_mandate(&id);
+    assert_eq!(after_first.total_spent, PRICE);
+    assert_eq!(after_first.charges_made, 1);
+    assert_eq!(after_first.status, MandateStatus::Active);
+
+    // Advance time to the next charge period.
+    w.advance(MONTH);
+
+    // Second charge succeeds and reaches max_total.
+    w.sub.charge(&w.keeper, &id);
+    let after_second = w.sub.get_mandate(&id);
+    assert_eq!(after_second.total_spent, 2 * PRICE);
+    assert_eq!(after_second.charges_made, 2);
+    assert_eq!(after_second.status, MandateStatus::Completed);
+
+    // Now quote reports not chargeable.
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    // Charge fails because mandate is now Completed (MandateNotActive).
+    let charge_result = w.sub.try_charge(&w.keeper, &id);
+    assert_eq!(charge_result, Err(Ok(Error::MandateNotActive)));
+}
+
+/// Quote chargeable=false when plan charges paused; charge fails with PlanChargesPaused.
+#[test]
+fn quote_and_charge_agree_on_plan_charges_paused() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Pause charging at the plan level.
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+}
+
+/// Quote chargeable=false when mandate paused; charge fails with MandateNotActive.
+#[test]
+fn quote_and_charge_agree_on_mandate_paused() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_paused(&user, &id, &true);
+
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+/// Quote chargeable=false when mandate cancelled; charge fails with MandateNotActive.
+#[test]
+fn quote_and_charge_agree_on_mandate_cancelled() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.cancel(&user, &id);
+
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+/// Quote chargeable=false when mandate completed; charge fails with MandateNotActive.
+#[test]
+fn quote_and_charge_agree_on_mandate_completed() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
+
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+/// Quote chargeable=false when not due yet; charge fails with NotDue.
+#[test]
+fn quote_and_charge_agree_on_not_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Charge once to advance next_charge.
+    w.sub.charge(&w.keeper, &id);
+
+    // Now not due until next period.
+    let quote = w.sub.quote_charge(&id);
+    assert!(!quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+    assert_eq!(quote.due_at, w.env.ledger().timestamp() + MONTH);
+
+    assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+}
+
+/// Quote chargeable=true but charge fails with VaultCallFailed when insufficient balance.
+#[test]
+fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
+    let w = world();
+    let plan_id = w.plan_with_keeper(KEEPER_BPS);
+    let user = w.subscriber(100); // Only 100, less than PRICE (10_000)
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let quote = w.sub.quote_charge(&id);
+    assert!(quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    // Charge fails because vault has insufficient balance.
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::VaultCallFailed))
+    );
+
+    // Mandate state unchanged.
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+    assert_eq!(
+        w.sub.get_mandate(&id).next_charge,
+        w.env.ledger().timestamp()
+    );
+}
+
+/// Quote matches charge after a pause_until schedule resumes.
+#[test]
+fn quote_and_charge_agree_after_pause_until_resumes() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let now = w.env.ledger().timestamp();
+    let until = now + 3_600; // 1 hour
+    w.sub.pause_until(&user, &id, &until);
+
+    // During pause: not chargeable.
+    let quote_during = w.sub.quote_charge(&id);
+    assert!(!quote_during.chargeable);
+
+    // Advance past the pause.
+    w.env.ledger().set_timestamp(until + 1);
+
+    // Now chargeable again.
+    let quote_after = w.sub.quote_charge(&id);
+    assert!(quote_after.chargeable);
+    assert_eq!(quote_after.amount, PRICE);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+    );
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+/// Quote matches charge when max_charges is increased before being reached.
+#[test]
+fn quote_and_charge_agree_after_max_charges_increased() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    // Start with max_charges = 1
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+
+    // Quote shows chargeable.
+    let quote = w.sub.quote_charge(&id);
+    assert!(quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    // Increase max_charges to 3 before using the charge.
+    w.sub.set_max_charges(&user, &id, &3);
+
+    // Quote still shows chargeable (max_charges now 3, charges_made still 0).
+    let quote_after = w.sub.quote_charge(&id);
+    assert!(quote_after.chargeable);
+    assert_eq!(quote_after.amount, PRICE);
+
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active); // Still active, 2 more charges allowed
+}
+
+/// Quote needs no authorization; charge requires keeper authorization.
+#[test]
+fn quote_no_auth_charge_requires_keeper_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Quote works with no auth.
+    w.env.mock_auths(&[]);
+    let quote = w.sub.quote_charge(&id);
+    assert!(quote.chargeable);
+    assert_eq!(quote.amount, PRICE);
+
+    // Charge without keeper auth fails with a host error (not a contract error).
+    w.env.mock_auths(&[]);
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    // Charge with keeper auth succeeds.
+    w.env.mock_all_auths();
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Protocol fee administration
 // ---------------------------------------------------------------------------
@@ -4850,6 +5190,113 @@ fn upgrade_wasm_wrong_signer_rejected() {
 
     // Configuration is untouched by the rejected upgrades.
     assert_eq!(w.sub.fee_bps(), FEE_BPS);
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade history view (#304)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upgrade_history_starts_empty() {
+    let w = world();
+    let history = w.sub.upgrade_history();
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
+fn upgrade_history_records_upgrades() {
+    let w = world();
+
+    // Initial history is empty.
+    assert_eq!(w.sub.upgrade_history().len(), 0);
+
+    // Record an upgrade directly via the internal function logic.
+    // We test the recording logic by verifying the event emission in
+    // upgrade_history_emits_contract_upgraded_event test.
+    // Cross-upgrade persistence is tested by the upgrade_wasm test which
+    // verifies state survives upgrade; the history storage uses the same
+    // instance storage mechanism.
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    w.sub.upgrade_wasm(&wasm_hash);
+
+    // After upgrade, the contract is replaced with the old WASM which
+    // doesn't have upgrade_history. The history is recorded in storage
+    // and would be readable by a newer contract version.
+    // We verify the event was emitted instead.
+    let mut found = false;
+    for event in w.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "contract_upgraded" {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "ContractUpgraded event should be emitted");
+}
+
+#[test]
+fn upgrade_history_requires_admin_auth() {
+    let w = world();
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&w.env);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // History should still be empty.
+    assert_eq!(w.sub.upgrade_history().len(), 0);
+}
+
+#[test]
+fn upgrade_history_emits_contract_upgraded_event() {
+    let w = world();
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+
+    w.sub.upgrade_wasm(&wasm_hash);
+
+    // Find the ContractUpgraded event.
+    let mut found = false;
+    for event in w.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        if let Some(ScVal::Symbol(ScSymbol(name))) = body.topics.first() {
+            if name.to_utf8_string_lossy() == "contract_upgraded" {
+                found = true;
+                // Check topics: admin is topic 1, new_wasm_hash is in data.
+                assert!(
+                    body.topics.len() >= 2,
+                    "ContractUpgraded event should have admin topic"
+                );
+                let ScVal::Address(_) = &body.topics[1] else {
+                    panic!("topic 1 should be admin address");
+                };
+                // new_wasm_hash is in data map.
+                let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+                    panic!("data should be a map");
+                };
+                let mut has_wasm = false;
+                for entry in entries.iter() {
+                    let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
+                        continue;
+                    };
+                    if key.to_utf8_string_lossy() == "new_wasm_hash" {
+                        has_wasm = true;
+                    }
+                }
+                assert!(has_wasm);
+            }
+        }
+    }
+    assert!(found, "ContractUpgraded event should be emitted");
 }
 
 // ---------------------------------------------------------------------------

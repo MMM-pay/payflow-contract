@@ -97,4 +97,19 @@ pub enum DataKey {
     /// Grace window for plans opened after the setting was changed (#312).
     /// Missing means zero.
     PlanGracePeriod(u64),
+    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Append-only; the initial deployment is not recorded.
+    UpgradeHistory,
+}
+
+/// A single contract upgrade record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeRecord {
+    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    pub version: String,
+    /// Ledger sequence number when the upgrade was applied.
+    pub ledger: u32,
+    /// Hash of the new wasm code.
+    pub wasm_hash: soroban_sdk::BytesN<32>,
 }

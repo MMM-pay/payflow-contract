@@ -61,6 +61,17 @@ pub trait VaultInterface {
         amount_b: i128,
     );
 
+    /// `debit_multi_mandate` on behalf of one mandate: that mandate's own
+    /// reserve (#295) is spendable too and is drawn down first. Settles
+    /// multiple recipients in one call (merchant, fee, tip, referral).
+    fn debit_multi_mandate(
+        env: Env,
+        user: Address,
+        token: Address,
+        mandate_id: u64,
+        legs: soroban_sdk::Vec<(Address, i128)>,
+    );
+
     /// Whether `debit_mandate` for `amount` would succeed right now on
     /// balance and spend-limit grounds. Used by `flag_failed_charge` (#296)
     /// to prove a due charge would fail before flagging it.
