@@ -3629,3 +3629,345 @@ fn deterministic_extreme_plan_inputs_never_trap() {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #320: every public view is side-effect free
+// ---------------------------------------------------------------------------
+
+/// Run one view call and prove it was read-only: the whole ledger (storage
+/// and TTLs) is identical afterwards, no contract events were published and
+/// no authorization was required. `env.events().all()` and `env.auths()`
+/// report the most recent top-level invocation, so this wraps one call.
+fn assert_read_only<T>(env: &Env, label: &str, call: impl FnOnce() -> T) -> T {
+    let before = env.to_ledger_snapshot();
+    let out = call();
+    let after = env.to_ledger_snapshot();
+    assert!(before == after, "view `{label}` mutated ledger state");
+    assert!(
+        env.events().all().events().is_empty(),
+        "view `{label}` emitted events"
+    );
+    assert!(
+        env.auths().is_empty(),
+        "view `{label}` required authorization"
+    );
+    out
+}
+
+fn simple_plan(env: &Env, client: &PlanRegistryClient, merchant: &Address, token: &Address) -> u64 {
+    client.create_plan(
+        merchant,
+        token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(env, "Pro Monthly"),
+        &String::from_str(env, ""),
+        &0,
+        &Symbol::new(env, ""),
+        &String::from_str(env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    )
+}
+
+/// A registry with an active plan, a paused one with a grace period, a
+/// retired one and a merchant profile, so every view has state to read.
+fn view_registry() -> (Env, PlanRegistryClient<'static>, Address, Address, [u64; 3]) {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let active = simple_plan(&env, &client, &merchant, &token);
+    let paused = simple_plan(&env, &client, &merchant, &token);
+    client.set_plan_charges_paused(&merchant, &paused, &true);
+    client.set_plan_grace_period(&merchant, &paused, &86_400);
+    let retired = simple_plan(&env, &client, &merchant, &token);
+    client.set_plan_active(&merchant, &retired, &false);
+    client.set_profile(
+        &merchant,
+        &String::from_str(&env, "Acme"),
+        &String::from_str(&env, "https://example.com"),
+    );
+    (env, client, merchant, token, [active, paused, retired])
+}
+
+#[test]
+fn every_registry_view_leaves_storage_events_and_auth_untouched() {
+    let (env, c, merchant, token, ids) = view_registry();
+    let env = &env;
+
+    assert_read_only(env, "version", || c.version());
+    assert_read_only(env, "admin", || c.admin());
+    assert_read_only(env, "next_plan_id", || c.next_plan_id());
+    assert_read_only(env, "upgrade_history", || c.upgrade_history());
+    assert_read_only(env, "profile", || c.profile(&merchant));
+    assert_read_only(env, "merchant_plan_count", || {
+        c.merchant_plan_count(&merchant)
+    });
+    assert_read_only(env, "merchant_plans", || {
+        c.merchant_plans(&merchant, &0, &10)
+    });
+    assert_read_only(env, "token_plan_count", || c.token_plan_count(&token));
+    assert_read_only(env, "token_plans", || c.token_plans(&token, &0, &10));
+    for id in ids {
+        assert_read_only(env, "get_plan", || c.get_plan(&id));
+        assert_read_only(env, "plan_paused", || c.plan_paused(&id));
+        assert_read_only(env, "plan_charges_paused", || c.plan_charges_paused(&id));
+        assert_read_only(env, "plan_grace_period", || c.plan_grace_period(&id));
+    }
+
+    // Pages past the end and unknown keys.
+    let stranger = Address::generate(env);
+    assert_read_only(env, "merchant_plans (past end)", || {
+        c.merchant_plans(&merchant, &1_000, &10)
+    });
+    assert_read_only(env, "merchant_plans (stranger)", || {
+        c.merchant_plans(&stranger, &0, &10)
+    });
+    assert_read_only(env, "token_plan_count (unknown token)", || {
+        c.token_plan_count(&stranger)
+    });
+}
+
+#[test]
+fn registry_views_need_no_signature() {
+    let (env, c, merchant, token, [active, ..]) = view_registry();
+    let env = &env;
+    env.set_auths(&[]);
+
+    // A write is now refused, proving the auth mock is gone...
+    assert!(c.try_set_plan_active(&merchant, &active, &false).is_err());
+    assert!(c.get_plan(&active).active);
+
+    // ...but views still answer, unsigned and side-effect free.
+    assert_read_only(env, "get_plan (unsigned)", || c.get_plan(&active));
+    assert_read_only(env, "plan_charges_paused (unsigned)", || {
+        c.plan_charges_paused(&active)
+    });
+    assert_read_only(env, "plan_grace_period (unsigned)", || {
+        c.plan_grace_period(&active)
+    });
+    assert_read_only(env, "profile (unsigned)", || c.profile(&merchant));
+    assert_read_only(env, "merchant_plans (unsigned)", || {
+        c.merchant_plans(&merchant, &0, &10)
+    });
+    assert_read_only(env, "token_plans (unsigned)", || {
+        c.token_plans(&token, &0, &10)
+    });
+    assert_read_only(env, "next_plan_id (unsigned)", || c.next_plan_id());
+}
+
+#[test]
+fn failing_registry_views_are_side_effect_free_too() {
+    let (env, c, _, _, _) = view_registry();
+    let env = &env;
+    let missing = c.next_plan_id() + 50;
+    let stranger = Address::generate(env);
+
+    assert_eq!(
+        assert_read_only(env, "get_plan (missing)", || c.try_get_plan(&missing)),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "plan_paused (missing)", || c.try_plan_paused(&missing)),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "plan_charges_paused (missing)", || {
+            c.try_plan_charges_paused(&missing)
+        }),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "plan_grace_period (missing)", || {
+            c.try_plan_grace_period(&missing)
+        }),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "profile (missing)", || c.try_profile(&stranger)),
+        Err(Ok(Error::ProfileNotFound))
+    );
+}
+
+#[test]
+#[should_panic(expected = "mutated ledger state")]
+fn the_registry_read_only_check_catches_a_state_change() {
+    let (env, c, merchant, _, [active, ..]) = view_registry();
+    assert_read_only(&env, "set_plan_active", || {
+        c.set_plan_active(&merchant, &active, &false)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// #313: plan ids are never reused after a plan is retired
+// ---------------------------------------------------------------------------
+
+/// A deterministic random mix of single and batch creation, retirement
+/// (`set_plan_active(false)`, `deactivate_page`), reactivation, successor
+/// links and ownership transfer, interleaved with calls that fail. No id may
+/// ever be issued twice, failed calls must not consume one, and a retired
+/// plan's id must keep resolving to that same plan: a recycled id would let
+/// a stale reference (a subscriber's mandate, an indexer, a successor link)
+/// silently point at a different merchant's terms.
+#[test]
+fn fuzz_plan_ids_are_never_reused_after_retirement() {
+    let (env, c, _) = setup();
+    let merchants = [Address::generate(&env), Address::generate(&env)];
+    let token = Address::generate(&env);
+    let mut seed = 0x0313_0313_cafe_f00du64;
+    let next = |s: &mut u64| {
+        *s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *s
+    };
+
+    // (id, owner, amount) for every plan ever created.
+    let mut issued: std::vec::Vec<(u64, Address, i128)> = std::vec::Vec::new();
+    let mut retired_any = false;
+
+    for round in 0..200u64 {
+        let roll = next(&mut seed);
+        let pick = next(&mut seed) as usize;
+        let before = c.next_plan_id();
+        let merchant = merchants[pick % merchants.len()].clone();
+
+        match roll % 8 {
+            0 | 1 => {
+                let amount = 1_000 + round as i128;
+                let p = batch_plan(&env, &token, amount, "Fuzz");
+                let id = c.create_plan(
+                    &merchant,
+                    &p.token,
+                    &p.amount,
+                    &p.period,
+                    &p.name,
+                    &p.description,
+                    &p.keeper_bps,
+                    &p.category,
+                    &p.terms_uri,
+                    &p.available_until,
+                    &p.referral_bps,
+                    &p.payout,
+                    &p.max_subscribers,
+                );
+                assert_eq!(id, before);
+                assert!(
+                    issued.iter().all(|(seen, _, _)| *seen != id),
+                    "plan id {id} reissued"
+                );
+                issued.push((id, merchant, amount));
+            }
+            2 => {
+                let n = 1 + (roll >> 8) % 3;
+                let mut batch = Vec::new(&env);
+                let mut amounts = std::vec::Vec::new();
+                for k in 0..n {
+                    let amount = 50_000 + (round * 10 + k) as i128;
+                    amounts.push(amount);
+                    batch.push_back(batch_plan(&env, &token, amount, "Batch"));
+                }
+                let ids = c.create_plans(&merchant, &batch);
+                for (k, id) in ids.iter().enumerate() {
+                    assert_eq!(id, before + k as u64);
+                    assert!(
+                        issued.iter().all(|(seen, _, _)| *seen != id),
+                        "plan id {id} reissued"
+                    );
+                    issued.push((id, merchant.clone(), amounts[k]));
+                }
+            }
+            3 if !issued.is_empty() => {
+                let (id, owner, _) = issued[pick % issued.len()].clone();
+                c.set_plan_active(&owner, &id, &false);
+                retired_any = true;
+            }
+            4 => {
+                c.deactivate_page(&merchant, &0, &5);
+                retired_any = true;
+            }
+            5 if !issued.is_empty() => {
+                // Reactivating or linking a successor re-uses the *same* id;
+                // it never creates or frees one.
+                let (id, owner, _) = issued[pick % issued.len()].clone();
+                if roll & 0x100 == 0 {
+                    c.set_plan_active(&owner, &id, &true);
+                } else if let Some((succ, _, _)) = issued
+                    .iter()
+                    .find(|(other, o, _)| *other != id && *o == owner)
+                    .cloned()
+                {
+                    c.set_successor(&owner, &id, &succ);
+                }
+            }
+            6 if !issued.is_empty() => {
+                // Hand a plan to the other merchant.
+                let at = pick % issued.len();
+                let (id, owner, amount) = issued[at].clone();
+                let other = merchants.iter().find(|m| **m != owner).unwrap().clone();
+                c.propose_plan_owner(&owner, &id, &other);
+                c.accept_plan_owner(&other, &id);
+                issued[at] = (id, other, amount);
+            }
+            _ => {
+                // Failure paths: invalid input, wrong owner, empty batch and
+                // a batch with one bad plan. None may consume an id.
+                assert!(c
+                    .try_create_plan(
+                        &merchant,
+                        &token,
+                        &0,
+                        &2_592_000,
+                        &String::from_str(&env, "Bad"),
+                        &String::from_str(&env, ""),
+                        &0,
+                        &Symbol::new(&env, ""),
+                        &String::from_str(&env, ""),
+                        &0u64,
+                        &0u32,
+                        &None::<Address>,
+                        &0u32,
+                    )
+                    .is_err());
+                assert_eq!(
+                    c.try_create_plans(&merchant, &Vec::new(&env)),
+                    Err(Ok(Error::EmptyBatch))
+                );
+                let mut bad = Vec::new(&env);
+                bad.push_back(batch_plan(&env, &token, 5_000, "Good"));
+                bad.push_back(batch_plan(&env, &token, 0, "Bad"));
+                assert!(c.try_create_plans(&merchant, &bad).is_err());
+                if let Some((id, owner, _)) = issued.get(pick % issued.len().max(1)).cloned() {
+                    let stranger = merchants.iter().find(|m| **m != owner).unwrap();
+                    assert_eq!(
+                        c.try_set_plan_active(stranger, &id, &false),
+                        Err(Ok(Error::NotPlanOwner))
+                    );
+                }
+                assert_eq!(c.next_plan_id(), before, "a failed call consumed an id");
+            }
+        }
+        assert!(
+            c.next_plan_id() >= before,
+            "the plan counter moved backwards"
+        );
+    }
+
+    assert!(retired_any);
+    let next_id = c.next_plan_id();
+    assert_eq!(next_id, issued.len() as u64 + 1);
+
+    // Every id, retired or not, still resolves to the plan it was issued for.
+    for (id, owner, amount) in &issued {
+        let p = c.get_plan(id);
+        assert_eq!(p.id, *id);
+        assert_eq!(&p.merchant, owner);
+        assert_eq!(p.amount, *amount);
+    }
+
+    // And the next plan after all that churn gets a brand-new id.
+    let fresh = simple_plan(&env, &c, &merchants[0], &token);
+    assert_eq!(fresh, next_id);
+}

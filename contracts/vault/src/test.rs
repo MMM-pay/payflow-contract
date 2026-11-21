@@ -2562,3 +2562,149 @@ fn deterministic_random_amounts_never_reach_a_host_trap() {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #320: every public view is side-effect free
+// ---------------------------------------------------------------------------
+
+/// Run one view call and prove it was read-only: the whole ledger (storage
+/// and TTLs) is identical afterwards, no contract events were published and
+/// no authorization was required. `env.events().all()` and `env.auths()`
+/// report the most recent top-level invocation, so this wraps one call.
+fn assert_read_only<T>(env: &Env, label: &str, call: impl FnOnce() -> T) -> T {
+    let before = env.to_ledger_snapshot();
+    let out = call();
+    let after = env.to_ledger_snapshot();
+    assert!(before == after, "view `{label}` mutated ledger state");
+    assert!(
+        env.events().all().events().is_empty(),
+        "view `{label}` emitted events"
+    );
+    assert!(
+        env.auths().is_empty(),
+        "view `{label}` required authorization"
+    );
+    out
+}
+
+/// A vault holding a balance with a per-mandate reserve, a spend limit that
+/// has been partly used, a deposit cap and an active allowlist.
+fn view_vault() -> (Harness<'static>, Address) {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.token_admin.mint(&user, &10_000);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_deposit_cap(&user, &h.token, &9_000);
+    h.vault.deposit(&user, &h.token, &5_000);
+    h.vault.set_reserve(&user, &h.token, &7, &1_000);
+    h.vault
+        .set_spend_limit(&user, &h.token, &3_000, &THIRTY_DAYS);
+    h.vault
+        .debit(&user, &h.token, &Address::generate(&h.env), &500);
+    (h, user)
+}
+
+#[test]
+fn every_vault_view_leaves_storage_events_and_auth_untouched() {
+    let (h, user) = view_vault();
+    let env = &h.env;
+    let v = &h.vault;
+    let t = &h.token;
+
+    assert_read_only(env, "version", || v.version());
+    assert_read_only(env, "admin", || v.admin());
+    assert_read_only(env, "subscription", || v.subscription());
+    assert_read_only(env, "upgrade_history", || v.upgrade_history());
+    assert_read_only(env, "allowlist_enabled", || v.allowlist_enabled());
+    assert_read_only(env, "token_allowed", || v.token_allowed(t));
+    assert_read_only(env, "balance", || v.balance(&user, t));
+    assert_read_only(env, "deposit_cap", || v.deposit_cap(&user, t));
+    assert_read_only(env, "can_deposit", || v.can_deposit(&user, t));
+    assert_read_only(env, "reserved", || v.reserved(&user, t, &7));
+    assert_read_only(env, "reserved_total", || v.reserved_total(&user, t));
+    assert_read_only(env, "unreserved_balance", || v.unreserved_balance(&user, t));
+    assert_read_only(env, "spend_limit", || v.spend_limit(&user, t));
+    // can_debit evaluates the spend window; checking it must not consume it.
+    assert_read_only(env, "can_debit (reserved mandate)", || {
+        v.can_debit(&user, t, &7, &1_000)
+    });
+    assert_read_only(env, "can_debit (other mandate)", || {
+        v.can_debit(&user, t, &8, &100)
+    });
+}
+
+#[test]
+fn vault_views_need_no_signature() {
+    let (h, user) = view_vault();
+    let env = &h.env;
+    let v = &h.vault;
+    let t = &h.token;
+    env.set_auths(&[]);
+
+    // A write is now refused, proving the auth mock is gone...
+    assert!(v.try_withdraw(&user, t, &100).is_err());
+    assert_eq!(v.balance(&user, t), 4_500);
+
+    // ...but views still answer, unsigned and side-effect free.
+    assert_read_only(env, "balance (unsigned)", || v.balance(&user, t));
+    assert_read_only(env, "unreserved_balance (unsigned)", || {
+        v.unreserved_balance(&user, t)
+    });
+    assert_read_only(env, "can_debit (unsigned)", || {
+        v.can_debit(&user, t, &7, &100)
+    });
+    assert_read_only(env, "can_deposit (unsigned)", || v.can_deposit(&user, t));
+    assert_read_only(env, "spend_limit (unsigned)", || v.spend_limit(&user, t));
+    assert_read_only(env, "admin (unsigned)", || v.admin());
+}
+
+#[test]
+fn failing_vault_views_are_side_effect_free_too() {
+    let (h, user) = view_vault();
+    let env = &h.env;
+    let v = &h.vault;
+    let t = &h.token;
+    let stranger = Address::generate(env);
+    let other_token = Address::generate(env);
+
+    // Negative answers (rather than errors) still write nothing.
+    assert!(!assert_read_only(env, "can_debit (zero)", || {
+        v.can_debit(&user, t, &7, &0)
+    }));
+    assert!(!assert_read_only(env, "can_debit (negative)", || {
+        v.can_debit(&user, t, &7, &-1)
+    }));
+    assert!(!assert_read_only(env, "can_debit (over balance)", || {
+        v.can_debit(&user, t, &7, &1_000_000)
+    }));
+    assert!(!assert_read_only(
+        env,
+        "can_debit (over spend limit)",
+        || { v.can_debit(&user, t, &7, &2_600) }
+    ));
+    assert!(!assert_read_only(
+        env,
+        "can_deposit (unlisted token)",
+        || { v.can_deposit(&user, &other_token) }
+    ));
+    assert_eq!(
+        assert_read_only(env, "balance (stranger)", || v.balance(&stranger, t)),
+        0
+    );
+
+    // An unconfigured vault reports a typed error, still without writing.
+    let admin = Address::generate(env);
+    let bare = VaultClient::new(env, &env.register(Vault, (admin,)));
+    assert_eq!(
+        assert_read_only(env, "subscription (unset)", || bare.try_subscription()),
+        Err(Ok(Error::SubscriptionNotSet))
+    );
+}
+
+#[test]
+#[should_panic(expected = "mutated ledger state")]
+fn the_vault_read_only_check_catches_a_state_change() {
+    let (h, user) = view_vault();
+    assert_read_only(&h.env, "withdraw", || h.vault.withdraw(&user, &h.token, &1));
+}

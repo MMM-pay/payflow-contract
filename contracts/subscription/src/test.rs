@@ -6238,3 +6238,574 @@ fn deterministic_random_queries_never_reach_a_host_trap() {
         assert_typed_error(w.sub.try_upgrade(&user, &id, &plan));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #320: every public view is side-effect free
+// ---------------------------------------------------------------------------
+
+/// Run one view call and prove it was read-only: the whole ledger (every
+/// contract's storage, and every entry's TTL) is byte-for-byte identical
+/// afterwards, the call published no contract events, and it asked nobody to
+/// authorize anything. Indexers and wallets call these views through
+/// simulation and never sign, so a view that wrote, emitted or required auth
+/// would be a bug even if the value it returned were correct.
+///
+/// `env.events().all()` and `env.auths()` report the most recent top-level
+/// invocation, so this wraps exactly one client call at a time.
+fn assert_read_only<T>(env: &Env, label: &str, call: impl FnOnce() -> T) -> T {
+    let before = env.to_ledger_snapshot();
+    let out = call();
+    let after = env.to_ledger_snapshot();
+    assert!(before == after, "view `{label}` mutated ledger state");
+    assert!(
+        env.events().all().events().is_empty(),
+        "view `{label}` emitted events"
+    );
+    assert!(
+        env.auths().is_empty(),
+        "view `{label}` required authorization"
+    );
+    out
+}
+
+/// A world with something in every index a view reads: an active mandate that
+/// has been charged, a paused one, a cancelled one, and a capped plan, so the
+/// views below are exercised against real state rather than empty storage.
+fn view_world() -> (World<'static>, Address, u64, u64, u64, u64) {
+    let w = world();
+    let plan_id = w.plan_with_cap(5);
+    let user = w.subscriber(1_000_000);
+    let active = w.sub.subscribe(&user, &plan_id, &3, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &active);
+    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_paused(&user, &paused, &true);
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &cancelled);
+    w.advance(MONTH);
+    (w, user, plan_id, active, paused, cancelled)
+}
+
+#[test]
+fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
+    let (w, user, plan_id, active, paused, cancelled) = view_world();
+    let env = &w.env;
+    let s = &w.sub;
+
+    assert_read_only(env, "version", || s.version());
+    assert_read_only(env, "admin", || s.admin());
+    assert_read_only(env, "plan_registry", || s.plan_registry());
+    assert_read_only(env, "vault", || s.vault());
+    assert_read_only(env, "fee_bps", || s.fee_bps());
+    assert_read_only(env, "next_mandate_id", || s.next_mandate_id());
+    assert_read_only(env, "upgrade_history", || s.upgrade_history());
+
+    for id in [active, paused, cancelled] {
+        assert_read_only(env, "get_mandate", || s.get_mandate(&id));
+        assert_read_only(env, "estimated_end", || s.estimated_end(&id));
+        assert_read_only(env, "is_due", || s.is_due(&id));
+        assert_read_only(env, "first_failed_charge", || s.first_failed_charge(&id));
+        assert_read_only(env, "mandate_grace_period", || s.mandate_grace_period(&id));
+        assert_read_only(env, "is_in_grace_period", || s.is_in_grace_period(&id));
+    }
+    // quote_charge reads the plan registry and the vault too: a cross-contract
+    // read must not write in either of them.
+    assert_read_only(env, "quote_charge", || s.quote_charge(&active));
+
+    assert_read_only(env, "due_mandates", || s.due_mandates(&w.merchant, &0, &10));
+    assert_read_only(env, "committed_per_period", || {
+        s.committed_per_period(&user, &w.token, &MONTH)
+    });
+    assert_read_only(env, "subscriber_mandate_count", || {
+        s.subscriber_mandate_count(&user)
+    });
+    assert_read_only(env, "subscriber_mandates", || {
+        s.subscriber_mandates(&user, &0, &10)
+    });
+    assert_read_only(env, "subscriber_mandate_summaries", || {
+        s.subscriber_mandate_summaries(&user, &0, &10)
+    });
+    assert_read_only(env, "merchant_mandate_count", || {
+        s.merchant_mandate_count(&w.merchant)
+    });
+    assert_read_only(env, "merchant_mandates", || {
+        s.merchant_mandates(&w.merchant, &0, &10)
+    });
+    assert_read_only(env, "plan_mandate_count", || s.plan_mandate_count(&plan_id));
+    assert_read_only(env, "plan_mandates", || s.plan_mandates(&plan_id, &0, &10));
+    assert_read_only(env, "plan_subscriber_count", || {
+        s.plan_subscriber_count(&plan_id)
+    });
+    assert_read_only(env, "plan_committed_revenue", || {
+        s.plan_committed_revenue(&plan_id)
+    });
+
+    // Pages past the end and unknown keys read nothing and write nothing.
+    let stranger = Address::generate(env);
+    assert_read_only(env, "subscriber_mandates (past end)", || {
+        s.subscriber_mandates(&user, &1_000, &10)
+    });
+    assert_read_only(env, "subscriber_mandate_summaries (stranger)", || {
+        s.subscriber_mandate_summaries(&stranger, &0, &10)
+    });
+    assert_read_only(env, "due_mandates (stranger)", || {
+        s.due_mandates(&stranger, &0, &10)
+    });
+    assert_read_only(env, "plan_mandates (unknown plan)", || {
+        s.plan_mandates(&9_999, &0, &10)
+    });
+}
+
+/// The purity check itself must not be vacuous: wrapping a call that does
+/// write is caught.
+#[test]
+#[should_panic(expected = "mutated ledger state")]
+fn the_read_only_check_catches_a_state_change() {
+    let (w, user, _, active, _, _) = view_world();
+    assert_read_only(&w.env, "set_paused", || {
+        w.sub.set_paused(&user, &active, &true)
+    });
+}
+
+#[test]
+fn subscription_views_need_no_signature() {
+    let (w, user, plan_id, active, _, _) = view_world();
+    let env = &w.env;
+    let s = &w.sub;
+
+    // Drop the blanket auth mock: from here on any `require_auth` fails.
+    env.set_auths(&[]);
+
+    // Prove the switch took: a state-changing call is now refused...
+    assert!(s.try_set_paused(&user, &active, &true).is_err());
+    assert_eq!(s.get_mandate(&active).status, MandateStatus::Active);
+
+    // ...while every view still answers, unsigned, without side effects.
+    assert_read_only(env, "get_mandate (unsigned)", || s.get_mandate(&active));
+    assert_read_only(env, "is_due (unsigned)", || s.is_due(&active));
+    assert_read_only(env, "quote_charge (unsigned)", || s.quote_charge(&active));
+    assert_read_only(env, "estimated_end (unsigned)", || s.estimated_end(&active));
+    assert_read_only(env, "is_in_grace_period (unsigned)", || {
+        s.is_in_grace_period(&active)
+    });
+    assert_read_only(env, "due_mandates (unsigned)", || {
+        s.due_mandates(&w.merchant, &0, &10)
+    });
+    assert_read_only(env, "subscriber_mandate_summaries (unsigned)", || {
+        s.subscriber_mandate_summaries(&user, &0, &10)
+    });
+    assert_read_only(env, "committed_per_period (unsigned)", || {
+        s.committed_per_period(&user, &w.token, &MONTH)
+    });
+    assert_read_only(env, "plan_committed_revenue (unsigned)", || {
+        s.plan_committed_revenue(&plan_id)
+    });
+    assert_read_only(env, "admin (unsigned)", || s.admin());
+}
+
+#[test]
+fn failing_subscription_views_are_side_effect_free_too() {
+    let (w, _, _, _, _, cancelled) = view_world();
+    let env = &w.env;
+    let s = &w.sub;
+    let missing = s.next_mandate_id() + 100;
+
+    // Error paths return a typed error and leave no trace.
+    assert_eq!(
+        assert_read_only(env, "get_mandate (missing)", || s.try_get_mandate(&missing)),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "estimated_end (missing)", || {
+            s.try_estimated_end(&missing)
+        }),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "is_due (missing)", || s.try_is_due(&missing)),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "quote_charge (missing)", || {
+            s.try_quote_charge(&missing)
+        }),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "mandate_grace_period (missing)", || {
+            s.try_mandate_grace_period(&missing)
+        }),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        assert_read_only(env, "is_in_grace_period (missing)", || {
+            s.try_is_in_grace_period(&missing)
+        }),
+        Err(Ok(Error::MandateNotFound))
+    );
+    // A quote for a mandate that can no longer be charged is an answer, not
+    // an error: it says so, and still writes nothing.
+    let quote = assert_read_only(env, "quote_charge (cancelled)", || {
+        s.quote_charge(&cancelled)
+    });
+    assert!(!quote.chargeable);
+    assert_eq!(
+        assert_read_only(env, "first_failed_charge (missing)", || {
+            s.first_failed_charge(&missing)
+        }),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #316: lowering max_charges to (or below) charges_made ends the mandate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lowering_a_bounded_cap_to_charges_made_ends_the_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &5, &0, &None::<Address>);
+
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), PRICE);
+
+    // Five months agreed, two paid: "make that two" ends it on the spot.
+    w.sub.set_max_charges(&user, &id, &2);
+    assert_eq!(event_field_u32(&w.env, "max_charges"), Some(2));
+    assert!(event_by_topic(&w.env, "mandate_completed").is_some());
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Completed);
+    assert_eq!(m.max_charges, 2);
+    assert_eq!(m.charges_made, 2);
+    // A completed mandate no longer counts towards the merchant's revenue,
+    // nor is it offered to keepers.
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), 0);
+    w.advance(MONTH);
+    assert!(!w.sub.is_due(&id));
+    assert!(w.sub.due_mandates(&w.merchant, &0, &10).is_empty());
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+#[test]
+fn lowering_the_cap_of_a_paused_mandate_to_charges_made_ends_it() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.sub.set_paused(&user, &id, &true);
+
+    w.sub.set_max_charges(&user, &id, &1);
+
+    // Completion wins over the pause: the mandate is finished, not paused,
+    // and its seat is released.
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
+    // There is nothing left to resume.
+    assert_eq!(
+        w.sub.try_set_paused(&user, &id, &false),
+        Err(Ok(Error::MandateNotActive))
+    );
+}
+
+#[test]
+fn a_mandate_ended_by_lowering_its_cap_cannot_be_reopened() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.sub.set_max_charges(&user, &id, &1);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
+
+    // Neither raising the cap nor making it unlimited revives it.
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &id, &5),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &id, &0),
+        Err(Ok(Error::MandateNotActive))
+    );
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Completed);
+    assert_eq!(m.max_charges, 1);
+}
+
+#[test]
+fn a_seat_freed_by_lowering_the_cap_admits_the_next_subscriber() {
+    let w = world();
+    let plan_id = w.plan_with_cap(1);
+    let first = w.subscriber(1_000_000);
+    let second = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&first, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe(&second, &plan_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::PlanFull))
+    );
+
+    w.sub.set_max_charges(&first, &id, &1);
+    let next = w.sub.subscribe(&second, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.get_mandate(&next).status, MandateStatus::Active);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+}
+
+#[test]
+fn lowering_below_charges_made_is_rejected_and_changes_nothing() {
+    let w = world();
+    let plan_id = w.plan_with_cap(3);
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &6, &0, &None::<Address>);
+    for _ in 0..3 {
+        w.sub.charge(&w.keeper, &id);
+        w.advance(MONTH);
+    }
+    let before = w.sub.get_mandate(&id);
+    let seats = w.sub.plan_subscriber_count(&plan_id);
+    let revenue = w.sub.plan_committed_revenue(&plan_id);
+
+    // Every value strictly between 0 (unlimited) and charges_made is refused.
+    for cap in 1..before.charges_made {
+        assert_eq!(
+            w.sub.try_set_max_charges(&user, &id, &cap),
+            Err(Ok(Error::InvalidMaxCharges))
+        );
+    }
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), seats);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), revenue);
+    assert!(w.sub.is_due(&id));
+}
+
+#[test]
+fn only_the_subscriber_can_end_a_mandate_by_lowering_its_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    // The merchant and a stranger fail the ownership check...
+    let stranger = Address::generate(&w.env);
+    for caller in [&w.merchant, &stranger, &w.keeper] {
+        assert_eq!(
+            w.sub.try_set_max_charges(caller, &id, &1),
+            Err(Ok(Error::NotSubscriber))
+        );
+    }
+
+    // ...and a forged call naming the subscriber but signed by someone else
+    // fails `require_auth`.
+    w.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "set_max_charges",
+            args: (&user, &id, &1u32).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_set_max_charges(&user, &id, &1).is_err());
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.status, MandateStatus::Active);
+    assert_eq!(m.max_charges, 4);
+}
+
+#[test]
+fn lowering_the_cap_of_an_already_ended_mandate_is_rejected() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+
+    // Ended by the merchant.
+    let ended = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &ended);
+    w.sub.end_mandate(&w.merchant, &ended);
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &ended, &1),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    // Completed naturally by its last charge.
+    let done = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &done);
+    assert_eq!(w.sub.get_mandate(&done).status, MandateStatus::Completed);
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &done, &1),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    // Unknown ids are a typed error, not a trap.
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &9_999, &1),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #313: mandate (and plan) ids are never reused once a mandate has ended
+// ---------------------------------------------------------------------------
+
+/// Drive a deterministic random mix of opens and every way a mandate can end
+/// (cancel, cancel_with_reason, end_mandate, completion through charging,
+/// completion through `set_max_charges`), interleaved with failed calls and
+/// plan retirement. Every id handed out must be fresh, and every ended
+/// mandate must keep pointing at its own record: if an id were recycled, a
+/// stale reference held by a keeper, merchant or indexer could act on someone
+/// else's mandate (a confused deputy).
+#[test]
+fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
+    let w = world();
+    let users = [
+        w.subscriber(100_000_000),
+        w.subscriber(100_000_000),
+        w.subscriber(100_000_000),
+    ];
+    let mut seed = 0x0313_dead_beef_0313u64;
+
+    let mut plans: std::vec::Vec<u64> = std::vec![w.plan()];
+    let mut retired_plans: std::vec::Vec<u64> = std::vec::Vec::new();
+    // (id, subscriber, plan) for every mandate ever opened.
+    let mut opened: std::vec::Vec<(u64, Address, u64)> = std::vec::Vec::new();
+    let mut ended: std::vec::Vec<u64> = std::vec::Vec::new();
+
+    for _ in 0..160 {
+        let roll = next_fuzz_u64(&mut seed);
+        let pick = next_fuzz_u64(&mut seed) as usize;
+        let next_before = w.sub.next_mandate_id();
+
+        match roll % 9 {
+            // Open a mandate on a live plan.
+            0..=2 => {
+                let user = &users[pick % users.len()];
+                let plan_id = plans[pick % plans.len()];
+                let cap = (roll >> 8) as u32 % 3; // 0 = open-ended
+                let id = w.sub.subscribe(user, &plan_id, &cap, &0, &None::<Address>);
+                assert_eq!(id, next_before, "ids are issued in order");
+                assert!(
+                    opened.iter().all(|(seen, _, _)| *seen != id),
+                    "mandate id {id} was issued twice"
+                );
+                opened.push((id, user.clone(), plan_id));
+            }
+            // End a mandate one of four ways.
+            3..=5 if !opened.is_empty() => {
+                let (id, user, _) = opened[pick % opened.len()].clone();
+                let m = w.sub.get_mandate(&id);
+                let open = m.status == MandateStatus::Active || m.status == MandateStatus::Paused;
+                if !open {
+                    // Ending it again is refused and burns no id.
+                    assert_eq!(
+                        w.sub.try_cancel(&user, &id),
+                        Err(Ok(Error::MandateNotActive))
+                    );
+                } else {
+                    match (roll >> 16) % 4 {
+                        0 => w.sub.cancel(&user, &id),
+                        1 => w.sub.cancel_with_reason(&user, &id, &1),
+                        2 => w.sub.end_mandate(&w.merchant, &id),
+                        _ => {
+                            if m.status == MandateStatus::Paused {
+                                w.sub.set_paused(&user, &id, &false);
+                            }
+                            if w.sub.is_due(&id) {
+                                w.sub.charge(&w.keeper, &id);
+                            }
+                            let made = w.sub.get_mandate(&id).charges_made;
+                            if made == 0 {
+                                w.sub.cancel(&user, &id);
+                            } else if w.sub.get_mandate(&id).status == MandateStatus::Active {
+                                w.sub.set_max_charges(&user, &id, &made);
+                            }
+                        }
+                    }
+                    ended.push(id);
+                }
+            }
+            // Retire a plan (keep at least one live) and publish a new one.
+            6 => {
+                if plans.len() > 1 {
+                    let plan_id = plans.remove(pick % plans.len());
+                    w.registry.set_plan_active(&w.merchant, &plan_id, &false);
+                    retired_plans.push(plan_id);
+                }
+                let fresh = w.plan();
+                assert!(
+                    !plans.contains(&fresh) && !retired_plans.contains(&fresh),
+                    "plan id {fresh} was issued twice"
+                );
+                plans.push(fresh);
+            }
+            // Failure paths: none of these may consume or free an id.
+            7 => {
+                if let Some(&retired) = retired_plans.get(pick % retired_plans.len().max(1)) {
+                    assert_eq!(
+                        w.sub
+                            .try_subscribe(&users[0], &retired, &0, &0, &None::<Address>),
+                        Err(Ok(Error::PlanInactive))
+                    );
+                }
+                let unknown_plan = w.registry.next_plan_id() + 7;
+                assert!(w
+                    .sub
+                    .try_subscribe(&users[1], &unknown_plan, &0, &0, &None::<Address>)
+                    .is_err());
+                if !opened.is_empty() {
+                    let (id, _, _) = opened[pick % opened.len()].clone();
+                    let stranger = Address::generate(&w.env);
+                    assert!(w.sub.try_cancel(&stranger, &id).is_err());
+                }
+                assert_eq!(w.sub.next_mandate_id(), next_before);
+            }
+            // Let time pass so charges come due.
+            _ => w.advance(MONTH),
+        }
+
+        // The counter only ever moves forward.
+        assert!(w.sub.next_mandate_id() >= next_before);
+    }
+
+    assert!(!ended.is_empty() && !retired_plans.is_empty());
+
+    // Every mandate id is still bound to the mandate it was issued for, ended
+    // or not, and none is past the counter.
+    let next = w.sub.next_mandate_id();
+    assert_eq!(next, opened.len() as u64 + 1);
+    for (id, user, plan_id) in &opened {
+        let m = w.sub.get_mandate(id);
+        assert_eq!(m.id, *id);
+        assert_eq!(&m.subscriber, user);
+        assert_eq!(m.plan_id, *plan_id);
+        assert!(*id < next);
+    }
+    for id in &ended {
+        let status = w.sub.get_mandate(id).status;
+        assert!(
+            status == MandateStatus::Cancelled || status == MandateStatus::Completed,
+            "ended mandate {id} came back as {status:?}"
+        );
+    }
+    // Retired plans keep their records and stay retired.
+    for plan_id in &retired_plans {
+        let p = w.registry.get_plan(plan_id);
+        assert_eq!(p.id, *plan_id);
+        assert!(!p.active);
+    }
+
+    // A fresh mandate after all that churn still gets a never-seen id.
+    let fresh = w
+        .sub
+        .subscribe(&users[0], &plans[0], &0, &0, &None::<Address>);
+    assert_eq!(fresh, next);
+}

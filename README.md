@@ -145,6 +145,13 @@ consequences) in [`docs/adr/`](docs/adr/index.md):
 
 Add a new ADR whenever a design choice changes.
 
+## Glossary
+
+[`docs/glossary.md`](docs/glossary.md) maps the terms on the
+[docs site glossary](https://mmm-pay.github.io/payflow-docs/glossary.html)
+(mandate, plan, vault, charge, keeper, …) to the contract, type, function and
+storage key that implement each one, and lists where the two have drifted.
+
 ## Try it in five minutes
 
 You need [Freighter](https://www.freighter.app/) (or another wallet supported

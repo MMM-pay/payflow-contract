@@ -9,6 +9,33 @@ change the contract interface.
 
 ### Added
 
+- **#320: view purity tests (plan-registry, subscription, vault).** Every
+  public view in all three contracts is now called under an
+  `assert_read_only` check that compares the full ledger snapshot (storage
+  and TTLs) before and after, and asserts the call emitted no events and
+  required no authorization. Each contract also covers unsigned callers (auth
+  mocks removed), error and negative-answer paths, and a `should_panic` test
+  proving the check catches a real write.
+
+- **#316: `set_max_charges` end-of-mandate tests (subscription).** Lowering
+  the cap to `charges_made` completes bounded, open-ended and paused mandates,
+  frees the seat, drops committed revenue and removes the mandate from
+  `due_mandates`; a completed mandate cannot be reopened; every cap strictly
+  below `charges_made` is rejected with no state change; non-subscribers and
+  forged signers are refused; ended and unknown mandates are rejected.
+
+- **#313: id non-reuse fuzz tests (plan-registry, subscription).** Seeded,
+  deterministic fuzzers mix creation, every retirement/ending path and failing
+  calls, asserting ids are issued strictly in order, never twice, that failed
+  calls consume none, and that every retired plan or ended mandate id still
+  resolves to its original record.
+
+- **#317: contract glossary (docs).** New `docs/glossary.md` maps the docs
+  site glossary (mandate, plan, vault, charge, keeper, …) to the contract,
+  type, function and storage key behind each term, lists contract terms the
+  docs do not define yet, and records six places the docs have drifted from
+  the contracts. Linked from the README.
+
 - **#315: plan-wide charge pause (plan-registry, subscription).** New
   merchant-only `plan-registry:set_plan_charges_paused(merchant, plan_id,
   paused)` (alias `set_plan_paused`) pauses charging for every mandate against
