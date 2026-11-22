@@ -313,6 +313,19 @@ pub struct FeeChanged {
     pub new_fee_bps: u32,
 }
 
+/// Emitted when the admin pauses or resumes the protocol (#285). Only emitted
+/// when the switch actually changes, so an indexer can treat every event as a
+/// transition.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolPauseChanged {
+    /// Admin account that flipped the switch.
+    #[topic]
+    pub admin: Address,
+    /// `true` when the protocol is now paused, `false` when it resumed.
+    pub paused: bool,
+}
+
 /// Emitted after every state change to a mandate, carrying a complete snapshot
 /// of the mandate so indexers do not have to reconstruct state or risk drift
 /// from missed intermediate events.

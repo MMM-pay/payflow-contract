@@ -18,17 +18,17 @@ pub enum Error {
     NotPlanOwner = 1004,
     /// The plan amount must be positive.
     InvalidAmount = 1005,
-    /// The billing period must be at least MIN_PERIOD.
+    /// The billing period must be at least `MIN_PERIOD`.
     InvalidPeriod = 1006,
-    /// The plan name exceeds MAX_NAME_LEN bytes.
+    /// The plan name exceeds `MAX_NAME_LEN` bytes.
     NameTooLong = 1007,
     /// A getter found no profile for the merchant.
     ProfileNotFound = 1008,
-    /// `set_profile` was given a name longer than MAX_NAME_LEN bytes.
+    /// `set_profile` was given a name longer than `MAX_NAME_LEN` bytes.
     ProfileNameTooLong = 1009,
-    /// `set_profile` was given a URL longer than MAX_URL_LEN bytes.
+    /// `set_profile` was given a URL longer than `MAX_URL_LEN` bytes.
     ProfileUrlTooLong = 1010,
-    /// `create_plan` was given a keeper tip above MAX_KEEPER_BPS.
+    /// `create_plan` was given a keeper tip above `MAX_KEEPER_BPS`.
     KeeperBpsTooHigh = 1011,
     /// `set_successor` was given a plan that does not exist.
     SuccessorNotFound = 1012,
@@ -38,11 +38,11 @@ pub enum Error {
     /// it replaces, so the pointer would be meaningless.
     SuccessorTokenMismatch = 1014,
     /// `create_plan` was given a description longer than
-    /// MAX_DESCRIPTION_LEN bytes.
+    /// `MAX_DESCRIPTION_LEN` bytes.
     DescriptionTooLong = 1015,
-    /// `set_plan_name` was given a name longer than MAX_NAME_LEN bytes.
+    /// `set_plan_name` was given a name longer than `MAX_NAME_LEN` bytes.
     PlanNameTooLong = 1016,
-    /// `create_plan` was given a terms URI longer than MAX_TERMS_LEN bytes.
+    /// `create_plan` was given a terms URI longer than `MAX_TERMS_LEN` bytes.
     UriTooLong = 1017,
     /// `create_plan` was given a referral rate above `MAX_REFERRAL_BPS`.
     ReferralBpsTooHigh = 1018,

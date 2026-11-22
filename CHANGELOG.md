@@ -9,6 +9,28 @@ change the contract interface.
 
 ### Added
 
+- **#285: protocol-wide pause.** New admin-only
+  `subscription:set_protocol_paused(paused)` and view `protocol_paused()`.
+  While paused, `subscribe`, `subscribe_at`, `subscribe_with_deposit`,
+  `charge` and `upgrade` fail with the new `ProtocolPaused` (2039) before
+  touching state. Views, `cancel`, `cancel_page`, `end_mandate`, per-mandate
+  pausing, `refund` and every vault withdrawal keep working, and a mandate
+  that falls due during the pause is chargeable as soon as it ends. Emits
+  `ProtocolPauseChanged { admin, paused }` on each real transition (a repeat
+  call is a no-op). New storage key `DataKey::ProtocolPaused` (instance).
+  Bindings regenerate from the contract spec.
+- **#284: `subscription:extend_merchant_mandates_ttl(merchant, start, limit)`.**
+  Permissionless batch TTL bump for a page (≤50) of a merchant's `Active` or
+  `Paused` mandates and their index slots; cancelled and completed mandates are
+  skipped. Returns how many were extended and changes no observable state.
+  A keeper now covers N mandates in `ceil(N / 50)` transactions instead of N.
+  For 20 mandates, one batched call costs 2,896,631 CPU instructions
+  against 3,899,240 for one call per mandate (test
+  `extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate`).
+- **#283: sequence diagrams** for `subscribe`, `charge` and `cancel` in
+  [`docs/sequence-diagrams.md`](docs/sequence-diagrams.md), linked from the
+  README.
+
 - **#287: `subscription:estimated_end_detail`.** Returns the estimated end
   of a capped mandate as an `EstimatedEnd { timestamp, ledger,
   remaining_charges, periods_remaining }`, so UIs get an expected ledger
@@ -121,6 +143,18 @@ change the contract interface.
   error `ChargeWouldSucceed=35`.
 
 ### Changed
+
+- **#286: clippy pedantic across the workspace.** `[workspace.lints.clippy]`
+  sets `pedantic = "warn"` and every crate inherits it, so the existing
+  `cargo clippy --all-targets -- -D warnings` CI step now enforces it. Five
+  pedantic lints that conflict with the Soroban contract model
+  (`needless_pass_by_value`, `must_use_candidate`, `missing_errors_doc`,
+  `missing_panics_doc`, `too_many_lines`) are allowed with the reason written
+  next to each in `Cargo.toml`. All other findings are fixed: lossless casts use `From`,
+  truncating casts in tests use `try_from` (fuzz inputs keep the same values),
+  `let ... else` replaces two `match` blocks, doc items gain backticks, and the
+  one bare `#[should_panic]` now names the error it expects. No behaviour
+  change.
 
 - **#290: `charge` reports `ScheduleOverflow` when the next due date would
   exceed `u64::MAX`** (previously `AmountOverflow`). Counter increments in the

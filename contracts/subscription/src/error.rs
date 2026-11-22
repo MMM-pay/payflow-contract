@@ -22,7 +22,7 @@ pub enum Error {
     NotDue = 2006,
     /// The plan is inactive and does not accept subscriptions or upgrades.
     PlanInactive = 2007,
-    /// The requested protocol fee in basis points exceeds MAX_FEE_BPS.
+    /// The requested protocol fee in basis points exceeds `MAX_FEE_BPS`.
     FeeTooHigh = 2008,
     /// The mandate has reached its maximum charge count.
     MaxChargesReached = 2009,
@@ -107,6 +107,10 @@ pub enum Error {
     /// The mandate's plan has charging paused by its merchant (#315). The
     /// mandate itself is still open; retry after the merchant resumes.
     PlanChargesPaused = 2038,
+    /// The admin has paused the protocol (#285). New subscriptions, charges
+    /// and plan upgrades are refused until it is resumed; reads,
+    /// cancellations, refunds and vault withdrawals are unaffected.
+    ProtocolPaused = 2039,
 }
 
 impl From<Error> for ErrorCode {

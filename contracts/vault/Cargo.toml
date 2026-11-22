@@ -19,3 +19,6 @@ payflow-shared = { path = "../shared" }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 payflow-test-token = { path = "../test-token" }
+
+[lints]
+workspace = true

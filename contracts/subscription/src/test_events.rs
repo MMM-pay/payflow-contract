@@ -3,6 +3,7 @@ use soroban_sdk::{
     xdr::{Limits, WriteXdr},
     Address, Env, Event,
 };
+use std::fmt::Write as _;
 use std::format;
 
 const CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
@@ -43,14 +44,16 @@ fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], even
         .unwrap();
     let event_hex = event_xdr
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<std::vec::Vec<_>>()
-        .join("");
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
     let spec_hex = spec_xdr
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<std::vec::Vec<_>>()
-        .join("");
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
     let actual = format!("event: {}\nspec: {}", wrap(&event_hex), wrap(&spec_hex));
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test_snapshots/events")
@@ -228,6 +231,20 @@ fn charge_failed_layout() {
             due_at: 1_700_000_000,
             failed_at: 1_700_003_600,
             charges_made: 2,
+        },
+    );
+}
+
+#[test]
+fn protocol_pause_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "protocol_pause_changed",
+        super::ProtocolPauseChanged::spec_xdr(),
+        &super::ProtocolPauseChanged {
+            admin: address(&env),
+            paused: true,
         },
     );
 }

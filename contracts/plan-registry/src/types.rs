@@ -60,9 +60,9 @@ pub struct PlanParams {
 pub struct Profile {
     /// Account address of the merchant.
     pub merchant: Address,
-    /// Display name, e.g. "Acme Corp". At most MAX_NAME_LEN bytes.
+    /// Display name, e.g. "Acme Corp". At most `MAX_NAME_LEN` bytes.
     pub name: String,
-    /// Website or terms URL. At most MAX_URL_LEN bytes.
+    /// Website or terms URL. At most `MAX_URL_LEN` bytes.
     pub url: String,
 }
 
@@ -97,7 +97,7 @@ pub enum DataKey {
     /// Grace window for plans opened after the setting was changed (#312).
     /// Missing means zero.
     PlanGracePeriod(u64),
-    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
 }
@@ -106,7 +106,7 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeRecord {
-    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    /// Semantic version of the new code (from `CARGO_PKG_VERSION`).
     pub version: String,
     /// Ledger sequence number when the upgrade was applied.
     pub ledger: u32,

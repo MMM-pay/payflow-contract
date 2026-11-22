@@ -44,6 +44,8 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::ChargeWouldSucceed, 35),
         (Error::PlanNotFound, 36),
         (Error::VaultCallFailed, 37),
+        (Error::PlanChargesPaused, 38),
+        (Error::ProtocolPaused, 39),
     ];
 
     let mut seen = std::vec::Vec::new();

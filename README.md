@@ -132,6 +132,13 @@ take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
 
+## Sequence diagrams
+
+[`docs/sequence-diagrams.md`](docs/sequence-diagrams.md) shows the
+cross-contract calls (Subscription → PlanRegistry → Vault → token) for
+`subscribe`, `charge` and `cancel`, the errors each step can stop on, the
+events each flow emits, and what the protocol pause blocks.
+
 ## Architecture decision records
 
 Settled design choices are written up as short ADRs (context, decision,

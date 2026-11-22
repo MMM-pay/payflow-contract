@@ -82,7 +82,7 @@ const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 /// this long.
 pub const VAULT_OPERATION_WINDOW_SECS: u64 = 60;
 
-/// Maximum deposit, deposit_for, withdraw and withdraw_all calls one
+/// Maximum deposit, `deposit_for`, withdraw and `withdraw_all` calls one
 /// (user, token) pair may make in a single operation window (#314). The limit
 /// is deliberately generous for normal use: a subscriber can deposit and
 /// withdraw several times a minute, but cannot loop the pair indefinitely to
@@ -91,7 +91,13 @@ pub const MAX_VAULT_OPERATIONS_PER_WINDOW: u32 = 8;
 
 #[allow(missing_docs)]
 mod contract {
-    use super::*;
+    use super::{
+        contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractUpgraded,
+        DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
+        ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw, WithdrawTo,
+        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP,
+        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS,
+    };
 
     /// Custody for subscriber funds.
     ///

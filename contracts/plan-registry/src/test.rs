@@ -1980,7 +1980,7 @@ fn event_field_string(env: &Env, field: &str) -> Option<String> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -2227,7 +2227,7 @@ fn plan_created_event_carries_the_availability_cutoff() {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             if let ScVal::Symbol(ScSymbol(name)) = &entry.key {
                 if name.to_utf8_string_lossy() == "available_until" {
                     seen = Some(entry.val.clone());
@@ -2772,7 +2772,7 @@ fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -3022,7 +3022,7 @@ fn upgrade_history_emits_contract_upgraded_event() {
                     panic!("data should be a map");
                 };
                 let mut has_wasm = false;
-                for entry in entries.iter() {
+                for entry in entries {
                     let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
                         continue;
                     };
@@ -3078,7 +3078,7 @@ fn last_proposed_owner(env: &Env) -> Option<Address> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             if let ScVal::Symbol(ScSymbol(key)) = &entry.key {
                 if key.to_utf8_string_lossy() == "new_owner" {
                     found = Address::try_from_val(env, &entry.val).ok();
@@ -3140,11 +3140,11 @@ fn only_the_latest_of_many_proposals_stands() {
     let (id, merchant) = owned_plan(&env, &client);
     let candidates: [Address; 4] = core::array::from_fn(|_| Address::generate(&env));
 
-    for candidate in candidates.iter() {
+    for candidate in &candidates {
         client.propose_plan_owner(&merchant, &id, candidate);
     }
 
-    for stale in candidates[..3].iter() {
+    for stale in &candidates[..3] {
         assert_eq!(
             client.try_accept_plan_owner(stale, &id),
             Err(Ok(Error::NotPendingOwner))
@@ -3410,13 +3410,13 @@ fn create_plans_accepts_the_maximum_batch_size() {
     let token = Address::generate(&env);
     let mut plans = soroban_sdk::Vec::new(&env);
     for i in 0..MAX_BATCH_PLANS {
-        plans.push_back(batch_plan(&env, &token, 1_000 + i as i128, "Plan"));
+        plans.push_back(batch_plan(&env, &token, 1_000 + i128::from(i), "Plan"));
     }
 
     let ids = client.create_plans(&merchant, &plans);
 
     assert_eq!(ids.len(), MAX_BATCH_PLANS);
-    assert_eq!(client.next_plan_id(), MAX_BATCH_PLANS as u64 + 1);
+    assert_eq!(client.next_plan_id(), u64::from(MAX_BATCH_PLANS) + 1);
     assert_eq!(client.merchant_plan_count(&merchant), MAX_BATCH_PLANS);
 }
 
@@ -3625,7 +3625,8 @@ fn deterministic_extreme_plan_inputs_never_trap() {
             &0,
             &referral,
             &None::<Address>,
-            &(x as u32),
+            // Fuzz input: keep the low 32 bits of the random value on purpose.
+            &u32::try_from(x & u64::from(u32::MAX)).unwrap(),
         ));
     }
 }
@@ -3796,7 +3797,7 @@ fn failing_registry_views_are_side_effect_free_too() {
 fn the_registry_read_only_check_catches_a_state_change() {
     let (env, c, merchant, _, [active, ..]) = view_registry();
     assert_read_only(&env, "set_plan_active", || {
-        c.set_plan_active(&merchant, &active, &false)
+        c.set_plan_active(&merchant, &active, &false);
     });
 }
 
@@ -3830,13 +3831,13 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
 
     for round in 0..200u64 {
         let roll = next(&mut seed);
-        let pick = next(&mut seed) as usize;
+        let pick = usize::try_from(next(&mut seed)).unwrap();
         let before = c.next_plan_id();
         let merchant = merchants[pick % merchants.len()].clone();
 
         match roll % 8 {
             0 | 1 => {
-                let amount = 1_000 + round as i128;
+                let amount = 1_000 + i128::from(round);
                 let p = batch_plan(&env, &token, amount, "Fuzz");
                 let id = c.create_plan(
                     &merchant,
@@ -3865,7 +3866,7 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
                 let mut batch = Vec::new(&env);
                 let mut amounts = std::vec::Vec::new();
                 for k in 0..n {
-                    let amount = 50_000 + (round * 10 + k) as i128;
+                    let amount = 50_000 + i128::from(round * 10 + k);
                     amounts.push(amount);
                     batch.push_back(batch_plan(&env, &token, amount, "Batch"));
                 }

@@ -374,7 +374,7 @@ fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -388,7 +388,7 @@ fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
     None
 }
 
-/// Find the most recent event with the given topic name (e.g. "mandate_completed").
+/// Find the most recent event with the given topic name (e.g. "`mandate_completed`").
 fn event_by_topic(env: &Env, topic: &str) -> Option<soroban_sdk::xdr::ContractEventV0> {
     for event in env.events().all().events() {
         let ContractEventBody::V0(body) = &event.body;
@@ -410,13 +410,13 @@ fn last_event_field_i128(env: &Env, field: &str) -> Option<i128> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
             if name.to_utf8_string_lossy() == field {
                 if let ScVal::I128(ref parts) = entry.val {
-                    found = Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                    found = Some((i128::from(parts.hi) << 64) | i128::from(parts.lo));
                 }
             }
         }
@@ -448,7 +448,7 @@ fn last_event_field_u64(env: &Env, field: &str) -> Option<u64> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -469,7 +469,7 @@ fn event_field_u64(env: &Env, field: &str) -> Option<u64> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -498,7 +498,7 @@ fn event_field_address(env: &Env, event_name: &str, field: &str) -> Option<Addre
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -553,7 +553,7 @@ fn first_charge_is_due_immediately_and_splits_fee() {
     assert!(w.sub.is_due(&id));
     w.sub.charge(&w.keeper, &id);
 
-    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(expected_fee, 100);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - expected_fee);
     assert_eq!(w.token_client.balance(&w.fee_to), expected_fee);
@@ -580,7 +580,7 @@ fn charge_settles_merchant_and_fee_through_one_vault_call() {
     // emits one `Debit` per payee, exactly as before.
     assert_eq!(vault_debit_event_count(&w.env), 2);
 
-    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - expected_fee);
     assert_eq!(w.token_client.balance(&w.fee_to), expected_fee);
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
@@ -623,9 +623,9 @@ fn a_tipped_charge_still_pays_three_payees() {
     // makes two vault calls and still emits three `Debit` events.
     assert_eq!(vault_debit_event_count(&w.env), 3);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
-    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&w.fee_to), fee);
     assert_eq!(w.token_client.balance(&w.keeper), tip);
     assert_eq!(w.token_client.balance(&w.merchant), merchant_gross - tip);
@@ -718,9 +718,9 @@ fn keeper_tip_is_paid_from_the_merchant_share() {
     let user = w.subscriber(100_000);
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
-    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
 
     w.sub.charge(&w.keeper, &id);
 
@@ -785,8 +785,8 @@ fn subscriber_pays_the_same_total_with_or_without_a_tip() {
     assert_eq!(w.vault.balance(&with, &w.token), 100_000 - PRICE);
 
     // Only the tipped charge pays the keeper.
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
-    let tip = (PRICE - fee) * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let tip = (PRICE - fee) * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&w.keeper), tip);
 }
 
@@ -1361,7 +1361,7 @@ fn zero_fee_pays_merchant_in_full() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Contract, #2008)")]
 fn constructor_rejects_excessive_fee() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1438,8 +1438,8 @@ fn quote_merchant_amount_excludes_the_keeper_tip() {
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
-    let tip = (PRICE - fee) * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let tip = (PRICE - fee) * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
 
     assert_eq!(quote.amount, PRICE);
     assert_eq!(quote.fee, fee);
@@ -1578,10 +1578,10 @@ fn quote_matches_charge_with_keeper_tip_and_referral() {
         .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
 
     let quote = w.sub.quote_charge(&id);
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
-    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
-    let referral = merchant_gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
+    let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
     let merchant_amount = merchant_gross - tip - referral;
 
     assert_eq!(quote.amount, PRICE);
@@ -1598,7 +1598,7 @@ fn quote_matches_charge_with_keeper_tip_and_referral() {
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
 }
 
-/// Quote matches charge when fee_bps is zero.
+/// Quote matches charge when `fee_bps` is zero.
 #[test]
 fn quote_matches_charge_with_zero_fee() {
     let w = world();
@@ -1608,7 +1608,7 @@ fn quote_matches_charge_with_zero_fee() {
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
-    let tip = PRICE * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let tip = PRICE * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
 
     assert_eq!(quote.amount, PRICE);
     assert_eq!(quote.fee, 0);
@@ -1623,7 +1623,7 @@ fn quote_matches_charge_with_zero_fee() {
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
 }
 
-/// Quote chargeable=false when max_charges reached; charge fails (mandate becomes Completed).
+/// Quote chargeable=false when `max_charges` reached; charge fails (mandate becomes Completed).
 #[test]
 fn quote_and_charge_agree_on_max_charges_reached() {
     let w = world();
@@ -1650,7 +1650,7 @@ fn quote_and_charge_agree_on_max_charges_reached() {
     );
 }
 
-/// Quote chargeable=false when max_total reached; charge fails.
+/// Quote chargeable=false when `max_total` reached; charge fails.
 #[test]
 fn quote_and_charge_agree_on_max_total_reached() {
     let w = world();
@@ -1694,7 +1694,7 @@ fn quote_and_charge_agree_on_max_total_reached() {
     assert_eq!(charge_result, Err(Ok(Error::MandateNotActive)));
 }
 
-/// Quote chargeable=false when plan charges paused; charge fails with PlanChargesPaused.
+/// Quote chargeable=false when plan charges paused; charge fails with `PlanChargesPaused`.
 #[test]
 fn quote_and_charge_agree_on_plan_charges_paused() {
     let w = world();
@@ -1716,7 +1716,7 @@ fn quote_and_charge_agree_on_plan_charges_paused() {
     );
 }
 
-/// Quote chargeable=false when mandate paused; charge fails with MandateNotActive.
+/// Quote chargeable=false when mandate paused; charge fails with `MandateNotActive`.
 #[test]
 fn quote_and_charge_agree_on_mandate_paused() {
     let w = world();
@@ -1736,7 +1736,7 @@ fn quote_and_charge_agree_on_mandate_paused() {
     );
 }
 
-/// Quote chargeable=false when mandate cancelled; charge fails with MandateNotActive.
+/// Quote chargeable=false when mandate cancelled; charge fails with `MandateNotActive`.
 #[test]
 fn quote_and_charge_agree_on_mandate_cancelled() {
     let w = world();
@@ -1756,7 +1756,7 @@ fn quote_and_charge_agree_on_mandate_cancelled() {
     );
 }
 
-/// Quote chargeable=false when mandate completed; charge fails with MandateNotActive.
+/// Quote chargeable=false when mandate completed; charge fails with `MandateNotActive`.
 #[test]
 fn quote_and_charge_agree_on_mandate_completed() {
     let w = world();
@@ -1777,7 +1777,7 @@ fn quote_and_charge_agree_on_mandate_completed() {
     );
 }
 
-/// Quote chargeable=false when not due yet; charge fails with NotDue.
+/// Quote chargeable=false when not due yet; charge fails with `NotDue`.
 #[test]
 fn quote_and_charge_agree_on_not_due() {
     let w = world();
@@ -1797,7 +1797,7 @@ fn quote_and_charge_agree_on_not_due() {
     assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
 }
 
-/// Quote chargeable=true but charge fails with VaultCallFailed when insufficient balance.
+/// Quote chargeable=true but charge fails with `VaultCallFailed` when insufficient balance.
 #[test]
 fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
     let w = world();
@@ -1823,7 +1823,7 @@ fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
     );
 }
 
-/// Quote matches charge after a pause_until schedule resumes.
+/// Quote matches charge after a `pause_until` schedule resumes.
 #[test]
 fn quote_and_charge_agree_after_pause_until_resumes() {
     let w = world();
@@ -1850,12 +1850,12 @@ fn quote_and_charge_agree_after_pause_until_resumes() {
     w.sub.charge(&w.keeper, &id);
     assert_eq!(
         w.token_client.balance(&w.merchant),
-        PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+        PRICE - PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR
     );
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
 }
 
-/// Quote matches charge when max_charges is increased before being reached.
+/// Quote matches charge when `max_charges` is increased before being reached.
 #[test]
 fn quote_and_charge_agree_after_max_charges_increased() {
     let w = world();
@@ -1944,7 +1944,7 @@ fn an_admin_fee_change_cannot_reprice_an_open_mandate() {
     w.sub.charge(&w.keeper, &id);
 
     // The mandate still settles at the 1% it was opened with.
-    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&w.fee_to), expected_fee);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - expected_fee);
     assert_eq!(w.sub.get_mandate(&id).fee_bps, FEE_BPS);
@@ -1971,7 +1971,7 @@ fn mandates_opened_before_and_after_a_fee_change_keep_their_own_fees() {
     // Only the pre-change mandate contributed a fee.
     assert_eq!(
         w.token_client.balance(&w.fee_to),
-        PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+        PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR
     );
 }
 
@@ -2100,7 +2100,7 @@ fn subscriber_mandate_summaries_pages_are_bounded() {
     );
 }
 
-/// `subscriber_mandate_summaries` page size is capped at MAX_PAGE.
+/// `subscriber_mandate_summaries` page size is capped at `MAX_PAGE`.
 #[test]
 fn subscriber_mandate_summaries_page_size_is_capped() {
     let w = world();
@@ -2149,7 +2149,7 @@ fn subscriber_mandate_summaries_reflects_status() {
             MandateStatus::Active => active_count += 1,
             MandateStatus::Paused => paused_count += 1,
             MandateStatus::Cancelled => cancelled_count += 1,
-            _ => {}
+            MandateStatus::Completed => {}
         }
     }
     assert_eq!(active_count, 1);
@@ -2380,8 +2380,8 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     assert_eq!(*name, expected);
 }
 
-/// Verify that the protocol fee is transferred to the fee_to address when a
-/// mandate is charged. This tests that fee_to can be set to any address
+/// Verify that the protocol fee is transferred to the `fee_to` address when a
+/// mandate is charged. This tests that `fee_to` can be set to any address
 /// (account or contract) and the fee is correctly transferred.
 #[test]
 fn fee_paid_to_address() {
@@ -2440,7 +2440,7 @@ fn fee_paid_to_address() {
     sub.charge(&keeper, &id);
 
     // The merchant should receive the price minus the fee.
-    let expected_fee = PRICE * (FEE_BPS as i128) / BPS_DENOMINATOR;
+    let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(
         TokenClient::new(&env, &token).balance(&merchant),
         PRICE - expected_fee,
@@ -2487,19 +2487,19 @@ fn charges_keep_vault_balances_in_sync() {
     let mut state: u64 = 0x_1234_5678_9abc_def0;
     let mut below = move |bound: u64| {
         state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         state % bound
     };
 
     for _ in 0..120 {
-        let i = below(4) as usize;
+        let i = usize::try_from(below(4)).unwrap();
         let user = users[i].clone();
 
         if below(2) == 0 || expected[i] < PRICE {
             // Withdraw part of the balance, or nothing when it is empty.
             if expected[i] > 0 {
-                let amount = 1 + (below(expected[i] as u64) as i128);
+                let amount = 1 + i128::from(below(u64::try_from(expected[i]).unwrap()));
                 w.vault.withdraw(&user, &w.token, &amount);
                 expected[i] -= amount;
             }
@@ -2839,7 +2839,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
 /// Per-charge merchant receipts on the world's standard plan: price minus the
 /// 1% protocol fee, with no keeper tip.
 fn merchant_receipt_per_charge() -> i128 {
-    PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+    PRICE - PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR
 }
 
 #[test]
@@ -3058,16 +3058,16 @@ fn refund_cap_accounts_for_referral_fee() {
         .sub
         .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
     let charge_result = w.sub.try_charge(&w.keeper, &id);
-    assert!(charge_result.is_ok(), "charge failed: {:?}", charge_result);
+    assert!(charge_result.is_ok(), "charge failed: {charge_result:?}");
     let mandate = w.sub.get_mandate(&id);
     assert_eq!(mandate.charges_made, 1);
     assert_eq!(w.token_client.balance(&w.merchant), 8_910);
-    std::eprintln!("mandate: {:?}", mandate);
+    std::eprintln!("mandate: {mandate:?}");
 
     // Merchant receipt per charge: price - protocol_fee - referral
     // PRICE = 10_000, FEE_BPS = 100 (1%), referral_bps = 1_000 (10% of merchant gross)
     // fee = 100, merchant_gross = 9_900, referral = 990, merchant_net = 8_910
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR; // 100
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR; // 100
     let merchant_gross = PRICE - fee; // 9_900
     let referral = merchant_gross * 1_000 / BPS_DENOMINATOR; // 990
     let merchant_net = merchant_gross - referral; // 8_910
@@ -3078,30 +3078,30 @@ fn refund_cap_accounts_for_referral_fee() {
     // Refunding the full merchant_net should succeed.
     w.sub.refund(&w.merchant, &id, &merchant_net);
     let mandate_after_refund = w.sub.get_mandate(&id);
-    std::eprintln!("mandate after refund: {:?}", mandate_after_refund);
+    std::eprintln!("mandate after refund: {mandate_after_refund:?}");
     assert_eq!(mandate_after_refund.refunded, merchant_net);
     assert_eq!(w.token_client.balance(&w.merchant), 0);
 
     // Check what merchant_received returns for this mandate
     let received = calculate_merchant_received(&mandate_after_refund);
-    std::eprintln!("merchant_received (buggy): {:?}", received);
+    std::eprintln!("merchant_received (buggy): {received:?}");
 
     // Refunding one more should fail.
     let refund_result = w.sub.try_refund(&w.merchant, &id, &1);
-    std::eprintln!("refund_result: {:?}", refund_result);
+    std::eprintln!("refund_result: {refund_result:?}");
     assert_eq!(refund_result, Err(Ok(Error::RefundExceedsReceived)));
 }
 
-/// Buggy version of merchant_received that doesn't account for referral (matches current contract)
+/// Buggy version of `merchant_received` that doesn't account for referral (matches current contract)
 fn calculate_merchant_received(m: &Mandate) -> Result<i128, Error> {
-    let fee = m.amount * (m.fee_bps as i128) / BPS_DENOMINATOR;
+    let fee = m.amount * i128::from(m.fee_bps) / BPS_DENOMINATOR;
     let gross = m.amount - fee;
     let tip = gross
-        .checked_mul(m.keeper_bps.min(MAX_KEEPER_BPS) as i128)
+        .checked_mul(i128::from(m.keeper_bps.min(MAX_KEEPER_BPS)))
         .ok_or(Error::AmountOverflow)?
         / BPS_DENOMINATOR;
     (gross - tip)
-        .checked_mul(m.charges_made as i128)
+        .checked_mul(i128::from(m.charges_made))
         .ok_or(Error::AmountOverflow)
 }
 
@@ -3120,9 +3120,9 @@ fn refund_cap_accounts_for_keeper_tip() {
     // Merchant receipt per charge: price - protocol_fee - tip
     // PRICE = 10_000, FEE_BPS = 100 (1%), KEEPER_BPS = 200 (2% of merchant gross)
     // fee = 100, merchant_gross = 9_900, tip = 198, merchant_net = 9_702
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR; // 100
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR; // 100
     let merchant_gross = PRICE - fee; // 9_900
-    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR; // 198
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR; // 198
     let merchant_net = merchant_gross - tip; // 9_702
 
     assert_eq!(w.token_client.balance(&w.merchant), merchant_net);
@@ -3200,7 +3200,7 @@ fn fee_to_contract_address_receives_the_fee() {
     let id = sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     sub.charge(&keeper, &id);
 
-    let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     // The fee went to the registry contract's token balance, not to an
     // account address.
     assert_eq!(token_client.balance(&registry_id), expected_fee);
@@ -3388,7 +3388,7 @@ fn charge_reverts_completely_when_token_fails_transfer() {
     assert_eq!(m_after.last_charge, 1_000_000);
     assert_eq!(m_after.next_charge, 1_000_000 + MONTH);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.test_token.balance(&w.merchant), PRICE - fee);
     assert_eq!(w.test_token.balance(&w.fee_to), fee);
     assert_eq!(w.vault.balance(&user, &w.token), 50_000 - PRICE);
@@ -3749,7 +3749,7 @@ fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
                     let ScVal::Map(Some(ScMap(entries))) = &body.data else {
                         continue;
                     };
-                    for entry in entries.iter() {
+                    for entry in entries {
                         let ScVal::Symbol(ScSymbol(field)) = &entry.key else {
                             continue;
                         };
@@ -4017,7 +4017,7 @@ fn due_mandates_filters_a_full_page() {
     let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
 
     for index in 0..(MAX_PAGE + 5) {
-        let max_charges = if index == 1 { 1 } else { 0 };
+        let max_charges = u32::from(index == 1);
         ids.push_back(
             w.sub
                 .subscribe(&user, &plan_id, &max_charges, &0, &None::<Address>),
@@ -4283,7 +4283,7 @@ fn plan_cutoff_stops_new_subscriptions_but_not_existing_mandates() {
     assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
     assert_eq!(
         w.token_client.balance(&w.merchant),
-        PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR
+        PRICE - PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR
     );
 }
 
@@ -4545,7 +4545,7 @@ fn event_field_i128(env: &Env, field: &str) -> Option<i128> {
         let ScVal::Map(Some(ScMap(entries))) = &body.data else {
             continue;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
                 continue;
             };
@@ -4569,9 +4569,9 @@ fn referral_share_is_paid_to_the_referrer() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
-    let referral = merchant_gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
 
     assert_eq!(w.token_client.balance(&referrer), referral);
     assert_eq!(
@@ -4599,7 +4599,7 @@ fn subscribing_without_a_referrer_pays_no_referral() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&referrer), 0);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - fee);
     assert_eq!(w.sub.get_mandate(&id).referrer, None);
@@ -4617,7 +4617,7 @@ fn zero_referral_bps_disables_the_referral() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&referrer), 0);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - fee);
     assert_eq!(w.sub.get_mandate(&id).referral_bps, 0);
@@ -4625,8 +4625,8 @@ fn zero_referral_bps_disables_the_referral() {
 
 #[test]
 fn referral_split_loses_at_most_one_stroop() {
-    let w = world();
     const ODD_REFERRAL_BPS: u32 = 1_337;
+    let w = world();
     // Merchant, fee_to and the referrer balances are shared across
     // iterations, so the conservation check runs against a running total.
     let referrer = Address::generate(&w.env);
@@ -4655,13 +4655,13 @@ fn referral_split_loses_at_most_one_stroop() {
             .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
         w.sub.charge(&w.keeper, &id);
 
-        let fee = amount * FEE_BPS as i128 / BPS_DENOMINATOR;
+        let fee = amount * i128::from(FEE_BPS) / BPS_DENOMINATOR;
         let merchant_gross = amount - fee;
-        let referral = merchant_gross * ODD_REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+        let referral = merchant_gross * i128::from(ODD_REFERRAL_BPS) / BPS_DENOMINATOR;
 
         // Integer division never rounds up, and is short of the exact
         // rational share by less than one stroop.
-        let exact_scaled = merchant_gross * ODD_REFERRAL_BPS as i128;
+        let exact_scaled = merchant_gross * i128::from(ODD_REFERRAL_BPS);
         assert!(referral * 10_000 <= exact_scaled);
         assert!(exact_scaled < (referral + 1) * 10_000);
 
@@ -4690,8 +4690,8 @@ fn charged_event_reports_the_referral_amount() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
-    let referral = (PRICE - fee) * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let referral = (PRICE - fee) * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
     assert_eq!(event_field_i128(&w.env, "referral"), Some(referral));
 }
 
@@ -4707,10 +4707,10 @@ fn referral_and_keeper_tip_split_the_merchant_share_together() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
-    let tip = merchant_gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
-    let referral = merchant_gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
+    let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
 
     assert_eq!(w.token_client.balance(&w.keeper), tip);
     assert_eq!(w.token_client.balance(&referrer), referral);
@@ -4738,7 +4738,7 @@ fn charges_are_paid_to_the_payout_address() {
 
     w.sub.charge(&w.keeper, &id);
 
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&treasury), PRICE - fee);
     assert_eq!(w.token_client.balance(&w.merchant), 0);
     assert_eq!(w.token_client.balance(&w.fee_to), fee);
@@ -4782,7 +4782,7 @@ fn plan_transfer_does_not_redirect_open_mandates() {
     // still belongs to the merchant it was opened against.
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &id);
-    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     assert_eq!(w.token_client.balance(&treasury), PRICE - fee);
     assert_eq!(w.sub.get_mandate(&id).merchant, w.merchant);
 
@@ -4808,7 +4808,7 @@ fn last_event_field_u32(env: &Env, field: &str) -> Option<u32> {
     let ScVal::Map(Some(ScMap(entries))) = &body.data else {
         return None;
     };
-    for entry in entries.iter() {
+    for entry in entries {
         let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
             continue;
         };
@@ -5284,7 +5284,7 @@ fn upgrade_history_emits_contract_upgraded_event() {
                     panic!("data should be a map");
                 };
                 let mut has_wasm = false;
-                for entry in entries.iter() {
+                for entry in entries {
                     let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
                         continue;
                     };
@@ -6220,8 +6220,9 @@ fn deterministic_random_queries_never_reach_a_host_trap() {
         let x = next_fuzz_u64(&mut seed);
         let plan = next_fuzz_u64(&mut seed);
         let start = now.saturating_add(x % (MAX_START_OFFSET * 2));
-        let max_total = (x as i128) - (i128::MAX / 2);
-        let max_charges = x as u32;
+        let max_total = i128::from(x) - (i128::MAX / 2);
+        // Fuzz input: keep the low 32 bits of the random value on purpose.
+        let max_charges = u32::try_from(x & u64::from(u32::MAX)).unwrap();
 
         assert_typed_error(w.sub.try_subscribe_at(
             &user,
@@ -6362,7 +6363,7 @@ fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
 fn the_read_only_check_catches_a_state_change() {
     let (w, user, _, active, _, _) = view_world();
     assert_read_only(&w.env, "set_paused", || {
-        w.sub.set_paused(&user, &active, &true)
+        w.sub.set_paused(&user, &active, &true);
     });
 }
 
@@ -6658,7 +6659,7 @@ fn lowering_the_cap_of_an_already_ended_mandate_is_rejected() {
 // ---------------------------------------------------------------------------
 
 /// Drive a deterministic random mix of opens and every way a mandate can end
-/// (cancel, cancel_with_reason, end_mandate, completion through charging,
+/// (cancel, `cancel_with_reason`, `end_mandate`, completion through charging,
 /// completion through `set_max_charges`), interleaved with failed calls and
 /// plan retirement. Every id handed out must be fresh, and every ended
 /// mandate must keep pointing at its own record: if an id were recycled, a
@@ -6682,7 +6683,7 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
 
     for _ in 0..160 {
         let roll = next_fuzz_u64(&mut seed);
-        let pick = next_fuzz_u64(&mut seed) as usize;
+        let pick = usize::try_from(next_fuzz_u64(&mut seed)).unwrap();
         let next_before = w.sub.next_mandate_id();
 
         match roll % 9 {
@@ -6690,7 +6691,7 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
             0..=2 => {
                 let user = &users[pick % users.len()];
                 let plan_id = plans[pick % plans.len()];
-                let cap = (roll >> 8) as u32 % 3; // 0 = open-ended
+                let cap = u32::try_from((roll >> 8) % 3).unwrap(); // 0 = open-ended
                 let id = w.sub.subscribe(user, &plan_id, &cap, &0, &None::<Address>);
                 assert_eq!(id, next_before, "ids are issued in order");
                 assert!(
@@ -6704,13 +6705,7 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
                 let (id, user, _) = opened[pick % opened.len()].clone();
                 let m = w.sub.get_mandate(&id);
                 let open = m.status == MandateStatus::Active || m.status == MandateStatus::Paused;
-                if !open {
-                    // Ending it again is refused and burns no id.
-                    assert_eq!(
-                        w.sub.try_cancel(&user, &id),
-                        Err(Ok(Error::MandateNotActive))
-                    );
-                } else {
+                if open {
                     match (roll >> 16) % 4 {
                         0 => w.sub.cancel(&user, &id),
                         1 => w.sub.cancel_with_reason(&user, &id, &1),
@@ -6731,6 +6726,12 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
                         }
                     }
                     ended.push(id);
+                } else {
+                    // Ending it again is refused and burns no id.
+                    assert_eq!(
+                        w.sub.try_cancel(&user, &id),
+                        Err(Ok(Error::MandateNotActive))
+                    );
                 }
             }
             // Retire a plan (keep at least one live) and publish a new one.
@@ -6828,7 +6829,7 @@ fn estimated_end_detail_reports_timestamp_ledger_and_periods() {
     assert_eq!(detail.periods_remaining, 3);
     assert_eq!(
         detail.ledger,
-        1_000 + (3 * MONTH).div_ceil(SECONDS_PER_LEDGER) as u32
+        1_000 + u32::try_from((3 * MONTH).div_ceil(SECONDS_PER_LEDGER)).unwrap()
     );
 }
 
@@ -6935,4 +6936,281 @@ fn huge_period_plan_overflows_on_charge_not_on_subscribe() {
         w.sub.try_charge(&w.keeper, &id),
         Err(Ok(Error::ScheduleOverflow))
     );
+}
+
+// ---------------------------------------------------------------- #285
+// Protocol-wide pause switch.
+
+#[test]
+fn protocol_is_not_paused_by_default() {
+    let w = world();
+    assert!(!w.sub.protocol_paused());
+}
+
+#[test]
+fn set_protocol_paused_requires_admin_auth() {
+    let w = world();
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_set_protocol_paused(&true).is_err());
+    assert!(!w.sub.protocol_paused());
+}
+
+#[test]
+fn set_protocol_paused_wrong_signer_rejected() {
+    let w = world();
+    let stranger = Address::generate(&w.env);
+    w.env.set_auths(&[]);
+    let result = w
+        .sub
+        .mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &w.sub.address,
+                fn_name: "set_protocol_paused",
+                args: (true,).into_val(&w.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_protocol_paused(&true);
+    assert!(result.is_err());
+    assert!(!w.sub.protocol_paused());
+}
+
+#[test]
+fn protocol_pause_blocks_every_subscribe_entry_point() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.sub.set_protocol_paused(&true);
+    assert!(w.sub.protocol_paused());
+
+    let next_id = w.sub.next_mandate_id();
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    let now = w.env.ledger().timestamp();
+    assert_eq!(
+        w.sub
+            .try_subscribe_at(&user, &plan_id, &0, &0, &(now + WEEK), &None::<Address>),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    let vault_before = w.vault.balance(&user, &w.token);
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    // Nothing was opened or deposited.
+    assert_eq!(w.sub.next_mandate_id(), next_id);
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), vault_before);
+}
+
+#[test]
+fn protocol_pause_blocks_charge_and_keeps_the_mandate_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let before = w.sub.get_mandate(&id);
+
+    w.sub.set_protocol_paused(&true);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    // No money moved and the schedule is untouched.
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+    // Reads keep working while paused.
+    assert!(w.sub.is_due(&id));
+    assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
+
+    // Resuming makes the same charge go through.
+    w.sub.set_protocol_paused(&false);
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+}
+
+#[test]
+fn protocol_pause_blocks_plan_upgrades() {
+    let w = world();
+    let plan_id = w.plan();
+    let other_plan = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_protocol_paused(&true);
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &other_plan),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    assert_eq!(w.sub.get_mandate(&id).plan_id, plan_id);
+}
+
+#[test]
+fn protocol_pause_preserves_exits_cancel_and_withdraw() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_protocol_paused(&true);
+
+    // The subscriber can still leave and take their money out.
+    w.sub.cancel(&user, &id);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+    let balance = w.vault.balance(&user, &w.token);
+    let wallet_before = w.token_client.balance(&user);
+    w.vault.withdraw(&user, &w.token, &balance);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&user), wallet_before + balance);
+}
+
+#[test]
+fn protocol_pause_emits_one_event_per_transition() {
+    let w = world();
+    w.sub.set_protocol_paused(&true);
+    let after_pause = w
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&w.sub.address)
+        .events()
+        .len();
+    assert_eq!(after_pause, 1);
+
+    // Re-pausing is a no-op: no event.
+    w.sub.set_protocol_paused(&true);
+    assert_eq!(
+        w.env
+            .events()
+            .all()
+            .filter_by_contract(&w.sub.address)
+            .events()
+            .len(),
+        0
+    );
+    assert!(w.sub.protocol_paused());
+
+    w.sub.set_protocol_paused(&false);
+    assert_eq!(
+        w.env
+            .events()
+            .all()
+            .filter_by_contract(&w.sub.address)
+            .events()
+            .len(),
+        1
+    );
+    assert!(!w.sub.protocol_paused());
+}
+
+// ---------------------------------------------------------------- #284
+// Batch TTL extension for a merchant's open mandates.
+
+fn persistent_ttl(w: &World, key: &DataKey) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    w.env
+        .as_contract(&w.sub.address, || w.env.storage().persistent().get_ttl(key))
+}
+
+#[test]
+fn extend_merchant_mandates_ttl_bumps_open_mandates_and_skips_closed_ones() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let open = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_paused(&user, &paused, &true);
+    w.sub.cancel(&user, &cancelled);
+
+    // Let every entry age by 30 days of ledgers.
+    let seq = w.env.ledger().sequence();
+    w.env.ledger().set_sequence_number(seq + 30 * 17_280);
+    let aged = persistent_ttl(&w, &DataKey::Mandate(open));
+    assert!(aged < PERSIST_BUMP);
+
+    let before = w.sub.get_mandate(&open);
+    let extended = w.sub.extend_merchant_mandates_ttl(&w.merchant, &0, &10);
+    assert_eq!(extended, 2);
+
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(open)), PERSIST_BUMP);
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(paused)), PERSIST_BUMP);
+    assert_eq!(
+        persistent_ttl(&w, &DataKey::MerchantMandate(w.merchant.clone(), 0)),
+        PERSIST_BUMP
+    );
+    assert_eq!(
+        persistent_ttl(&w, &DataKey::MerchantMandateCount(w.merchant.clone())),
+        PERSIST_BUMP
+    );
+    // The cancelled mandate is left to age out.
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(cancelled)), aged);
+    // No observable state changed.
+    assert_eq!(w.sub.get_mandate(&open), before);
+}
+
+#[test]
+fn extend_merchant_mandates_ttl_pages_and_bounds() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    for _ in 0..3 {
+        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    }
+    assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &1, &1), 1);
+    assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &2, &10), 1);
+    assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &3, &10), 0);
+    assert_eq!(
+        w.sub
+            .extend_merchant_mandates_ttl(&w.merchant, &u32::MAX, &u32::MAX),
+        0
+    );
+    // A merchant with no mandates is a no-op, not an error.
+    let nobody = Address::generate(&w.env);
+    assert_eq!(w.sub.extend_merchant_mandates_ttl(&nobody, &0, &10), 0);
+}
+
+#[test]
+fn extend_merchant_mandates_ttl_needs_no_auth_and_works_while_paused() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_protocol_paused(&true);
+    w.env.set_auths(&[]);
+    assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &0, &10), 1);
+}
+
+#[test]
+fn extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate() {
+    // #284: show the improvement. One batched call over N mandates against N
+    // calls of page size 1, which is what extending one mandate per call
+    // costs. The CPU saving is shown here; the larger saving is in
+    // transactions: N mandates need ceil(N / MAX_PAGE) calls instead of N,
+    // each with its own base fee and footprint.
+    const N: u32 = 20;
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(10_000_000);
+    for _ in 0..N {
+        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    }
+
+    w.env.cost_estimate().budget().reset_default();
+    w.sub.extend_merchant_mandates_ttl(&w.merchant, &0, &N);
+    let batched = w.env.cost_estimate().budget().cpu_instruction_cost();
+
+    let mut single = 0u64;
+    for i in 0..N {
+        w.env.cost_estimate().budget().reset_default();
+        w.sub.extend_merchant_mandates_ttl(&w.merchant, &i, &1);
+        single += w.env.cost_estimate().budget().cpu_instruction_cost();
+    }
+    std::println!("#284 TTL extension for {N} mandates: batched {batched} CPU instructions, one call each {single}");
+    assert!(batched < single);
 }

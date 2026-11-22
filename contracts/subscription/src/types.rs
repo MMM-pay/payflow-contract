@@ -183,7 +183,7 @@ pub struct MandateSummary {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeRecord {
-    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    /// Semantic version of the new code (from `CARGO_PKG_VERSION`).
     pub version: String,
     /// Ledger sequence number when the upgrade was applied.
     pub ledger: u32,
@@ -237,7 +237,12 @@ pub enum DataKey {
     /// Grace window in seconds frozen into a mandate at sign-up (#312).
     /// Missing means zero.
     MandateGracePeriod(u64),
-    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
+    /// Protocol-wide pause switch set by the admin (#285). While `true`, new
+    /// subscriptions, charges and plan upgrades are refused; reads,
+    /// cancellations, refunds and vault withdrawals keep working. Missing
+    /// means `false`.
+    ProtocolPaused,
 }

@@ -114,7 +114,15 @@ pub const MIN_CHARGE_AMOUNT: i128 = payflow_shared::MIN_CHARGE_AMOUNT;
 
 #[allow(missing_docs)]
 mod contract {
-    use super::*;
+    use super::{
+        contract, contractimpl, Address, BytesN, ContractExecutable, ContractUpgraded, DataKey,
+        Env, Error, Plan, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet, PlanListing,
+        PlanOwnershipProposed, PlanParams, PlanRenamed, PlanStatusChanged, PlanSuccessorSet,
+        PlanTransferred, PlansCreated, Profile, ProfileUpdated, String, Symbol, UpgradeRecord, Vec,
+        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS,
+        MAX_NAME_LEN, MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT,
+        MIN_PERIOD, PERSIST_BUMP, PERSIST_THRESHOLD,
+    };
 
     /// Contract implementation for publishing and managing subscription plans.
     #[contract]
@@ -252,11 +260,11 @@ mod contract {
             let first_id = Self::read_next_plan_id(&env)?;
             let mut plan_ids = Vec::new(&env);
             for i in 0..plans.len() {
-                let id = first_id + i as u64;
+                let id = first_id + u64::from(i);
                 Self::store_plan(&env, &merchant, id, &plans.get(i).unwrap());
                 plan_ids.push_back(id);
             }
-            Self::set_next_plan_id(&env, first_id + plans.len() as u64);
+            Self::set_next_plan_id(&env, first_id + u64::from(plans.len()));
 
             PlansCreated {
                 merchant,

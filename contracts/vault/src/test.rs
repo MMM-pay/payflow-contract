@@ -312,11 +312,11 @@ fn debit_event_balance(h: &Harness, index: usize) -> Option<i128> {
         let ScVal::Map(Some(soroban_sdk::xdr::ScMap(entries))) = &body.data else {
             return None;
         };
-        for entry in entries.iter() {
+        for entry in entries {
             if let ScVal::Symbol(ScSymbol(name)) = &entry.key {
                 if name.to_utf8_string_lossy() == "balance" {
                     if let ScVal::I128(ref parts) = entry.val {
-                        return Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                        return Some((i128::from(parts.hi) << 64) | i128::from(parts.lo));
                     }
                 }
             }
@@ -524,7 +524,7 @@ fn subscription_address_is_recorded() {
 /// balances directly. This test verifies that every admin-callable function
 /// leaves all user balances unchanged.
 ///
-/// SECURITY.md: "The vault admin can repoint set_subscription to a different
+/// SECURITY.md: "The vault admin can repoint `set_subscription` to a different
 /// contract. A malicious admin could point it at a contract that drains
 /// balances." This test pins down that the admin functions do not move funds.
 #[test]
@@ -537,8 +537,8 @@ fn admin_has_no_path_to_user_funds() {
     h.vault.deposit(&user_a, &h.token, &3_000);
     h.vault.deposit(&user_b, &h.token, &2_500);
 
-    let bal_a_before = h.vault.balance(&user_a, &h.token);
-    let bal_b_before = h.vault.balance(&user_b, &h.token);
+    let first_before = h.vault.balance(&user_a, &h.token);
+    let second_before = h.vault.balance(&user_b, &h.token);
 
     // Exercise every admin function: repoint the subscription contract and
     // flip the allowlist state around. None may move user balances.
@@ -551,15 +551,15 @@ fn admin_has_no_path_to_user_funds() {
     h.vault.set_deposit_cap(&user_a, &h.token, &10_000);
     h.vault.set_deposit_cap(&user_b, &h.token, &0);
 
-    let bal_a_after = h.vault.balance(&user_a, &h.token);
-    let bal_b_after = h.vault.balance(&user_b, &h.token);
+    let first_after = h.vault.balance(&user_a, &h.token);
+    let second_after = h.vault.balance(&user_b, &h.token);
 
     assert_eq!(
-        bal_a_before, bal_a_after,
+        first_before, first_after,
         "set_subscription must not change user balances"
     );
     assert_eq!(
-        bal_b_before, bal_b_after,
+        second_before, second_after,
         "set_subscription must not change user balances"
     );
 }
@@ -602,7 +602,7 @@ fn internal_balances_add_up_to_the_vault_holdings() {
         h.env
             .ledger()
             .set_timestamp(now + VAULT_OPERATION_WINDOW_SECS + 1);
-        let i = rng.below(4) as usize;
+        let i = usize::try_from(rng.below(4)).unwrap();
         let user = users[i].clone();
 
         if expected[i] == 0 {
@@ -610,7 +610,7 @@ fn internal_balances_add_up_to_the_vault_holdings() {
             // wallet holds 10_000_000 tokens at most, and a user is picked at
             // most 300 times with deposits capped at 5_000, so it never runs
             // dry.
-            let amount = 1_000 + (rng.below(5_000) as i128);
+            let amount = 1_000 + i128::from(rng.below(5_000));
             h.vault.deposit(&user, &h.token, &amount);
             expected[i] += amount;
             assert_invariant(&h, &users, &expected);
@@ -619,17 +619,17 @@ fn internal_balances_add_up_to_the_vault_holdings() {
 
         match rng.below(3) {
             0 => {
-                let amount = 1 + (rng.below(5_000) as i128);
+                let amount = 1 + i128::from(rng.below(5_000));
                 h.vault.deposit(&user, &h.token, &amount);
                 expected[i] += amount;
             }
             1 => {
-                let amount = 1 + (rng.below(expected[i] as u64) as i128);
+                let amount = 1 + i128::from(rng.below(u64::try_from(expected[i]).unwrap()));
                 h.vault.withdraw(&user, &h.token, &amount);
                 expected[i] -= amount;
             }
             _ => {
-                let amount = 1 + (rng.below(expected[i] as u64) as i128);
+                let amount = 1 + i128::from(rng.below(u64::try_from(expected[i]).unwrap()));
                 h.vault.debit(&user, &h.token, &merchant, &amount);
                 expected[i] -= amount;
             }
@@ -672,8 +672,8 @@ impl Rng {
     fn below(&mut self, bound: u64) -> u64 {
         self.state = self
             .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         self.state % bound
     }
 }
@@ -1844,7 +1844,7 @@ fn upgrade_history_emits_contract_upgraded_event() {
                     panic!("data should be a map");
                 };
                 let mut has_wasm = false;
-                for entry in entries.iter() {
+                for entry in entries {
                     let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
                         continue;
                     };
@@ -1892,12 +1892,12 @@ fn last_reserve_set(h: &Harness) -> Option<(i128, i128)> {
         };
         let mut amount = None;
         let mut total = None;
-        for entry in entries.iter() {
+        for entry in entries {
             let (ScVal::Symbol(ScSymbol(name)), ScVal::I128(parts)) = (&entry.key, &entry.val)
             else {
                 continue;
             };
-            let value = ((parts.hi as i128) << 64) | (parts.lo as i128);
+            let value = (i128::from(parts.hi) << 64) | i128::from(parts.lo);
             match name.to_utf8_string_lossy().as_str() {
                 "amount" => amount = Some(value),
                 "reserved_total" => total = Some(value),
@@ -2537,10 +2537,10 @@ fn deterministic_random_amounts_never_reach_a_host_trap() {
             4 => 1,
             5 => 10_000,
             6 => -10_000,
-            _ => x as i128,
+            _ => i128::from(x),
         };
         let window = x % 100;
-        let other = (next_fuzz_u64(&mut seed) % 20_000) as i128;
+        let other = i128::from(next_fuzz_u64(&mut seed) % 20_000);
 
         assert_typed_error(h.vault.try_withdraw(&user, &h.token, &amount));
         assert_typed_error(
@@ -2718,11 +2718,11 @@ fn last_event_i128(h: &Harness, field: &str) -> Option<i128> {
     let ScVal::Map(Some(ScMap(entries))) = &body.data else {
         return None;
     };
-    for entry in entries.iter() {
+    for entry in entries {
         if let ScVal::Symbol(ScSymbol(name)) = &entry.key {
             if name.to_utf8_string_lossy() == field {
                 if let ScVal::I128(ref parts) = entry.val {
-                    return Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                    return Some((i128::from(parts.hi) << 64) | i128::from(parts.lo));
                 }
             }
         }

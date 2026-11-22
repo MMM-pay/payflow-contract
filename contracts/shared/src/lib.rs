@@ -26,7 +26,7 @@ pub const MAX_REFERRAL_BPS: u32 = 2_000;
 
 /// Largest plan description, in bytes. A description is a short, plain
 /// summary of what the plan includes ("monthly consults, unlimited
-/// follow-ups"). At most MAX_DESCRIPTION_LEN bytes; may be empty.
+/// follow-ups"). At most `MAX_DESCRIPTION_LEN` bytes; may be empty.
 pub const MAX_DESCRIPTION_LEN: u32 = 280;
 
 /// Protocol-level minimum charge amount in the token's smallest unit.
@@ -164,7 +164,7 @@ impl From<ErrorCode> for u32 {
 
 #[allow(missing_docs)]
 mod plan {
-    use super::*;
+    use super::{contracttype, Address, String, Symbol};
 
     /// A merchant-published charge template. A `Plan` is immutable except for its
     /// `active` flag and its `successor_id` pointer: changing price, period or
@@ -178,10 +178,10 @@ mod plan {
         /// Account that publishes the plan and receives subscription payments.
         pub merchant: Address,
         /// Human-readable label shown to subscribers, e.g. "Pro Monthly".
-        /// At most MAX_NAME_LEN bytes; may be empty.
+        /// At most `MAX_NAME_LEN` bytes; may be empty.
         pub name: String,
         /// Short, plain summary of what the plan includes, shown to
-        /// subscribers next to the name. At most MAX_DESCRIPTION_LEN bytes;
+        /// subscribers next to the name. At most `MAX_DESCRIPTION_LEN` bytes;
         /// may be empty.
         pub description: String,
         /// SEP-41 token this plan is denominated in.

@@ -28,6 +28,9 @@
 //! | `refund` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Token transfer merchant→subscriber |
 //! | `set_seats` | 0 | 0 | 1 (Mandate) | 1 (Mandate) | Extends persistent TTL |
 //! | `set_fee_bps` | 1 (Admin) | 1 (FeeBps) | 0 | 0 | Admin only, extends instance TTL |
+//! | `set_protocol_paused` | 2 (Admin, ProtocolPaused) | 0–1 (ProtocolPaused) | 0 | 0 | Admin only, extends instance TTL |
+//! | `protocol_paused` | 1 (ProtocolPaused) | 0 | 0 | 0 | |
+//! | `extend_merchant_mandates_ttl` | 0 | 0 | ≤101 (count, index slots, Mandates) | 0 | TTL bumps only; page ≤50 |
 //! | `get_mandate` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `estimated_end` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `is_due` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
@@ -80,7 +83,7 @@ pub use error::Error;
 pub use events::{
     Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged,
     MandateCompleted, MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged,
-    PauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
+    PauseChanged, ProtocolPauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
@@ -147,7 +150,17 @@ pub const SECONDS_PER_LEDGER: u64 = 5;
 
 #[allow(missing_docs)]
 mod contract {
-    use super::*;
+    use super::{
+        contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
+        ChargeResult, Charged, CommittedRevenueChanged, ContractExecutable, ContractUpgraded,
+        DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted, MandateEnded,
+        MandateStatus, MandateSummary, MandateTransferred, MandateUpdated, MaxChargesChanged,
+        PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded, SeatsChanged,
+        String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec, BPS_DENOMINATOR,
+        CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON, MAX_FEE_BPS,
+        MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
+        PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
+    };
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -271,6 +284,7 @@ mod contract {
             referrer: Option<Address>,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
+            Self::require_not_protocol_paused(&env)?;
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
             let plan = Self::read_plan(&env, &registry, plan_id)?;
@@ -328,6 +342,7 @@ mod contract {
             referrer: Option<Address>,
         ) -> Result<u64, Error> {
             subscriber.require_auth();
+            Self::require_not_protocol_paused(&env)?;
             Self::do_subscribe_at(
                 env,
                 subscriber,
@@ -537,6 +552,7 @@ mod contract {
         /// or [`Error::AmountOverflow`] if math overflows.
         pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<ChargeResult, Error> {
             keeper.require_auth();
+            Self::require_not_protocol_paused(&env)?;
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
 
@@ -740,14 +756,13 @@ mod contract {
             // one check for the full price covers merchant, fee, tip and
             // referral together.
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
-            let can_debit = match VaultClient::new(&env, &vault_addr).try_can_debit(
+            let Ok(Ok(can_debit)) = VaultClient::new(&env, &vault_addr).try_can_debit(
                 &mandate.subscriber,
                 &mandate.token,
                 &mandate_id,
                 &mandate.amount,
-            ) {
-                Ok(Ok(value)) => value,
-                _ => return Err(Error::VaultCallFailed),
+            ) else {
+                return Err(Error::VaultCallFailed);
             };
             if can_debit {
                 return Err(Error::ChargeWouldSucceed);
@@ -869,6 +884,7 @@ mod contract {
             new_plan_id: u64,
         ) -> Result<(), Error> {
             subscriber.require_auth();
+            Self::require_not_protocol_paused(&env)?;
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
             if mandate.subscriber != subscriber {
@@ -920,9 +936,9 @@ mod contract {
             let difference = plan.amount - old_amount;
             let charged: i128 = if difference > 0 && old_period > 0 {
                 difference
-                    .checked_mul(remaining as i128)
+                    .checked_mul(i128::from(remaining))
                     .ok_or(Error::AmountOverflow)?
-                    / old_period as i128
+                    / i128::from(old_period)
             } else {
                 // A downgrade collects nothing now: it takes effect at the next
                 // charge and never refunds the difference already paid.
@@ -934,7 +950,7 @@ mod contract {
                 // mandate. The keeper tip is not paid here: no charge was
                 // settled, so nobody earned it.
                 let fee = charged
-                    .checked_mul(mandate.fee_bps as i128)
+                    .checked_mul(i128::from(mandate.fee_bps))
                     .ok_or(Error::AmountOverflow)?
                     / BPS_DENOMINATOR;
                 let merchant_gross = charged - fee;
@@ -1558,6 +1574,100 @@ mod contract {
             Ok(())
         }
 
+        /// Pause or resume the whole protocol during an incident (#285).
+        /// Admin only.
+        ///
+        /// While paused, `subscribe`, `subscribe_at`, `subscribe_with_deposit`,
+        /// `charge` and `upgrade` fail with [`Error::ProtocolPaused`] before
+        /// touching any state. Everything that lets a subscriber or merchant
+        /// get out keeps working: every view, `cancel`, `cancel_page`,
+        /// `end_mandate`, per-mandate pausing, `refund`, and the vault's
+        /// withdrawals (the vault is a separate contract and never reads this
+        /// switch). A mandate that falls due during the pause is not lost: its
+        /// `next_charge` is unchanged, so it is chargeable as soon as the
+        /// protocol resumes.
+        ///
+        /// Setting the switch to its current value is a no-op and emits no
+        /// event; otherwise [`ProtocolPauseChanged`] is published.
+        pub fn set_protocol_paused(env: Env, paused: bool) -> Result<(), Error> {
+            let admin: Address = Self::cfg_address(&env, DataKey::Admin)?;
+            admin.require_auth();
+
+            let current = Self::protocol_paused(env.clone());
+            if current != paused {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ProtocolPaused, &paused);
+                ProtocolPauseChanged { admin, paused }.publish(&env);
+            }
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+            Ok(())
+        }
+
+        /// Whether the admin has paused the protocol (#285).
+        pub fn protocol_paused(env: Env) -> bool {
+            env.storage()
+                .instance()
+                .get(&DataKey::ProtocolPaused)
+                .unwrap_or(false)
+        }
+
+        /// Extend the storage TTL of a page of `merchant`'s open mandates in
+        /// one call (#284), instead of one transaction per mandate.
+        ///
+        /// Walks positions `start .. start + min(limit, MAX_PAGE)` of the
+        /// merchant index and, for every mandate that is still `Active` or
+        /// `Paused`, bumps the mandate entry and its index slot to the
+        /// standard persistent TTL. The index count is bumped too, so the
+        /// index stays readable. Cancelled and completed mandates are skipped:
+        /// they can no longer be charged, so keeping them alive only costs rent.
+        ///
+        /// Permissionless: extending a TTL changes no contract state that any
+        /// read can observe, and Soroban lets anyone extend any entry anyway.
+        /// Works while the protocol is paused, so a long incident cannot let
+        /// mandates expire. Returns the number of mandates extended.
+        ///
+        /// Cost: one call reads at most 1 count + 50 slots + 50 mandates
+        /// (101 entries, the transaction footprint limit) and writes none, so a
+        /// keeper covering N open mandates needs `ceil(N / 50)` transactions
+        /// instead of N.
+        pub fn extend_merchant_mandates_ttl(
+            env: Env,
+            merchant: Address,
+            start: u32,
+            limit: u32,
+        ) -> u32 {
+            let count_key = DataKey::MerchantMandateCount(merchant.clone());
+            let len = Self::index_len(&env, count_key.clone());
+            let end = start.saturating_add(limit.min(MAX_PAGE)).min(len);
+            if start >= end {
+                return 0;
+            }
+            let p = env.storage().persistent();
+            p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            let mut extended = 0u32;
+            for i in start..end {
+                let slot_key = DataKey::MerchantMandate(merchant.clone(), i);
+                let Some(id) = p.get::<_, u64>(&slot_key) else {
+                    continue;
+                };
+                let mandate_key = DataKey::Mandate(id);
+                let Some(m) = p.get::<_, Mandate>(&mandate_key) else {
+                    continue;
+                };
+                if !matches!(m.status, MandateStatus::Active | MandateStatus::Paused) {
+                    continue;
+                }
+                p.extend_ttl(&mandate_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                extended = extended.saturating_add(1);
+            }
+            extended
+        }
+
         /// Look up a mandate by its unique ID.
         pub fn get_mandate(env: Env, mandate_id: u64) -> Result<Mandate, Error> {
             Self::read_mandate(&env, mandate_id)
@@ -1616,9 +1726,13 @@ mod contract {
             let now = env.ledger().timestamp();
             let ahead = timestamp.saturating_sub(now);
             let ledgers_ahead = ahead.div_ceil(SECONDS_PER_LEDGER);
-            let ledger = u64::from(env.ledger().sequence())
-                .saturating_add(ledgers_ahead)
-                .min(u64::from(u32::MAX)) as u32;
+            // Clamped to `u32::MAX` first, so the conversion cannot fail.
+            let ledger = u32::try_from(
+                u64::from(env.ledger().sequence())
+                    .saturating_add(ledgers_ahead)
+                    .min(u64::from(u32::MAX)),
+            )
+            .unwrap_or(u32::MAX);
             let periods_remaining = if mandate.period == 0 {
                 0
             } else {
@@ -1825,9 +1939,9 @@ mod contract {
                 // they do.
                 let contribution = m
                     .amount
-                    .checked_mul(period_secs as i128)
+                    .checked_mul(i128::from(period_secs))
                     .ok_or(Error::AmountOverflow)?
-                    / m.period as i128;
+                    / i128::from(m.period);
                 total = total
                     .checked_add(contribution)
                     .ok_or(Error::AmountOverflow)?;
@@ -2122,7 +2236,7 @@ mod contract {
         fn fee_split(m: &Mandate) -> Result<(i128, i128, i128, i128), Error> {
             let fee = m
                 .amount
-                .checked_mul(m.fee_bps as i128)
+                .checked_mul(i128::from(m.fee_bps))
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
             let merchant_gross = m.amount - fee;
@@ -2131,7 +2245,7 @@ mod contract {
             // a mandate can never pay out more than MAX_KEEPER_BPS of it.
             let tip_bps = m.keeper_bps.min(MAX_KEEPER_BPS);
             let tip = merchant_gross
-                .checked_mul(tip_bps as i128)
+                .checked_mul(i128::from(tip_bps))
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
 
@@ -2142,7 +2256,7 @@ mod contract {
             let referral = if m.referrer.is_some() {
                 let referral_bps = m.referral_bps.min(MAX_REFERRAL_BPS);
                 merchant_gross
-                    .checked_mul(referral_bps as i128)
+                    .checked_mul(i128::from(referral_bps))
                     .ok_or(Error::AmountOverflow)?
                     / BPS_DENOMINATOR
             } else {
@@ -2207,19 +2321,19 @@ mod contract {
         fn merchant_received(m: &Mandate) -> Result<i128, Error> {
             let fee = m
                 .amount
-                .checked_mul(m.fee_bps as i128)
+                .checked_mul(i128::from(m.fee_bps))
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
             let merchant_gross = m.amount - fee;
 
             let tip = merchant_gross
-                .checked_mul(m.keeper_bps.min(MAX_KEEPER_BPS) as i128)
+                .checked_mul(i128::from(m.keeper_bps.min(MAX_KEEPER_BPS)))
                 .ok_or(Error::AmountOverflow)?
                 / BPS_DENOMINATOR;
 
             let referral = if m.referrer.is_some() {
                 merchant_gross
-                    .checked_mul(m.referral_bps.min(MAX_REFERRAL_BPS) as i128)
+                    .checked_mul(i128::from(m.referral_bps.min(MAX_REFERRAL_BPS)))
                     .ok_or(Error::AmountOverflow)?
                     / BPS_DENOMINATOR
             } else {
@@ -2227,7 +2341,7 @@ mod contract {
             };
 
             (merchant_gross - tip - referral)
-                .checked_mul(m.charges_made as i128)
+                .checked_mul(i128::from(m.charges_made))
                 .ok_or(Error::AmountOverflow)
         }
 
@@ -2238,6 +2352,21 @@ mod contract {
                 Ok(Ok(plan)) => Ok(plan),
                 _ => Err(Error::PlanNotFound),
             }
+        }
+
+        /// Fails with [`Error::ProtocolPaused`] while the admin's global pause
+        /// is on (#285). Called first, after authorization, by every entry point
+        /// that opens a mandate or moves money into the billing flow.
+        fn require_not_protocol_paused(env: &Env) -> Result<(), Error> {
+            if env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::ProtocolPaused)
+                .unwrap_or(false)
+            {
+                return Err(Error::ProtocolPaused);
+            }
+            Ok(())
         }
 
         fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
@@ -2467,10 +2596,10 @@ mod contract {
                 // Normalize to the plan's period
                 let contribution = mandate
                     .amount
-                    .checked_mul(plan.period as i128)
+                    .checked_mul(i128::from(plan.period))
                     .ok_or(Error::AmountOverflow)
                     .unwrap_or(0)
-                    / mandate.period as i128;
+                    / i128::from(mandate.period);
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 

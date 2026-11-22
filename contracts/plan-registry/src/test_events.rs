@@ -4,6 +4,7 @@ use soroban_sdk::{
     xdr::{Limits, WriteXdr},
     Address, Env, Event, String,
 };
+use std::fmt::Write as _;
 use std::format;
 
 const CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
@@ -32,14 +33,16 @@ fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], even
         .unwrap();
     let event_hex = event_xdr
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<std::vec::Vec<_>>()
-        .join("");
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
     let spec_hex = spec_xdr
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<std::vec::Vec<_>>()
-        .join("");
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
     // The hex is wrapped at 128 bytes a line. The repository's malware scan
     // flags any unbroken run of 400+ base64-alphabet characters as a possible
     // obfuscated payload, and these snapshots are legitimately long, so wrap

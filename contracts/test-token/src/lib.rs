@@ -24,7 +24,7 @@ const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 
 #[allow(missing_docs)]
 mod types {
-    use super::*;
+    use super::{contracterror, contracttype, Address};
 
     /// Errors returned by the test token contract.
     #[contracterror]
@@ -62,7 +62,10 @@ pub use types::{DataKey, Error};
 
 #[allow(missing_docs)]
 mod contract {
-    use super::*;
+    use super::{
+        contract, contractimpl, panic_with_error, Address, DataKey, Env, Error, String,
+        INSTANCE_BUMP, INSTANCE_THRESHOLD, PERSIST_BUMP, PERSIST_THRESHOLD,
+    };
 
     /// A test-only token contract that can be configured to fail transfers.
     ///
@@ -218,9 +221,8 @@ mod contract {
 
             let to_balance = Self::read_balance(&env, &to);
             let new_from = from_balance - amount;
-            let new_to = match to_balance.checked_add(amount) {
-                Some(b) => b,
-                None => panic_with_error!(&env, Error::AmountOverflow),
+            let Some(new_to) = to_balance.checked_add(amount) else {
+                panic_with_error!(&env, Error::AmountOverflow)
             };
 
             Self::write_balance(&env, &from, new_from);

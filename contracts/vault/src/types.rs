@@ -34,7 +34,7 @@ pub enum DataKey {
     /// Fixed-window counter for deposit/withdraw operations (#314): where the
     /// current window starts and how many operations it already contains.
     OperationWindow(Address, Address),
-    /// Ordered list of contract upgrades: (version, ledger, wasm_hash).
+    /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
 }
@@ -77,7 +77,7 @@ pub struct OperationWindow {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeRecord {
-    /// Semantic version of the new code (from CARGO_PKG_VERSION).
+    /// Semantic version of the new code (from `CARGO_PKG_VERSION`).
     pub version: String,
     /// Ledger sequence number when the upgrade was applied.
     pub ledger: u32,
