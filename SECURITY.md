@@ -88,6 +88,24 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ## Externally visible behaviour changes
 
+### Due-date overflow now reports `ScheduleOverflow` (#290)
+
+The period and due-date arithmetic in `subscription` was reviewed for overflow
+at large periods and ledger timestamps. All schedule math was already checked
+or saturating except where noted here:
+
+- `charge` computes the next due date as `now + period` with checked math. When
+  that would exceed `u64::MAX` it now fails with `ScheduleOverflow` (2018)
+  instead of `AmountOverflow` (2012). No state is written either way; only the
+  error code a client sees changes. Keepers matching on `AmountOverflow` for
+  this case should match `ScheduleOverflow` too.
+- The `NextMandateId` increment uses checked math and the per-plan open-seat
+  and index counters saturate rather than panic.
+
+Regression tests: `charge_reports_schedule_overflow_when_next_due_date_exceeds_u64`,
+`charge_succeeds_at_the_last_representable_due_date` and
+`huge_period_plan_overflows_on_charge_not_on_subscribe`.
+
 ### Vault bounds deposit/withdraw cycling (#314)
 
 `vault:deposit`, `deposit_for`, `withdraw`, `withdraw_to` and `withdraw_all` now share a

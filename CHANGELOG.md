@@ -9,6 +9,17 @@ change the contract interface.
 
 ### Added
 
+- **#287: `subscription:estimated_end_detail`.** Returns the estimated end
+  of a capped mandate as an `EstimatedEnd { timestamp, ledger,
+  remaining_charges, periods_remaining }`, so UIs get an expected ledger
+  sequence and a period count without extra math.
+- **#288: plan listings carry the settlement token.** New
+  `plan-registry:merchant_plan_listings` and `token_plan_listings` return
+  `PlanListing` rows (id, merchant, name, token, amount, period, active) with
+  the same paging as `merchant_plans` / `token_plans`.
+- **#289: `deposit_for` third-party tests.** An unrelated payer credits only
+  the intended subscriber; the event reports payer, recipient, amount and new
+  balance; cap, allowlist, unfunded-payer and wrong-signer paths are covered.
 - **#320: view purity tests (plan-registry, subscription, vault).** Every
   public view in all three contracts is now called under an
   `assert_read_only` check that compares the full ledger snapshot (storage
@@ -111,6 +122,9 @@ change the contract interface.
 
 ### Changed
 
+- **#290: `charge` reports `ScheduleOverflow` when the next due date would
+  exceed `u64::MAX`** (previously `AmountOverflow`). Counter increments in the
+  subscription contract are now checked/saturating. See SECURITY.md.
 - **Breaking (#310): contract error ranges are now disjoint.** Every error
   discriminant moved into a per-contract range: plan-registry `1_001–1_023`,
   subscription `2_001–2_037`, vault `3_001–3_014`. `payflow-shared` now exposes

@@ -29,6 +29,8 @@
 //! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
 //! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `token_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
+//! | `merchant_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
+//! | `token_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
 //! | `next_plan_id` | 1 (NextPlanId) | 0 | 0 | 0 | |
 //! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
@@ -63,7 +65,7 @@ pub use events::{
     PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
     PlansCreated, ProfileUpdated,
 };
-pub use types::{DataKey, Plan, PlanParams, Profile, UpgradeRecord};
+pub use types::{DataKey, Plan, PlanListing, PlanParams, Profile, UpgradeRecord};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -782,6 +784,31 @@ mod contract {
             out
         }
 
+        /// Listing rows for the plans `merchant` published, in the same order
+        /// and paging as [`merchant_plans`](Self::merchant_plans). Each row
+        /// names the plan's settlement token (#288).
+        pub fn merchant_plan_listings(
+            env: Env,
+            merchant: Address,
+            start: u32,
+            limit: u32,
+        ) -> Vec<PlanListing> {
+            let ids = Self::merchant_plans(env.clone(), merchant, start, limit);
+            Self::listings(&env, ids)
+        }
+
+        /// Listing rows for the plans priced in `token`, in the same order and
+        /// paging as [`token_plans`](Self::token_plans) (#288).
+        pub fn token_plan_listings(
+            env: Env,
+            token: Address,
+            start: u32,
+            limit: u32,
+        ) -> Vec<PlanListing> {
+            let ids = Self::token_plans(env.clone(), token, start, limit);
+            Self::listings(&env, ids)
+        }
+
         /// The id the next published plan will get. Plans are numbered from 1, so
         /// `next_plan_id() - 1` is the number of plans published so far.
         pub fn next_plan_id(env: Env) -> Result<u64, Error> {
@@ -960,6 +987,28 @@ mod contract {
             }
             .publish(&env);
             Ok(())
+        }
+
+        fn listings(env: &Env, ids: Vec<u64>) -> Vec<PlanListing> {
+            let mut out = Vec::new(env);
+            for id in ids.iter() {
+                if let Some(plan) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Plan>(&DataKey::Plan(id))
+                {
+                    out.push_back(PlanListing {
+                        id: plan.id,
+                        merchant: plan.merchant,
+                        name: plan.name,
+                        token: plan.token,
+                        amount: plan.amount,
+                        period: plan.period,
+                        active: plan.active,
+                    });
+                }
+            }
+            out
         }
 
         fn read_next_plan_id(env: &Env) -> Result<u64, Error> {

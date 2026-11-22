@@ -3971,3 +3971,87 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
     let fresh = simple_plan(&env, &c, &merchants[0], &token);
     assert_eq!(fresh, next_id);
 }
+
+// ---- #288: per-plan settlement token surfaced in listings ----
+
+fn mixed_token_catalogue() -> (Env, PlanRegistryClient<'static>, Address, Address, Address) {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let usdc = Address::generate(&env);
+    let xlm = Address::generate(&env);
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &usdc, 1_000, "Basic"),
+        batch_plan(&env, &xlm, 1_000, "Basic"),
+        batch_plan(&env, &usdc, 5_000, "Pro"),
+    ];
+    client.create_plans(&merchant, &plans);
+    (env, client, merchant, usdc, xlm)
+}
+
+#[test]
+fn merchant_plan_listings_expose_each_plans_token() {
+    let (_env, client, merchant, usdc, xlm) = mixed_token_catalogue();
+
+    let rows = client.merchant_plan_listings(&merchant, &0, &10);
+    assert_eq!(rows.len(), 3);
+    // Same name and price, different settlement token: the row disambiguates.
+    let a = rows.get(0).unwrap();
+    let b = rows.get(1).unwrap();
+    assert_eq!((a.id, a.token.clone(), a.amount), (1, usdc.clone(), 1_000));
+    assert_eq!((b.id, b.token.clone(), b.amount), (2, xlm, 1_000));
+    assert_eq!(a.name, b.name);
+    let c = rows.get(2).unwrap();
+    assert_eq!(
+        (c.id, c.token, c.amount, c.period),
+        (3, usdc, 5_000, 2_592_000)
+    );
+    assert!(c.active);
+    assert_eq!(c.merchant, merchant);
+
+    // Rows always match get_plan.
+    for row in rows.iter() {
+        let plan = client.get_plan(&row.id);
+        assert_eq!(row.token, plan.token);
+        assert_eq!(row.merchant, plan.merchant);
+    }
+}
+
+#[test]
+fn token_plan_listings_only_contain_plans_in_that_token() {
+    let (_env, client, _merchant, usdc, xlm) = mixed_token_catalogue();
+
+    let usdc_rows = client.token_plan_listings(&usdc, &0, &10);
+    assert_eq!(usdc_rows.len(), 2);
+    assert!(usdc_rows.iter().all(|r| r.token == usdc));
+    let xlm_rows = client.token_plan_listings(&xlm, &0, &10);
+    assert_eq!(xlm_rows.len(), 1);
+    assert_eq!(xlm_rows.get(0).unwrap().id, 2);
+}
+
+#[test]
+fn plan_listings_follow_paging_and_reflect_status() {
+    let (env, client, merchant, usdc, _xlm) = mixed_token_catalogue();
+
+    let page = client.merchant_plan_listings(&merchant, &1, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, 2);
+    assert_eq!(client.merchant_plan_listings(&merchant, &3, &10).len(), 0);
+    assert_eq!(
+        client
+            .merchant_plan_listings(&merchant, &u32::MAX, &10)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .token_plan_listings(&Address::generate(&env), &0, &10)
+            .len(),
+        0
+    );
+
+    client.set_plan_active(&merchant, &1, &false);
+    let rows = client.token_plan_listings(&usdc, &0, &10);
+    assert!(!rows.get(0).unwrap().active);
+    assert!(rows.get(1).unwrap().active);
+}

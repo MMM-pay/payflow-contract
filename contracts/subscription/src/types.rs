@@ -133,6 +133,25 @@ pub struct ChargeQuote {
     pub chargeable: bool,
 }
 
+/// Estimated end of a capped mandate, in the units a UI needs without extra
+/// math (#287). `timestamp` is Unix seconds (format it as ISO-8601 client
+/// side), `ledger` the ledger sequence that time is expected to land in, and
+/// `periods_remaining` how many billing periods separate now from that end.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EstimatedEnd {
+    /// Unix seconds of the final scheduled (or, once completed, actual) charge.
+    pub timestamp: u64,
+    /// Ledger sequence expected at `timestamp`, assuming
+    /// `SECONDS_PER_LEDGER`-second ledgers. Never earlier than the current one.
+    pub ledger: u32,
+    /// Charges still to be made before the cap is reached.
+    pub remaining_charges: u32,
+    /// Whole billing periods from now until `timestamp`, rounded up. Zero once
+    /// the end is in the past.
+    pub periods_remaining: u64,
+}
+
 /// Summary of a mandate for list views. Contains the fields a wallet needs to
 /// display a subscription without fetching the full mandate.
 #[contracttype]

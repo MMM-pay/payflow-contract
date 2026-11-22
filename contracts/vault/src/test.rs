@@ -2708,3 +2708,133 @@ fn the_vault_read_only_check_catches_a_state_change() {
     let (h, user) = view_vault();
     assert_read_only(&h.env, "withdraw", || h.vault.withdraw(&user, &h.token, &1));
 }
+
+// ---- #289: deposit_for by an unrelated account credits the right subscriber ----
+
+/// Read an i128 field out of the data map of the last emitted event.
+fn last_event_i128(h: &Harness, field: &str) -> Option<i128> {
+    let last = h.env.events().all().events().last().cloned()?;
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+        return None;
+    };
+    for entry in entries.iter() {
+        if let ScVal::Symbol(ScSymbol(name)) = &entry.key {
+            if name.to_utf8_string_lossy() == field {
+                if let ScVal::I128(ref parts) = entry.val {
+                    return Some(((parts.hi as i128) << 64) | (parts.lo as i128));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn deposit_for_by_unrelated_account_credits_only_the_intended_subscriber() {
+    let h = setup();
+    // The subscriber already holds a balance of their own; a bystander too.
+    let subscriber = funded_user(&h, 1_000);
+    let bystander = funded_user(&h, 1_000);
+    h.vault.deposit(&subscriber, &h.token, &1_000);
+    h.vault.deposit(&bystander, &h.token, &1_000);
+
+    // An account with no relationship to either funds the subscriber.
+    let stranger = funded_user(&h, 5_000);
+    h.vault
+        .deposit_for(&stranger, &subscriber, &h.token, &2_000);
+
+    // The event names payer and recipient and reports the recipient's new balance.
+    let last = h.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    assert_eq!(name.to_utf8_string_lossy(), "deposit_for");
+    assert_eq!(body.topics[1], ScVal::from(stranger.clone()));
+    assert_eq!(body.topics[2], ScVal::from(subscriber.clone()));
+    assert_eq!(last_event_i128(&h, "amount"), Some(2_000));
+    assert_eq!(last_event_i128(&h, "balance"), Some(3_000));
+
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 3_000);
+    assert_eq!(h.vault.balance(&bystander, &h.token), 1_000);
+    assert_eq!(h.vault.balance(&stranger, &h.token), 0);
+    assert_eq!(h.token_client.balance(&stranger), 3_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 4_000);
+}
+
+#[test]
+fn deposit_for_by_unrelated_account_respects_the_subscribers_cap() {
+    let h = setup();
+    let subscriber = Address::generate(&h.env);
+    let stranger = funded_user(&h, 10_000);
+    h.vault.set_deposit_cap(&subscriber, &h.token, &1_500);
+
+    assert_eq!(
+        h.vault
+            .try_deposit_for(&stranger, &subscriber, &h.token, &1_501),
+        Err(Ok(Error::DepositCapExceeded))
+    );
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
+    assert_eq!(h.token_client.balance(&stranger), 10_000);
+
+    // The cap is the subscriber's, not the payer's: a cap on the payer is ignored.
+    h.vault.set_deposit_cap(&stranger, &h.token, &1);
+    h.vault
+        .deposit_for(&stranger, &subscriber, &h.token, &1_500);
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 1_500);
+}
+
+#[test]
+fn deposit_for_by_unrelated_account_rejects_unlisted_tokens() {
+    let h = setup();
+    let subscriber = Address::generate(&h.env);
+    let stranger = funded_user(&h, 10_000);
+    h.vault.set_allowlist_enabled(&true);
+
+    assert_eq!(
+        h.vault
+            .try_deposit_for(&stranger, &subscriber, &h.token, &1_000),
+        Err(Ok(Error::TokenNotAllowed))
+    );
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
+    assert_eq!(h.token_client.balance(&stranger), 10_000);
+}
+
+#[test]
+fn deposit_for_by_unfunded_unrelated_account_fails_without_crediting() {
+    let h = setup();
+    let subscriber = Address::generate(&h.env);
+    let stranger = funded_user(&h, 100);
+
+    assert!(h
+        .vault
+        .try_deposit_for(&stranger, &subscriber, &h.token, &1_000)
+        .is_err());
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
+    assert_eq!(h.token_client.balance(&stranger), 100);
+}
+
+#[test]
+fn deposit_for_signed_by_the_subscriber_instead_of_the_payer_is_rejected() {
+    let h = setup();
+    let subscriber = Address::generate(&h.env);
+    let stranger = funded_user(&h, 10_000);
+    let impostor = Address::generate(&h.env);
+
+    h.env.mock_auths(&[MockAuth {
+        address: &impostor,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault.address,
+            fn_name: "deposit_for",
+            args: (&stranger, &subscriber, &h.token, &1_000).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .vault
+        .try_deposit_for(&stranger, &subscriber, &h.token, &1_000)
+        .is_err());
+    assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
+    assert_eq!(h.token_client.balance(&stranger), 10_000);
+}

@@ -113,3 +113,25 @@ pub struct UpgradeRecord {
     /// Hash of the new wasm code.
     pub wasm_hash: soroban_sdk::BytesN<32>,
 }
+
+/// One row of a plan listing (#288). Carries the settlement `token` alongside
+/// the price so a catalogue mixing tokens is unambiguous without a follow-up
+/// `get_plan` per row.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanListing {
+    /// Plan id.
+    pub id: u64,
+    /// Merchant that published the plan.
+    pub merchant: Address,
+    /// Display name.
+    pub name: String,
+    /// Settlement token contract the plan is priced and charged in.
+    pub token: Address,
+    /// Price per period in the token's smallest unit.
+    pub amount: i128,
+    /// Billing period in seconds.
+    pub period: u64,
+    /// Whether the plan accepts new subscribers.
+    pub active: bool,
+}

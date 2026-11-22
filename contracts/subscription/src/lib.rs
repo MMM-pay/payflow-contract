@@ -84,7 +84,8 @@ pub use events::{
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
-    ChargeQuote, ChargeResult, DataKey, Mandate, MandateStatus, MandateSummary, Plan, UpgradeRecord,
+    ChargeQuote, ChargeResult, DataKey, EstimatedEnd, Mandate, MandateStatus, MandateSummary, Plan,
+    UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
@@ -139,6 +140,10 @@ pub const MAX_CANCEL_REASON: u32 = CANCEL_REASON_OTHER;
 /// annual subscription in advance, close enough that a mandate cannot be
 /// scheduled so far out that the subscriber forgets it exists.
 pub const MAX_START_OFFSET: u64 = 365 * 24 * 60 * 60;
+
+/// Nominal Stellar ledger close time, used only to translate a timestamp into
+/// an expected ledger sequence for display (#287).
+pub const SECONDS_PER_LEDGER: u64 = 5;
 
 #[allow(missing_docs)]
 mod contract {
@@ -459,9 +464,10 @@ mod contract {
             // mandate is cancelled, ended or completed.
             Self::plan_open_inc(&env, plan_id);
 
-            env.storage()
-                .instance()
-                .set(&DataKey::NextMandateId, &(id + 1));
+            env.storage().instance().set(
+                &DataKey::NextMandateId,
+                &id.checked_add(1).ok_or(Error::AmountOverflow)?,
+            );
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -564,9 +570,11 @@ mod contract {
                 .charges_made
                 .checked_add(1)
                 .ok_or(Error::AmountOverflow)?;
+            // A next due date past u64::MAX is a schedule overflow, not an
+            // amount overflow (#290).
             let next_charge = now
                 .checked_add(mandate.period)
-                .ok_or(Error::AmountOverflow)?;
+                .ok_or(Error::ScheduleOverflow)?;
             let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
                 || (mandate.max_total != 0 && next_total >= mandate.max_total);
 
@@ -1587,6 +1595,43 @@ mod contract {
             Ok(Some(estimated_end))
         }
 
+        /// [`estimated_end`](Self::estimated_end) expressed as a timestamp,
+        /// an expected ledger sequence and a period count (#287), so UIs need
+        /// no extra math. Returns `None` for an open-ended mandate.
+        ///
+        /// The ledger figure assumes [`SECONDS_PER_LEDGER`]-second ledgers and
+        /// saturates at `u32::MAX`; it is a hint, not a guarantee.
+        ///
+        /// # Errors
+        /// Same as [`estimated_end`](Self::estimated_end).
+        pub fn estimated_end_detail(
+            env: Env,
+            mandate_id: u64,
+        ) -> Result<Option<EstimatedEnd>, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let Some(timestamp) = Self::estimated_end(env.clone(), mandate_id)? else {
+                return Ok(None);
+            };
+            let remaining_charges = mandate.max_charges.saturating_sub(mandate.charges_made);
+            let now = env.ledger().timestamp();
+            let ahead = timestamp.saturating_sub(now);
+            let ledgers_ahead = ahead.div_ceil(SECONDS_PER_LEDGER);
+            let ledger = u64::from(env.ledger().sequence())
+                .saturating_add(ledgers_ahead)
+                .min(u64::from(u32::MAX)) as u32;
+            let periods_remaining = if mandate.period == 0 {
+                0
+            } else {
+                ahead.div_ceil(mandate.period)
+            };
+            Ok(Some(EstimatedEnd {
+                timestamp,
+                ledger,
+                remaining_charges,
+                periods_remaining,
+            }))
+        }
+
         /// True when `charge` would succeed on timing and status grounds. Does not
         /// check vault balance; a funded-ness check is the caller's job.
         pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
@@ -2331,7 +2376,7 @@ mod contract {
 
         fn plan_open_inc(env: &Env, plan_id: u64) {
             let key = DataKey::PlanSubscriberCount(plan_id);
-            let count = Self::plan_open_count(env, plan_id) + 1;
+            let count = Self::plan_open_count(env, plan_id).saturating_add(1);
             let p = env.storage().persistent();
             p.set(&key, &count);
             p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -2456,7 +2501,7 @@ mod contract {
             let p = env.storage().persistent();
             p.set(&slot_key, &id);
             p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-            p.set(&count_key, &(len + 1));
+            p.set(&count_key, &len.saturating_add(1));
             p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 

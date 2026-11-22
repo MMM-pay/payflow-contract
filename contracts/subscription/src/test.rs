@@ -6809,3 +6809,130 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
         .subscribe(&users[0], &plans[0], &0, &0, &None::<Address>);
     assert_eq!(fresh, next);
 }
+
+// ---- #287: estimated_end as a ledger and a period count ----
+
+#[test]
+fn estimated_end_detail_reports_timestamp_ledger_and_periods() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_sequence_number(1_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+
+    let detail = w.sub.estimated_end_detail(&id).unwrap();
+    let expected = 1_000_000 + 3 * MONTH;
+    assert_eq!(detail.timestamp, expected);
+    assert_eq!(Some(detail.timestamp), w.sub.estimated_end(&id));
+    assert_eq!(detail.remaining_charges, 4);
+    assert_eq!(detail.periods_remaining, 3);
+    assert_eq!(
+        detail.ledger,
+        1_000 + (3 * MONTH).div_ceil(SECONDS_PER_LEDGER) as u32
+    );
+}
+
+#[test]
+fn estimated_end_detail_rounds_partial_periods_up() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &3, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    // Half a period in: two charges left, the last 1.5 periods away.
+    w.env.ledger().set_timestamp(1_000_000 + MONTH / 2);
+
+    let detail = w.sub.estimated_end_detail(&id).unwrap();
+    assert_eq!(detail.timestamp, 1_000_000 + 2 * MONTH);
+    assert_eq!(detail.remaining_charges, 2);
+    assert_eq!(detail.periods_remaining, 2);
+}
+
+#[test]
+fn estimated_end_detail_is_none_for_open_ended_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.estimated_end_detail(&id), None);
+}
+
+#[test]
+fn estimated_end_detail_after_completion_points_at_the_past() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_sequence_number(500);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    w.env.ledger().set_timestamp(1_000_000 + 5 * MONTH);
+    w.env.ledger().set_sequence_number(900);
+
+    let detail = w.sub.estimated_end_detail(&id).unwrap();
+    assert_eq!(detail.timestamp, w.sub.get_mandate(&id).last_charge);
+    assert_eq!(detail.remaining_charges, 0);
+    assert_eq!(detail.periods_remaining, 0);
+    assert_eq!(detail.ledger, 900);
+}
+
+#[test]
+fn estimated_end_detail_errors_for_missing_and_overflowing_mandates() {
+    let w = world();
+    assert_eq!(
+        w.sub.try_estimated_end_detail(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
+
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_estimated_end_detail(&id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+}
+
+// ---- #290: checked math on period and due-date arithmetic ----
+
+#[test]
+fn charge_reports_schedule_overflow_when_next_due_date_exceeds_u64() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Regression: this used to surface as AmountOverflow.
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.next_charge, u64::MAX - MONTH + 1);
+}
+
+#[test]
+fn charge_succeeds_at_the_last_representable_due_date() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    w.env.ledger().set_timestamp(u64::MAX - MONTH);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let result = w.sub.charge(&w.keeper, &id);
+    assert_eq!(result.next_charge, u64::MAX);
+}
+
+#[test]
+fn huge_period_plan_overflows_on_charge_not_on_subscribe() {
+    let w = world();
+    let long_plan = w.plan_amount(PRICE, u64::MAX);
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &long_plan, &0, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::ScheduleOverflow))
+    );
+}
