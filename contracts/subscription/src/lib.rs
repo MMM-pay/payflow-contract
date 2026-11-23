@@ -148,6 +148,12 @@ pub const MAX_START_OFFSET: u64 = 365 * 24 * 60 * 60;
 /// an expected ledger sequence for display (#287).
 pub const SECONDS_PER_LEDGER: u64 = 5;
 
+// Interface changes are published as spec JSON under `spec/` by CI. A PR that
+// changes a contract's public interface must update the committed spec file
+// and be labelled `interface-change`; list the change under `Unreleased` in
+// CHANGELOG.md and note any follow-up issues for payflow-backend,
+// payflow-frontend and payflow-docs in the PR.
+
 #[allow(missing_docs)]
 mod contract {
     use super::{

@@ -9,6 +9,12 @@ change the contract interface.
 
 ### Added
 
+- **CI: contract interface spec.** Each contract's spec JSON is generated in
+  CI and committed under `spec/`. A PR that changes a contract interface
+  without updating `spec/` fails CI, and the spec diff is shown in the job
+  summary. Interface-changing PRs are labelled `interface-change`. Follow-up
+  issues are needed in `payflow-backend`, `payflow-frontend` and
+  `payflow-docs` to consume the published spec.
 - **#285: protocol-wide pause.** New admin-only
   `subscription:set_protocol_paused(paused)` and view `protocol_paused()`.
   While paused, `subscribe`, `subscribe_at`, `subscribe_with_deposit`,

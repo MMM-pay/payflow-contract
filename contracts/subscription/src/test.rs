@@ -245,6 +245,22 @@ fn version_matches_package_version() {
     );
 }
 
+/// Interface-change guard: the public read surface used by the backend
+/// (`event_spec.json`) must stay callable without authorization, and the
+/// version string must be non-empty so the CI spec job has something to pin.
+#[test]
+fn interface_surface_is_callable_without_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.env.set_auths(&[]);
+    assert!(!w.sub.version().is_empty());
+    assert_eq!(w.sub.get_mandate(&id).id, id);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+}
+
 #[test]
 fn subscribe_copies_plan_terms_into_mandate() {
     let w = world();
