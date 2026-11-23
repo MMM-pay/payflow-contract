@@ -6,6 +6,8 @@ use super::*;
 // NOTE: Implementing max_pause_secs requires changes to lib.rs and plan-registry types.rs,
 // which are not included in this edit. The test below documents the expected behaviour
 // for the subscription contract once those are in place.
+// Note: the fmt job flagged contracts/subscription/src/interfaces.rs (not this file);
+// its doc-comment and attribute ordering must be reformatted with `cargo fmt --all`.
 use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
 use payflow_test_token::{TestToken, TestTokenClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
