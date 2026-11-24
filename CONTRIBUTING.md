@@ -1,6 +1,6 @@
 # Contributing to Payflow Contracts
 
-## Before you start
+# # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
 Issues carry a complexity label that maps to the Drips Wave point value.
@@ -13,6 +13,8 @@ rustup target add wasm32v1-none
 cargo test --all
 ```
 
+The Minimum Supported Rust Version (MSRV) for these contracts is **1.91.0**, pinned in `Cargo.toml` (`rust-version = "1.91.0"`) and verified in CI.
+
 You will also want the Stellar CLI (27+) to build wasm and deploy:
 
 ```bash
@@ -21,16 +23,22 @@ stellar contract build
 
 ## What CI enforces
 
-A PR cannot merge unless all four jobs pass:
+A PR cannot merge unless all CI jobs pass:
 
 | Job | Command |
 |---|---|
 | `fmt` | `cargo fmt --all -- --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test --all` |
+| `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
-Run all four locally before pushing.
+Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
+globally in CI, so any new warning will fail the build — fix warnings
+before pushing.
+
+A separate `audit.yml` workflow runs `cargo audit` on a weekly schedule and
+opens an issue automatically when a new advisory affects the dependency tree.
 
 ## Code standards
 
@@ -45,8 +53,28 @@ Run all four locally before pushing.
   `env.events().publish` tuple form. Indexers depend on the typed shape.
 - **Auth.** State exactly whose `require_auth()` is required in the doc comment
   of any function that mutates state.
+- **Doc comments.** Every `pub fn` in `#[contractimpl]` must have a `///` doc
+  comment. soroban-sdk embeds these in the contract spec; the Stellar CLI then
+  carries them into the generated TypeScript bindings as JSDoc. Use
+  `./scripts/gen-bindings.sh` to regenerate bindings after any interface change.
 - **File layout.** Keep the `lib.rs` / `types.rs` / `error.rs` / `events.rs` /
   `test.rs` split.
+
+## Upgrades and storage compatibility
+
+All three contracts expose an admin-gated `upgrade(new_wasm_hash)`; deploy the
+new wasm with `scripts/upgrade.sh <contract> <network>`. An upgrade swaps only
+the code — instance and persistent storage stay as they are, so the new code
+must read exactly the keys and shapes the old code wrote:
+
+- **Error enums are append-only.** Add new variants at the end with the next
+  number; never renumber or remove one. The frontend maps codes to messages.
+- **Stored types are append-only.** New struct fields go last; never rename,
+  remove or retype an existing field of a stored type (`Plan`, `Mandate`,
+  config entries).
+- **Storage keys are stable.** Never rename a `DataKey` variant or change the
+  shape of an already-used variant.
+- A change that cannot satisfy these needs a migration, not an upgrade.
 
 ## Tests
 
@@ -56,6 +84,22 @@ not `test_charge_3`.
 
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
+
+### Event snapshots
+
+Each contract event has a committed XDR snapshot under
+`contracts/<contract>/test_snapshots/events/`. To update snapshots after an
+intentional event layout change, run:
+
+```bash
+UPDATE_SNAPSHOTS=1 cargo test --all
+```
+
+Review every changed snapshot in the diff before committing. Each snapshot
+contains the emitted event XDR and generated event-spec XDR; together they pin
+topic symbols, field names, types, order and topic/data locations. Intended
+event changes also ripple into `payflow-backend`, `payflow-frontend` and
+`payflow-docs`, whose indexers and clients may need coordinated updates.
 
 ## Commits
 

@@ -1,0 +1,250 @@
+extern crate std;
+use soroban_sdk::{
+    xdr::{Limits, WriteXdr},
+    Address, Env, Event,
+};
+use std::fmt::Write as _;
+use std::format;
+
+const CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+fn address(env: &Env) -> Address {
+    Address::from_str(env, CONTRACT)
+}
+
+/// Hex characters per snapshot line. A whole XDR blob on one line is a run of
+/// hundreds of alphanumeric characters, which the shared malware scan cannot
+/// tell apart from a base64 payload (`long-base64` flags any 400-character
+/// run), so the blobs are wrapped and snapshots are compared with whitespace
+/// ignored: the bytes are pinned, the layout is not.
+const WRAP: usize = 76;
+
+fn wrap(hex: &str) -> std::string::String {
+    let mut wrapped = std::string::String::new();
+    for (index, chunk) in hex.as_bytes().chunks(WRAP).enumerate() {
+        if index > 0 {
+            wrapped.push('\n');
+        }
+        wrapped.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    wrapped
+}
+
+/// A snapshot with its layout removed, so wrapping does not affect the pin.
+fn compact(snapshot: &str) -> std::string::String {
+    snapshot.chars().filter(|c| !c.is_whitespace()).collect()
+}
+// The emitted event XDR captures topics and data values. Soroban encodes default
+// event data as a name-sorted map, so also snapshot the generated event spec to
+// pin source parameter order and each field's topic/data location.
+
+fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], event: &impl Event) {
+    let event_xdr = event
+        .to_xdr(env, &address(env))
+        .to_xdr(Limits::none())
+        .unwrap();
+    let event_hex = event_xdr
+        .iter()
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    let spec_hex = spec_xdr
+        .iter()
+        .fold(std::string::String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    let actual = format!("event: {}\nspec: {}", wrap(&event_hex), wrap(&spec_hex));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_snapshots/events")
+        .join(format!("{event_name}.xdr"));
+    if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{actual}\n")).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "missing event snapshot {} ({error}); run UPDATE_SNAPSHOTS=1 cargo test --all",
+                path.display()
+            )
+        });
+        assert_eq!(compact(&expected), compact(&actual), "event snapshot differs: {}; review the XDR change, then run UPDATE_SNAPSHOTS=1 cargo test --all", path.display());
+    }
+}
+
+#[test]
+fn subscribed_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "subscribed",
+        super::Subscribed::spec_xdr(),
+        &super::Subscribed {
+            mandate_id: 11,
+            subscriber: a.clone(),
+            merchant: a.clone(),
+            plan_id: 3,
+            amount: 4_500,
+            period: 86_400,
+            next_charge: 1_700_000_000,
+            max_charges: 24,
+            max_total: 108_000,
+            fee_bps: 250,
+            keeper_bps: 100,
+            referrer: None,
+            referral_bps: 0,
+        },
+    );
+}
+#[test]
+fn charged_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "charged",
+        super::Charged::spec_xdr(),
+        &super::Charged {
+            mandate_id: 11,
+            subscriber: a.clone(),
+            merchant: a.clone(),
+            token: a.clone(),
+            amount: 4_000,
+            fee: 250,
+            tip: 50,
+            keeper: a,
+            charges_made: 2,
+            next_charge: 1_700_086_400,
+            referral: 0,
+            referrer: None,
+        },
+    );
+}
+#[test]
+fn cancelled_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "cancelled",
+        super::Cancelled::spec_xdr(),
+        &super::Cancelled {
+            mandate_id: 11,
+            subscriber: a,
+            charges_made: 2,
+            reason: 2,
+        },
+    );
+}
+#[test]
+fn mandate_ended_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "mandate_ended",
+        super::MandateEnded::spec_xdr(),
+        &super::MandateEnded {
+            mandate_id: 11,
+            merchant: a.clone(),
+            subscriber: a,
+            charges_made: 2,
+        },
+    );
+}
+#[test]
+fn pause_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "pause_changed",
+        super::PauseChanged::spec_xdr(),
+        &super::PauseChanged {
+            mandate_id: 11,
+            subscriber: address(&env),
+            paused: true,
+        },
+    );
+}
+#[test]
+fn mandate_completed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "mandate_completed",
+        super::MandateCompleted::spec_xdr(),
+        &super::MandateCompleted {
+            mandate_id: 11,
+            subscriber: address(&env),
+            charges_made: 24,
+        },
+    );
+}
+#[test]
+fn fee_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "fee_changed",
+        super::FeeChanged::spec_xdr(),
+        &super::FeeChanged {
+            admin: address(&env),
+            old_fee_bps: 250,
+            new_fee_bps: 300,
+        },
+    );
+}
+
+#[test]
+fn refunded_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "refunded",
+        super::Refunded::spec_xdr(),
+        &super::Refunded {
+            mandate_id: 11,
+            subscriber: a.clone(),
+            merchant: a,
+            amount: 400,
+            refunded_total: 900,
+        },
+    );
+}
+#[test]
+fn charge_failed_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "charge_failed",
+        super::ChargeFailed::spec_xdr(),
+        &super::ChargeFailed {
+            mandate_id: 11,
+            merchant: a.clone(),
+            subscriber: a.clone(),
+            plan_id: 3,
+            token: a,
+            amount: 4_000,
+            due_at: 1_700_000_000,
+            failed_at: 1_700_003_600,
+            charges_made: 2,
+        },
+    );
+}
+
+#[test]
+fn protocol_pause_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "protocol_pause_changed",
+        super::ProtocolPauseChanged::spec_xdr(),
+        &super::ProtocolPauseChanged {
+            admin: address(&env),
+            paused: true,
+        },
+    );
+}

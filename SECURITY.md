@@ -85,3 +85,56 @@ These are understood tradeoffs, not undiscovered bugs:
 - **Timestamp dependence.** Scheduling uses ledger timestamps, which validators
   may skew by a small margin. Periods are bounded below at 60 seconds
   (`MIN_PERIOD`) so skew cannot meaningfully accelerate billing.
+
+## Externally visible behaviour changes
+
+### Due-date overflow now reports `ScheduleOverflow` (#290)
+
+The period and due-date arithmetic in `subscription` was reviewed for overflow
+at large periods and ledger timestamps. All schedule math was already checked
+or saturating except where noted here:
+
+- `charge` computes the next due date as `now + period` with checked math. When
+  that would exceed `u64::MAX` it now fails with `ScheduleOverflow` (2018)
+  instead of `AmountOverflow` (2012). No state is written either way; only the
+  error code a client sees changes. Keepers matching on `AmountOverflow` for
+  this case should match `ScheduleOverflow` too.
+- The `NextMandateId` increment uses checked math and the per-plan open-seat
+  and index counters saturate rather than panic.
+
+Regression tests: `charge_reports_schedule_overflow_when_next_due_date_exceeds_u64`,
+`charge_succeeds_at_the_last_representable_due_date` and
+`huge_period_plan_overflows_on_charge_not_on_subscribe`.
+
+### Vault bounds deposit/withdraw cycling (#314)
+
+`vault:deposit`, `deposit_for`, `withdraw`, `withdraw_to` and `withdraw_all` now share a
+fixed 60-second window per `(user, token)`. At most 8 operations are accepted
+inside one window; a ninth fails with `RateLimitExceeded` before any balance is
+written or any token moves. Windows are aligned to the Unix epoch and reset
+deterministically, so a caller cannot keep extending one. The limit is per user
+and token: other users, and the same user's other tokens, are unaffected.
+`debit` and the mandate-aware debit paths used by charges are not counted, so
+billing is unaffected.
+
+This is a hardening change: an address that cycled tiny deposits and
+withdrawals could otherwise rewrite the balance entry and emit events
+indefinitely. Normal subscribers can still deposit and withdraw several times
+a minute. A wallet that hits the limit should wait for the next window.
+
+### Refund cap now accounts for referral fees and keeper tips (PR #301)
+
+Previously, the refund cap (`merchant_received`) only subtracted the protocol fee
+and keeper tip from the per-charge amount. It did not account for referral fees,
+which are also paid out of the merchant's share. This meant a merchant with a
+referral-enabled mandate could refund more than it actually received — up to the
+(pre-referral) merchant gross per charge.
+
+The fix updates `merchant_received` to also subtract the referral share (when a
+referrer is set) before multiplying by `charges_made`. The refund cap is now:
+`(amount - fee - tip - referral) * charges_made`
+
+This is a hardening change: it reduces the maximum refundable amount for
+mandates with referrers or keeper tips. No mandate can now refund more than the
+merchant actually collected. Existing mandates without referrers or tips are
+unaffected.

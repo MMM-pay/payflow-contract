@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Keep the Rust/Soroban dependencies moving so security fixes land without
+  # waiting for a human. The root is a Cargo workspace, so one entry covers
+  # every contract crate.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  # The workflows pin actions; keep those current too.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch

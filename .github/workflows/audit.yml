@@ -1,0 +1,52 @@
+name: Security audit
+
+on:
+  schedule:
+    # Every Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run audit
+        id: audit
+        run: cargo audit --json > audit-output.json 2>&1; echo "exit=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+      - name: Open issue on new advisory
+        if: steps.audit.outputs.exit != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '`cargo audit` found one or more advisories in the dependency tree.\n\n';
+            try {
+              const raw = fs.readFileSync('audit-output.json', 'utf8');
+              const report = JSON.parse(raw);
+              const vulns = report?.vulnerabilities?.list ?? [];
+              for (const v of vulns) {
+                const id = v.advisory?.id ?? 'unknown';
+                const pkg = v.package?.name ?? 'unknown';
+                const title = v.advisory?.title ?? '';
+                body += `- **${id}** \`${pkg}\`: ${title}\n`;
+              }
+            } catch (_) {
+              body += 'Could not parse audit output — check the workflow logs for details.\n';
+            }
+            body += '\nFull run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'chore(security): cargo-audit found new advisories',
+              body,
+              labels: ['security'],
+            });

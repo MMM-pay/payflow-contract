@@ -10,6 +10,9 @@
   <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg"/>
   </a>
+  <a href="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml">
+    <img alt="Coverage" src="https://github.com/MMM-pay/payflow-contract/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push&amp;job=coverage&amp;label=coverage"/>
+  </a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.96-orange"/>
   <img alt="soroban-sdk" src="https://img.shields.io/badge/soroban--sdk-26-blue"/>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-green"/>
@@ -83,12 +86,6 @@ subscriber pays.
   plan later **cannot** reprice an open mandate.
 - `max_charges` caps total collections. `0` means open-ended.
 - `cancel` is unilateral and immediate; the merchant is not consulted.
-- A plan can be sold or handed to a new merchant address with a two-step
-  `propose_plan_owner` / `accept_plan_owner`. Only mandates opened afterwards
-  use the new owner's terms; open mandates keep billing the merchant, payout
-  and referrer frozen when they were opened.
-- Anyone can fund another account's vault balance with `deposit_for`, but the
-  credited account is still the only one that can withdraw or spend it.
 - A merchant can end a mandate (`end_mandate`) when it stops offering the
   service. Ending can only stop future charges; it never takes anything.
 - Withdrawing from the vault starves any mandate. Funds are never locked.
@@ -101,13 +98,20 @@ subscriber pays.
 - A keeper tip is capped at 5% of the merchant's share (`MAX_KEEPER_BPS = 500`)
   and comes out of that share, never out of the subscriber's payment. It is
   frozen into the mandate when it is opened.
-- A referral share is capped at 10% of the merchant's share
-  (`MAX_REFERRAL_BPS = 1000`), is set per plan (0 disables it) and is also
-  frozen into the mandate. It is paid to the referrer out of the merchant's
-  share, so a subscriber never pays more for arriving through an affiliate.
-- The merchant's share is paid to the plan's `payout` address (a treasury or
-  multisig, defaulting to the merchant) while plan management still requires
-  the merchant's own signature.
+- `upgrade` moves a mandate onto another plan of the same merchant and token.
+  A more expensive plan collects the price difference for the part of the
+  current period that is still ahead, prorated and rounded in the subscriber's
+  favour; a cheaper plan takes effect at the next charge and never refunds
+  anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+- A merchant can pause charging for one plan without ending its mandates or
+  closing it to new subscribers. Pausing only blocks settlement; resuming
+  restores the same mandates.
+- A plan's grace window is copied into each mandate at sign-up.
+  `is_in_grace_period` lets a wallet warn the subscriber between the due time
+  and the end of that window. The view never changes or cancels the mandate.
+- Vault deposits and withdrawals are limited to 8 operations per `(user,
+  token)` in each 60-second window. Charges are not affected, and the window
+  resets on a fixed epoch-aligned boundary.
 
 ## Design notes
 
@@ -123,10 +127,19 @@ costs the same whether the merchant has one subscriber or a million, and nobody
 can block a merchant by opening throwaway mandates until a list outgrows the
 ledger's entry size limit.
 
-**Paged reads.** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
+**Paged reads.** `merchant_plans`, `token_plans`, `merchant_mandates` and `subscriber_mandates`
 take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
+
+## Sequence diagrams
+
+[`docs/sequence-diagrams.md`](docs/sequence-diagrams.md) shows the
+cross-contract calls (Subscription → PlanRegistry → Vault → token) for
+`subscribe`, `charge` and `cancel`, the errors each step can stop on, the
+events each flow emits, and what the protocol pause blocks.
+
+The complete numeric error reference is in [`docs/ERRORS.md`](docs/ERRORS.md), including the trigger condition for every contract error.
 
 ## Architecture decision records
 
@@ -140,6 +153,13 @@ consequences) in [`docs/adr/`](docs/adr/index.md):
 - [0005: Permissionless `charge`](docs/adr/0005-permissionless-charge.md)
 
 Add a new ADR whenever a design choice changes.
+
+## Glossary
+
+[`docs/glossary.md`](docs/glossary.md) maps the terms on the
+[docs site glossary](https://mmm-pay.github.io/payflow-docs/glossary.html)
+(mandate, plan, vault, charge, keeper, …) to the contract, type, function and
+storage key that implement each one, and lists where the two have drifted.
 
 ## Try it in five minutes
 
@@ -180,7 +200,7 @@ deployed at are in [`deployments/testnet.env`](deployments/testnet.env).
 # prerequisites: Rust 1.96+, stellar-cli 27+
 rustup target add wasm32v1-none
 
-cargo test --all          # 115 tests
+cargo test --all          # 250 tests
 stellar contract build    # wasm -> target/wasm32v1-none/release
 ```
 
@@ -195,11 +215,73 @@ The script deploys in dependency order, passing each contract its configuration
 as constructor arguments, grants the subscription contract debit rights on the
 vault, and writes the ids to `deployments/<network>.env`.
 
+Upgrade a deployed suite to new wasm (admin-signed; storage is preserved):
+
+```bash
+./scripts/upgrade.sh subscription testnet payflow-deployer
+```
+
+For a full step-by-step walkthrough including prerequisites, smoke-testing,
+and troubleshooting, see [docs/testnet-quickstart.md](docs/testnet-quickstart.md).
+
 Smoke-test a live deployment end to end:
 
 ```bash
 ./scripts/demo.sh testnet   # reads deployments/testnet.env
 ```
+
+## TypeScript clients
+
+Install the generated clients from npm:
+
+```bash
+npm install @mmm-pay/contracts @stellar/stellar-sdk
+```
+
+Use the generated client with the testnet RPC to read contract state:
+
+```ts
+import { Networks } from "@stellar/stellar-sdk";
+import { PlanRegistryClient } from "@mmm-pay/contracts";
+
+const registry = new PlanRegistryClient({
+  contractId: "YOUR_PLAN_REGISTRY_ID",
+  networkPassphrase: Networks.TESTNET,
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+
+const transaction = await registry.next_plan_id();
+await transaction.simulate();
+const nextPlanId = transaction.result.unwrap();
+```
+
+The package also exports `VaultClient` and `SubscriptionClient`, with
+contract-specific types under `PlanRegistryTypes`, `VaultTypes` and
+`SubscriptionTypes`. Mutating methods return transactions that integrators
+must authorize and submit with the Stellar SDK.
+
+CI builds and verifies the bindings on contract changes. Publishing a GitHub
+release publishes the matching version to npm; the repository needs an
+`NPM_TOKEN` secret. The manual **TypeScript bindings testnet smoke** workflow
+checks the live registry's `next_plan_id` read without a signing key.
+
+To regenerate and check the package locally after changing a contract:
+
+```bash
+stellar contract build
+./scripts/generate-bindings.sh
+npm ci --prefix bindings
+npm test --prefix bindings
+```
+
+Verify that a deployment runs the WASM built from this source:
+
+```bash
+./scripts/verify.sh testnet # fetches IDs from deployments/testnet.env
+```
+
+The verifier builds the contracts, fetches each deployed WASM, and compares
+SHA-256 hashes. It exits non-zero if any deployed contract differs.
 
 ## Repository layout
 
@@ -207,10 +289,14 @@ Smoke-test a live deployment end to end:
 contracts/
   plan-registry/   merchant plan catalogue
   vault/           subscriber custody
-  subscription/    mandates, scheduling, fee and referral split
+  subscription/    mandates, scheduling, fee split
+  test-token/      test-only SEP-41 fixture (never deploy as a real asset)
+  shared/          types shared across contract boundaries
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test
+  upgrade.sh       admin-gated in-place wasm upgrade
+  verify.sh        compare deployed WASMs with source
 deployments/
   testnet.env      ids of the live testnet suite
 ```
@@ -218,6 +304,10 @@ deployments/
 Each contract follows the same file split: `lib.rs` (entry points), `types.rs`
 (storage types), `error.rs` (`contracterror`), `events.rs` (`contractevent`),
 `test.rs`.
+
+The extra `contracts/test-token` crate is not part of the deployed suite: it is
+a test-only token fixture with minting and failure injection, documented in
+[`docs/test-token.md`](docs/test-token.md). Never deploy it as a real asset.
 
 ## Related repositories
 

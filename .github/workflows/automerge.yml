@@ -35,10 +35,10 @@ concurrency:
 
 jobs:
   automerge:
-    uses: MMM-pay/.github/.github/workflows/automerge.yml@3c9de7c464f7d199f4c2dc6d3738a38934df7bec # main
+    uses: MMM-pay/.github/.github/workflows/automerge.yml@85111c8e26a2f69f8d6206b8b83bfd840228c728 # main
     with:
       post_merge_workflows: "ci.yml"
       request_pages_build: false
       dry_run: ${{ inputs.dry_run == true }}
       # Same commit as security.yml pins: older scan results are redone.
-      scanner_ref: 3c9de7c464f7d199f4c2dc6d3738a38934df7bec
+      scanner_ref: 85111c8e26a2f69f8d6206b8b83bfd840228c728

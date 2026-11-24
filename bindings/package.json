@@ -1,0 +1,35 @@
+{
+  "name": "@mmm-pay/contracts",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Generated TypeScript clients for the Payflow Soroban contracts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MMM-pay/payflow-contract.git",
+    "directory": "bindings"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["dist"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build",
+    "smoke:testnet": "node --env-file=../deployments/testnet.env testnet-smoke.mjs"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "17.3.0"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}

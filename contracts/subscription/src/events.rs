@@ -1,69 +1,151 @@
-use soroban_sdk::{contractevent, Address};
+//! Events emitted by the subscription contract.
 
+use soroban_sdk::{contractevent, Address, BytesN};
+
+/// Emitted when a subscriber opens a new mandate against a plan.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Subscribed {
+    /// Unique identifier of the newly created mandate.
     #[topic]
     pub mandate_id: u64,
+    /// Account of the subscriber.
     #[topic]
     pub subscriber: Address,
+    /// Account of the merchant.
     #[topic]
     pub merchant: Address,
+    /// ID of the plan subscribed to.
     pub plan_id: u64,
+    /// Amount charged per billing period.
     pub amount: i128,
+    /// Billing period in seconds.
     pub period: u64,
+    /// Unix timestamp when the first charge is due.
     pub next_charge: u64,
     /// 0 means open-ended. Carried in the event so indexers do not have to
     /// make a follow-up contract read to learn a mandate's spend cap.
     pub max_charges: u32,
+    /// 0 means open-ended.
+    pub max_total: i128,
     /// The fee rate frozen into this mandate, for the same reason.
     pub fee_bps: u32,
     /// The keeper tip frozen into this mandate, for the same reason.
     pub keeper_bps: u32,
-    /// Where the merchant's share is paid, for the same reason.
-    pub payout: Address,
-    /// The referral share frozen into this mandate. 0 disables referrals.
-    pub referral_bps: u32,
-    /// The referrer paid on every charge, `None` when the mandate has none.
+    /// The referrer frozen into this mandate, if any.
     pub referrer: Option<Address>,
+    /// The referral rate frozen into this mandate, in basis points of the
+    /// merchant's share.
+    pub referral_bps: u32,
 }
 
+/// Emitted when a batch of mandates is opened in a single call by
+/// `subscribe_many`. One event is emitted per batch, after every mandate in
+/// the batch has been created, so indexers can correlate the individual
+/// `Subscribed` events with the batch that produced them.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscribedMany {
+    /// Account of the subscriber who authorized the batch.
+    #[topic]
+    pub subscriber: Address,
+    /// IDs of the mandates created, in the same order as the requested plans.
+    pub mandate_ids: soroban_sdk::Vec<u64>,
+    /// IDs of the plans subscribed to, in request order.
+    pub plan_ids: soroban_sdk::Vec<u64>,
+}
+
+/// Emitted when a mandate charge is successfully executed.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Charged {
+    /// ID of the charged mandate.
     #[topic]
     pub mandate_id: u64,
+    /// Account of the subscriber debited.
     #[topic]
     pub subscriber: Address,
+    /// Account of the merchant credited.
     #[topic]
     pub merchant: Address,
+    /// SEP-41 token that `amount`, `fee` and `tip` are denominated in. Without
+    /// it an indexer must join on the mandate to total revenue per token, and
+    /// cannot do so from events alone.
+    pub token: Address,
     /// Merchant share after the protocol fee and the keeper tip.
     pub amount: i128,
+    /// Protocol fee deducted.
     pub fee: i128,
     /// Paid to `keeper` out of the merchant share. The subscriber's total debit
     /// is `amount + fee + tip` exactly as it was before tips existed.
     pub tip: i128,
     /// Account that settled this charge and received the tip.
     pub keeper: Address,
-    /// Paid to `referrer` out of the merchant share. Part of `amount` plus
-    /// `tip` plus `referral` is the merchant share before either was taken.
-    pub referral: i128,
-    /// Account that received `referral`, if this mandate has one.
-    pub referrer: Option<Address>,
-    /// Account that received the merchant share.
-    pub payout: Address,
+    /// Total number of charges completed under this mandate.
     pub charges_made: u32,
+    /// Unix timestamp when the next charge falls due.
     pub next_charge: u64,
+    /// Referral share paid to `referrer` out of the merchant's share, 0 when
+    /// the mandate has no referrer.
+    pub referral: i128,
+    /// Account paid the referral share, if any.
+    pub referrer: Option<Address>,
 }
 
+/// Merchant notification hook (#296): emitted the first time a due mandate's
+/// charge fails, so off-chain dunning can react promptly.
+///
+/// A failed `charge` is rolled back together with any event it would emit, so
+/// the failure is recorded by `flag_failed_charge`, which proves on chain that
+/// the charge would fail right now. The event fires once per run of failures:
+/// further flags are no-ops until a successful `charge` clears the run, after
+/// which the next failure notifies again.
+///
+/// `merchant` is a topic so a merchant's dunning service can subscribe to its
+/// own failures with a single topic filter.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeFailed {
+    /// ID of the mandate whose charge failed.
+    #[topic]
+    pub mandate_id: u64,
+    /// Merchant owed the charge; the topic a dunning service filters on.
+    #[topic]
+    pub merchant: Address,
+    /// Subscriber whose vault could not cover the charge.
+    #[topic]
+    pub subscriber: Address,
+    /// Plan the mandate bills against.
+    pub plan_id: u64,
+    /// Token the charge is denominated in.
+    pub token: Address,
+    /// Amount the charge needed: the mandate's frozen price.
+    pub amount: i128,
+    /// Unix seconds the charge fell due (`next_charge`).
+    pub due_at: u64,
+    /// Unix seconds the failure was flagged.
+    pub failed_at: u64,
+    /// Charges settled so far under this mandate.
+    pub charges_made: u32,
+}
+
+/// Emitted when a subscriber cancels a mandate.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cancelled {
+    /// ID of the cancelled mandate.
     #[topic]
     pub mandate_id: u64,
+    /// Account of the subscriber who cancelled.
     #[topic]
     pub subscriber: Address,
+    /// Total number of charges completed before cancellation.
     pub charges_made: u32,
+    /// Why the subscriber left, as one of the documented `CANCEL_REASON_*`
+    /// codes. `0` means no reason given, which is what `cancel` and
+    /// `cancel_page` emit. Carried on the wire so a merchant can compute
+    /// churn without a contract read per cancellation.
+    pub reason: u32,
 }
 
 /// Emitted when the merchant ends a mandate, for example because it stopped
@@ -72,32 +154,149 @@ pub struct Cancelled {
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MandateEnded {
+    /// ID of the ended mandate.
     #[topic]
     pub mandate_id: u64,
+    /// Merchant who ended the mandate.
     #[topic]
     pub merchant: Address,
+    /// Subscriber whose mandate was ended.
     pub subscriber: Address,
+    /// Total number of charges completed before ending.
     pub charges_made: u32,
 }
 
+/// Emitted when a mandate is paused or resumed.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PauseChanged {
+    /// ID of the mandate whose pause status changed.
     #[topic]
     pub mandate_id: u64,
+    /// Account of the subscriber.
     #[topic]
     pub subscriber: Address,
+    /// Whether the mandate is now paused (`true`) or resumed (`false`).
     pub paused: bool,
 }
 
+/// Emitted when a mandate's pause exceeds its merchant-set maximum and the
+/// mandate is cancelled by `expire_pause`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseExpired {
+    /// ID of the expired mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber.
+    #[topic]
+    pub subscriber: Address,
+    /// Maximum pause length in seconds that was exceeded.
+    pub max_pause_secs: u64,
+    /// Timestamp at which the pause began.
+    pub paused_at: u64,
+}
+
+/// Emitted when a mandate reaches its maximum allowed charges and completes.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MandateCompleted {
+    /// ID of the completed mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber.
+    #[topic]
+    pub subscriber: Address,
+    /// Total number of charges executed.
+    pub charges_made: u32,
+}
+
+/// A merchant refunded part of what it collected for a mandate. The event
+/// links the refund to the mandate, so both sides can prove a refund from
+/// chain data alone. `refunded_total` is the running total refunded on this
+/// mandate, which is what the contract caps at the merchant's receipts.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Refunded {
+    /// ID of the refunded mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber who received the refund.
+    #[topic]
+    pub subscriber: Address,
+    /// Merchant who issued the refund.
+    #[topic]
+    pub merchant: Address,
+    /// Refund amount transferred in this operation.
+    pub amount: i128,
+    /// Cumulative amount refunded on this mandate so far.
+    pub refunded_total: i128,
+}
+
+/// Emitted when a mandate's ownership moves from one subscriber to another via
+/// `propose_mandate_owner` / `accept_mandate_owner`. Future charges are debited
+/// from the new subscriber's vault; all frozen mandate terms and the merchant
+/// index are unchanged.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateTransferred {
+    /// ID of the transferred mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber the mandate moved away from.
+    #[topic]
+    pub old_subscriber: Address,
+    /// Subscriber the mandate moved to.
+    pub new_subscriber: Address,
+}
+
+/// Emitted when a subscriber moves a mandate onto a different plan.
+///
+/// `charged` is the prorated difference collected for the part of the
+/// current period that was still ahead; it is zero for a downgrade, which
+/// takes effect at the next charge and never refunds anything. The event
+/// carries the old and the new terms so an indexer can show the change
+/// without a follow-up contract read.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Upgraded {
+    /// ID of the upgraded mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber who upgraded.
+    #[topic]
+    pub subscriber: Address,
+    /// Merchant receiving payment under the mandate.
+    #[topic]
+    pub merchant: Address,
+    /// Previous plan ID.
+    pub old_plan_id: u64,
+    /// New plan ID.
+    pub new_plan_id: u64,
+    /// The price the mandate paid per period before the upgrade.
+    pub old_amount: i128,
+    /// The price the mandate pays per period from the upgrade on.
+    pub new_amount: i128,
+    /// Difference collected now, prorated and rounded down. Zero for a
+    /// downgrade.
+    pub charged: i128,
+    /// The new plan's period, in seconds.
+    pub period: u64,
+    /// When the next charge falls due. The upgrade does not move it.
+    pub next_charge: u64,
+}
+
+/// Emitted when a subscriber changes the charge cap of their own open
+/// mandate. The mandate keeps its id and history; only the limit moves.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaxChargesChanged {
     #[topic]
     pub mandate_id: u64,
     #[topic]
     pub subscriber: Address,
-    pub charges_made: u32,
+    /// New cap. 0 means the mandate is now open-ended.
+    pub max_charges: u32,
 }
 
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
@@ -105,8 +304,89 @@ pub struct MandateCompleted {
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeChanged {
+    /// Admin account that changed the fee.
     #[topic]
     pub admin: Address,
+    /// Previous protocol fee in basis points.
     pub old_fee_bps: u32,
+    /// New protocol fee in basis points.
     pub new_fee_bps: u32,
+}
+
+/// Emitted when the admin pauses or resumes the protocol (#285). Only emitted
+/// when the switch actually changes, so an indexer can treat every event as a
+/// transition.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolPauseChanged {
+    /// Admin account that flipped the switch.
+    #[topic]
+    pub admin: Address,
+    /// `true` when the protocol is now paused, `false` when it resumed.
+    pub paused: bool,
+}
+
+/// Emitted after every state change to a mandate, carrying a complete snapshot
+/// of the mandate so indexers do not have to reconstruct state or risk drift
+/// from missed intermediate events.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateUpdated {
+    /// Id of the updated mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Complete snapshot of the mandate after update.
+    pub mandate: crate::types::Mandate,
+}
+
+/// Emitted when a subscriber changes the seat count on their mandate.
+///
+/// The new seat count takes effect from the next charge; no money moves at the
+/// time this event is emitted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeatsChanged {
+    /// ID of the mandate whose seat count changed.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber who made the change.
+    #[topic]
+    pub subscriber: Address,
+    /// Seat count before the change.
+    pub old_seats: u32,
+    /// Seat count after the change, effective from the next charge.
+    pub new_seats: u32,
+}
+
+/// Emitted when the admin replaces this contract's wasm. Persistent state is
+/// untouched by an upgrade; the new code reads the keys the old code wrote.
+/// Named `ContractUpgraded` because `Upgraded` is already taken by the
+/// mandate-plan upgrade event above.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
+}
+
+/// Emitted when a plan's committed revenue per period changes. This allows
+/// dashboards to track MRR/ARR on-chain without scanning all mandates.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedRevenueChanged {
+    /// ID of the plan whose committed revenue changed.
+    #[topic]
+    pub plan_id: u64,
+    /// Merchant owning the plan.
+    #[topic]
+    pub merchant: Address,
+    /// Token the plan is denominated in.
+    pub token: Address,
+    /// Previous committed amount per period.
+    pub old_committed: i128,
+    /// New committed amount per period.
+    pub new_committed: i128,
+    /// Billing period in seconds.
+    pub period: u64,
 }

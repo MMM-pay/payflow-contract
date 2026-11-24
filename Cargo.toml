@@ -5,11 +5,13 @@ members = ["contracts/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.91.0"
 license = "Apache-2.0"
 repository = "https://github.com/MMM-pay/payflow-contract"
 
 [workspace.dependencies]
 soroban-sdk = "29"
+payflow-common = { path = "contracts/common" }
 
 [profile.release]
 opt-level = "z"
@@ -24,3 +26,28 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+
+# Stricter clippy profile for the whole workspace (#286). CI runs
+# `cargo clippy --all-targets -- -D warnings`, so every pedantic finding fails
+# the build. The few pedantic lints below are allowed workspace-wide because
+# they fight the Soroban contract model rather than flag unidiomatic code;
+# anything else is fixed in place, or allowed on the one item with a reason.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# `#[contractimpl]` functions must take `Env`, `Address`, `String` and other
+# host values by value: the macro generates the host entry point from the
+# signature and rejects references.
+needless_pass_by_value = "allow"
+# Contract functions return values to the host, not to Rust callers, and the
+# generated clients already surface them; `#[must_use]` on every view would be
+# noise on the contract interface.
+must_use_candidate = "allow"
+# Every error variant is documented once, on the contract's `Error` enum in
+# `error.rs`, which is also what the bindings export. Repeating the list in a
+# `# Errors` section on each entry point would drift from it.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Entry points such as `charge` and `do_subscribe_at` are long because they
+# validate, settle and emit in one linear pass; splitting them would scatter
+# the checks a reviewer needs to read together.
+too_many_lines = "allow"

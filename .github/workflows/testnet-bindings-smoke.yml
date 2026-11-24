@@ -1,0 +1,25 @@
+name: TypeScript bindings testnet smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: stellar/stellar-cli@v30.0.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - run: stellar contract build
+      - run: ./scripts/generate-bindings.sh
+      - run: npm ci --prefix bindings
+      - run: npm test --prefix bindings
+      - run: npm run smoke:testnet --prefix bindings
