@@ -106,6 +106,31 @@ Regression tests: `charge_reports_schedule_overflow_when_next_due_date_exceeds_u
 `charge_succeeds_at_the_last_representable_due_date` and
 `huge_period_plan_overflows_on_charge_not_on_subscribe`.
 
+### Merchant-supplied strings are length-bounded (#269)
+
+The plan registry rejects oversized merchant strings at every entry point that
+accepts them: `create_plan`, `create_plans` (each `PlanParams`), `set_plan_name`
+and `set_profile`. Limits count **bytes**, not characters, so a multibyte
+character consumes several bytes; a value whose byte length is exactly at the
+limit is accepted and the first byte beyond it is rejected.
+
+| Field | Limit (bytes) | Typed error when too long |
+| --- | ---: | --- |
+| plan name (`create_plan`, `create_plans`) | 64 | `NameTooLong` (1007) |
+| plan name (`set_plan_name`) | 64 | `PlanNameTooLong` (1016) |
+| plan description (`create_plan`, `create_plans`) | 280 | `DescriptionTooLong` (1015) |
+| plan terms URI (`create_plan`, `create_plans`) | 200 | `UriTooLong` (1017) |
+| merchant profile name (`set_profile`) | 64 | `ProfileNameTooLong` (1009) |
+| merchant profile URL (`set_profile`) | 256 | `ProfileUrlTooLong` (1010) |
+
+Validation happens before any write or event, so an oversized value leaves
+storage and event history untouched; in `create_plans` the whole batch fails.
+This is an externally visible behaviour change: clients that previously stored
+longer display names, descriptions, links or profile URLs must shorten them
+before using those calls. There is no free-form cancellation "reason" or
+"reference" string in the public API: `reason` is a closed `u32` code set
+(`InvalidCancelReason`, 2028) and `referrer` is an `Address`.
+
 ### Vault bounds deposit/withdraw cycling (#314)
 
 `vault:deposit`, `deposit_for`, `withdraw`, `withdraw_to` and `withdraw_all` now share a
@@ -121,6 +146,39 @@ This is a hardening change: an address that cycled tiny deposits and
 withdrawals could otherwise rewrite the balance entry and emit events
 indefinitely. Normal subscribers can still deposit and withdraw several times
 a minute. A wallet that hits the limit should wait for the next window.
+
+### Mandate ownership transfers (#68)
+
+`propose_mandate_owner` and `accept_mandate_owner` move an `Active` or `Paused`
+mandate to a new subscriber address. The current subscriber authorizes the
+proposal and supplies its index position; the proposed owner authorizes the
+acceptance. A different signer cannot complete either step. Acceptance swaps
+only the subscriber index entries and `mandate.subscriber`; merchant indexes,
+mandate terms, charge history and the merchant's ability to end or refund the
+mandate are unchanged. The `MandateTransferred` event reports both addresses,
+and a `MandateUpdated` snapshot is emitted alongside it.
+
+Security properties and limits to be aware of:
+
+- The transfer is one-shot: acceptance consumes the pending owner and position
+  keys. The subscriber may replace a pending proposal before it is accepted;
+  only the most recently proposed address can accept.
+- A pending proposal does not lock the mandate. If it is cancelled, ended or
+  completed before acceptance, acceptance fails with `MandateNotActive`; the
+  two pending entries then expire with their TTL without being used.
+- Future charges are debited from the **new** subscriber's vault balance. A
+  reserve the old subscriber placed for that mandate with `set_reserve` is not
+  migrated; the new subscriber must fund its own balance (and set its own
+  reserve if it wants one). The old subscriber may release its reserve at any
+  time.
+- Refunds after a transfer are paid to the current `mandate.subscriber`, i.e.
+  the new owner, rather than the address that originally paid. Indexers that
+  attribute refunds should use the event's subscriber field rather than
+  assuming it is the original payer.
+- The vault's debit gate is unchanged: only the registered subscription
+  contract can debit a user's vault balance, and transfer does not alter that
+  registration. Transfer storage reads and writes are O(1); there are no loops
+  over mandate lists.
 
 ### Refund cap now accounts for referral fees and keeper tips (PR #301)
 

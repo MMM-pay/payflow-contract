@@ -1203,6 +1203,15 @@ mod contract {
             Self::write_mandate(&env, &mandate);
             Self::remove_pending_owner(&env, mandate_id);
 
+            // The mandate's subscriber field changed, so the snapshot event
+            // contract holds for every other state change applies here too.
+            // Publish it before the transfer summary so indexers can apply the
+            // snapshot first and still read MandateTransferred last.
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
             MandateTransferred {
                 mandate_id,
                 old_subscriber,

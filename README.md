@@ -202,6 +202,10 @@ rustup target add wasm32v1-none
 
 cargo test --all          # 250 tests
 stellar contract build    # wasm -> target/wasm32v1-none/release
+
+# optional: per-contract coverage gate (needs rustup component add llvm-tools-preview
+# and cargo install cargo-llvm-cov)
+python3 scripts/check_coverage.py
 ```
 
 Deploy your own suite:
@@ -322,7 +326,8 @@ a test-only token fixture with minting and failure injection, documented in
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). Good first issues are labelled
 `good-first-issue`. Changes are recorded in [CHANGELOG.md](CHANGELOG.md). Every PR must pass `cargo fmt --check`, `cargo clippy -D
-warnings`, and `cargo test --all`.
+warnings`, `cargo test --all` and the per-contract coverage gate in
+[`coverage.toml`](coverage.toml) (`python3 scripts/check_coverage.py`).
 
 ## Security
 

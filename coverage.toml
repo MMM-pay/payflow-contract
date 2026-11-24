@@ -1,0 +1,37 @@
+# Per-contract coverage floors for `scripts/check_coverage.py` (#257).
+#
+# Each deployable contract crate is measured independently: `cargo llvm-cov -p
+# <crate>` runs only that crate's tests and reports only that crate's sources.
+# A weak crate therefore cannot hide behind a workspace-wide aggregate.
+#
+# Percentages are inclusive: a crate passes when its measured percentage is
+# greater than or equal to the floor. These floors are ~2-4 points below the
+# measured baseline (plan-registry 98.67/87.50/98.08/89.36, subscription
+# 97.97/84.48/95.87/92.00, vault 94.35/91.86/91.56/92.06 for
+# lines/branches/regions/functions), leaving room for LLVM counter variation
+# while still failing CI on a real regression. Re-baseline all three crates in
+# the same PR that bumps the toolchain. Raising a floor is always welcome;
+# lowering one needs an explicit rationale in the PR description.
+#
+# `test`, `test_errors` and `test_events` modules are excluded via the regex
+# below: they are test harness code, not contract behaviour.
+
+ignore_filename_regex = '/src/(test|test_errors|test_events)\.rs$'
+
+[crates.payflow-plan-registry]
+lines = 95
+branches = 80
+regions = 95
+functions = 85
+
+[crates.payflow-subscription]
+lines = 95
+branches = 80
+regions = 93
+functions = 90
+
+[crates.payflow-vault]
+lines = 92
+branches = 88
+regions = 89
+functions = 90

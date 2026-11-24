@@ -15,6 +15,13 @@ cargo test --all
 
 The Minimum Supported Rust Version (MSRV) for these contracts is **1.91.0**, pinned in `Cargo.toml` (`rust-version = "1.91.0"`) and verified in CI.
 
+For the coverage gate, install two more things once:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+```
+
 You will also want the Stellar CLI (27+) to build wasm and deploy:
 
 ```bash
@@ -29,11 +36,12 @@ A PR cannot merge unless all CI jobs pass:
 |---|---|
 | `fmt` | `cargo fmt --all -- --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
-| `test` | `cargo test --all` |
+| `test` | `cargo test --all` (plus `scripts/check_auth_tests.sh`) |
+| `coverage` | `python3 scripts/check_coverage.py` |
 | `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
-Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
+Run all of these locally before pushing. `RUSTFLAGS="-D warnings"` is set
 globally in CI, so any new warning will fail the build — fix warnings
 before pushing.
 
@@ -84,6 +92,31 @@ not `test_charge_3`.
 
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
+
+### Per-contract coverage
+
+`scripts/check_coverage.py` is the local equivalent of the `coverage` CI job.
+It measures `plan-registry`, `subscription` and `vault` **separately** with
+`cargo llvm-cov -p <crate> --lib --branch`, writes one HTML report per crate to
+`target/llvm-cov/html/<crate>/`, prints a summary table and exits non-zero if a
+crate is below its floor. The pinned stable toolchain is used throughout; the
+script sets `RUSTC_BOOTSTRAP=1` only to unlock LLVM's branch counters, not any
+unstable language feature. `src/test*.rs` modules are excluded from the
+percentages because they are harness code.
+
+```bash
+python3 scripts/check_coverage.py
+# quick, single-crate inspection without the gate:
+cargo llvm-cov -p payflow-vault --lib --branch \
+  --ignore-filename-regex '/src/(test|test_errors|test_events)\.rs$'
+```
+
+Explicit line, branch, region and function floors live in `coverage.toml`.
+Branch counters come from LLVM and can vary slightly with compiler versions;
+re-baseline all three crates in the same PR that bumps the toolchain. Raising a
+floor is always welcome. Lowering one must be justified in the PR description —
+normally by adding tests instead. `test-token`, `shared` and `common` are
+support/fixture crates and are intentionally not gated.
 
 ### Event snapshots
 

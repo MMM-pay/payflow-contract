@@ -46,9 +46,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup component add llvm-tools-preview
-      - run: cargo install cargo-llvm-cov --locked
+      # Same installer the dependency-audit job uses; avoids a full
+      # `cargo install --locked` on every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
-      - run: cargo llvm-cov --workspace --html
+      # Runs each contract crate independently and fails on a missed floor.
+      # Floors live in coverage.toml, not in this workflow.
+      - name: Enforce per-contract coverage floors
+        run: python3 scripts/check_coverage.py
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-report

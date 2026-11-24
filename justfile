@@ -1,4 +1,4 @@
-check: fmt clippy test build
+check: fmt clippy test coverage build
 
 fmt:
     cargo fmt --all -- --check
@@ -8,6 +8,9 @@ clippy:
 
 test:
     cargo test --all
+
+coverage:
+    python3 scripts/check_coverage.py
 
 build:
     stellar contract build

@@ -817,6 +817,32 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
 }
 
 #[test]
+fn set_plan_name_accepts_a_name_exactly_at_the_limit() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    let at_limit = String::from_str(&env, &"x".repeat(MAX_NAME_LEN as usize));
+    client.set_plan_name(&merchant, &id, &at_limit);
+    assert_eq!(client.get_plan(&id).name, at_limit);
+}
+
+#[test]
 fn create_plan_rejects_an_overlong_name() {
     let (env, client, _admin) = setup();
     let merchant = Address::generate(&env);
@@ -3459,6 +3485,47 @@ fn an_invalid_plan_makes_the_whole_batch_atomic() {
     assert_eq!(client.token_plan_count(&token), 0);
     assert!(client.try_get_plan(&1).is_err());
     assert_eq!(env.events().all().events().len(), before);
+}
+
+#[test]
+fn create_plans_boundary_names_are_accepted_and_the_first_invalid_byte_is_atomic() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let at_limit = batch_plan(&env, &token, 1_000, &"y".repeat(MAX_NAME_LEN as usize));
+    let ids = client.create_plans(&merchant, &soroban_sdk::vec![&env, at_limit]);
+    assert_eq!(
+        client.get_plan(&ids.get_unchecked(0)).name.len(),
+        MAX_NAME_LEN
+    );
+
+    let mut too_long = batch_plan(&env, &token, 2_000, "Valid");
+    too_long.name = String::from_str(&env, &"z".repeat(MAX_NAME_LEN as usize + 1));
+    let before_events = env.events().all().events().len();
+    assert_eq!(
+        client.try_create_plans(
+            &merchant,
+            &soroban_sdk::vec![
+                &env,
+                batch_plan(&env, &token, 3_000, "Also valid"),
+                too_long
+            ]
+        ),
+        Err(Ok(Error::NameTooLong))
+    );
+    assert_eq!(
+        client.next_plan_id(),
+        2,
+        "no id may be consumed on rejection"
+    );
+    assert_eq!(client.merchant_plan_count(&merchant), 1);
+    assert!(client.try_get_plan(&2).is_err());
+    assert_eq!(
+        env.events().all().events().len(),
+        before_events,
+        "a rejected batch must not emit events"
+    );
 }
 
 #[test]
