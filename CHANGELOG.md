@@ -68,6 +68,33 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
 
 ### Added
 
+- `vault:deposit_for(from, user, token, amount)`: fund another account's vault
+  balance. `from` signs and pays; `user` owns the credited balance and is the
+  only account that can withdraw or spend it. Emits `DepositFor` with both
+  accounts, so indexers can tell a gift from a self-deposit.
+- `subscription:subscribe` takes an optional `referrer`. A plan's
+  `referral_bps` (capped at `MAX_REFERRAL_BPS`, 1000 = 10%, `0` disables
+  referrals) is paid to that referrer out of the merchant's share on every
+  charge. The referrer and its rate are frozen into the mandate. `Charged`
+  gains `referral`, `referrer` and `payout`; `Subscribed` gains `payout`,
+  `referral_bps` and `referrer`. The subscriber's total debit and the protocol
+  fee are unchanged.
+- `plan-registry:create_plan` takes `referral_bps` and an optional `payout`.
+  `payout` is where the merchant's share of each charge is paid and defaults to
+  `merchant`, so a treasury or multisig can be paid while `merchant` keeps
+  managing plans. Plans carry both in `Plan.payout` / `Plan.referral_bps` and
+  in `PlanCreated`. A referral share above the cap fails with
+  `ReferralBpsTooHigh` (12).
+- `plan-registry:propose_plan_owner(merchant, plan_id, new_owner)` and
+  `accept_plan_owner(new_owner, plan_id)`: a two-step handover of a plan to
+  another merchant address, emitting `PlanOwnerProposed` and `PlanTransferred`.
+  The plan moves between both merchants' plan indexes in constant time, and
+  `pending_plan_owner(plan_id)` exposes a pending proposal. A payout that
+  defaulted to the old owner follows the plan; an explicitly set payout is
+  kept. Mandates already open are untouched and keep paying the addresses
+  frozen at subscribe time.
+- New plan-registry errors `NotPendingOwner` (13) and `OwnerUnchanged` (14),
+  appended after the existing codes.
 - `plan-registry:create_plan` takes `keeper_bps`, the share of each charge paid
   to whoever settles it, capped at `MAX_KEEPER_BPS` (500 = 5%) with the new
   error `KeeperBpsTooHigh` (11). Plans carry it in `Plan.keeper_bps` and in
@@ -108,13 +135,23 @@ request.
 
 ### Changed
 
+- **Breaking:** `subscription:subscribe` takes `referrer: Option<Address>` as
+  its last argument and the merchant share is paid to `Mandate.payout` rather
+  than to `Mandate.merchant`.
+- **Breaking:** `plan-registry:create_plan` takes `referral_bps` and
+  `payout: Option<Address>` after `keeper_bps`, and the plan type gains a
+  `PlanSlot` bookkeeping entry per plan.
+- **Breaking:** `Plan` gains `payout` and `referral_bps`; `Mandate` gains
+  `payout`, `referral_bps` and `referrer`. Both are shared with the
+  subscription contract, so a stored plan or mandate from an earlier
+  deployment does not decode and the suite must be redeployed.
 - **Breaking:** `charge` takes the settling `keeper: Address` and requires its
   authorization; it no longer settles without a signature. Any address may
   still act as keeper.
-- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as its last
-  argument, and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged`
-  gain fields. Existing testnet deployments must be redeployed: stored `Plan`
-  and `Mandate` values do not decode into the new shape.
+- **Breaking:** `plan-registry:create_plan` takes `keeper_bps` as an argument,
+  and `Plan`, `Mandate`, `PlanCreated`, `Subscribed` and `Charged` gain
+  fields. Existing testnet deployments must be redeployed: stored `Plan` and
+  `Mandate` values do not decode into the new shape.
 - **Breaking:** `merchant_plans`, `merchant_mandates` and `subscriber_mandates`
   take `start` and `limit` and return at most 50 ids per call.
 - **Breaking:** `initialize` is replaced by `__constructor` in all three
@@ -133,6 +170,24 @@ request.
   does not change any user balances.
 - **New test: `fee_paid_to_contract_address`** — asserts that the protocol fee
   is transferred to the `fee_to` address when a mandate is charged.
+- **Referral, payout and transfer tests** — 90 → 115 tests. The referral share
+  is paid out of the merchant share and never changes what the subscriber
+  pays; a plan's `referral_bps` of 0 pays nobody; 99 stroops at 5% loses no
+  stroop to rounding; `Charged` reports the referral; the merchant share goes
+  to the plan's `payout`; an open mandate keeps its frozen payout after the
+  plan is sold and keeps billing the old merchant's payout. In the registry, a
+  transfer updates both merchants' indexes (including a swap-with-last slot),
+  a stranger cannot accept or propose one, a plan cannot be transferred to its
+  current owner, and an explicit payout survives the handover. In the vault,
+  `deposit_for` credits the recipient only, and only the recipient can
+  withdraw the gift.
+
+The four new interface changes (`deposit_for`/`DepositFor`, `subscribe`'s
+`referrer`, `create_plan`'s `referral_bps`/`payout`, and
+`propose_plan_owner`/`accept_plan_owner`/`PlanTransferred`) ripple into
+`payflow-backend`, `payflow-frontend` and `payflow-docs`: follow-up issues to
+render referral earnings, pass the referrer on subscribe, show a plan's payout
+address and handle plan transfers are tracked in the pull request.
 
 ## [0.1.0] - 2026-09-02
 

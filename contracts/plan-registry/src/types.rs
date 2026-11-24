@@ -29,4 +29,9 @@ pub enum DataKey {
     MerchantPlan(Address, u32),
     /// A merchant's self-declared profile.
     Profile(Address),
+    /// The address proposed to take over a plan, awaiting its acceptance.
+    PendingOwner(u64),
+    /// Position of a plan in its owner's index, so a transfer can move the
+    /// plan out of that index in constant time instead of scanning it.
+    PlanSlot(u64),
 }

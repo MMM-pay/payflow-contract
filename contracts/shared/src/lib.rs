@@ -18,9 +18,16 @@ use soroban_sdk::{contracttype, Address, String};
 /// what a subscriber pays.
 pub const MAX_KEEPER_BPS: u32 = 500;
 
+/// Largest referral share a plan may set, in basis points of the merchant's
+/// share: 10%. Like the keeper tip it is paid out of the merchant's share, so
+/// it never changes what the subscriber pays. A merchant sets 0 to disable
+/// referrals for a plan.
+pub const MAX_REFERRAL_BPS: u32 = 1_000;
+
 /// A merchant-published charge template. A `Plan` is immutable except for its
-/// `active` flag: changing price, period or keeper tip requires publishing a
-/// new plan so existing mandates can never be repriced under a subscriber.
+/// `active` flag (and its owner, via the two-step transfer): changing price,
+/// period, keeper tip or referral share requires publishing a new plan so
+/// existing mandates can never be repriced under a subscriber.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
@@ -42,4 +49,12 @@ pub struct Plan {
     /// points of the merchant's share. 0 means the merchant keeps it all.
     /// At most `MAX_KEEPER_BPS`; the registry rejects anything higher.
     pub keeper_bps: u32,
+    /// Where the merchant's share of each charge is paid. Defaults to
+    /// `merchant` when the plan is created without one, and can be a treasury
+    /// or multisig while `merchant` keeps publishing and managing plans.
+    pub payout: Address,
+    /// Share of each charge paid to the subscriber's referrer, in basis points
+    /// of the merchant's share. 0 disables referrals for this plan. At most
+    /// `MAX_REFERRAL_BPS`; the registry rejects anything higher.
+    pub referral_bps: u32,
 }

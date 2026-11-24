@@ -8,10 +8,12 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{PlanCreated, PlanStatusChanged, ProfileUpdated};
+pub use events::{
+    PlanCreated, PlanOwnerProposed, PlanStatusChanged, PlanTransferred, ProfileUpdated,
+};
 pub use types::{DataKey, Plan, Profile};
 
-use payflow_shared::MAX_KEEPER_BPS;
+use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -55,10 +57,20 @@ impl PlanRegistry {
     /// Publish a new plan. Only the merchant may publish plans in its own name.
     ///
     /// `keeper_bps` is the share of each charge paid to whoever settles it,
-    /// taken out of the merchant's share, capped at `MAX_KEEPER_BPS`. It is
-    /// part of the plan's immutable terms: a mandate opened against this plan
-    /// keeps the tip it was opened with, so raising the tip later cannot take
-    /// money from an existing subscriber or merchant.
+    /// taken out of the merchant's share, capped at `MAX_KEEPER_BPS`.
+    /// `referral_bps` is the share paid to a subscriber's referrer, also out
+    /// of the merchant's share, capped at `MAX_REFERRAL_BPS`; 0 disables
+    /// referrals. `payout` receives the merchant's share of every charge and
+    /// defaults to `merchant`, so a treasury or multisig can be paid while
+    /// `merchant` keeps publishing and managing plans.
+    ///
+    /// All of these are part of the plan's immutable terms: a mandate opened
+    /// against this plan keeps the split it was opened with, so raising a rate
+    /// later cannot take money from an existing subscriber or merchant.
+    ///
+    // Contract entry points take flat positional arguments on the wire, so
+    // this one is necessarily wider than clippy's default threshold.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_plan(
         env: Env,
         merchant: Address,
@@ -67,6 +79,8 @@ impl PlanRegistry {
         period: u64,
         name: String,
         keeper_bps: u32,
+        referral_bps: u32,
+        payout: Option<Address>,
     ) -> Result<u64, Error> {
         merchant.require_auth();
 
@@ -81,6 +95,9 @@ impl PlanRegistry {
         }
         if keeper_bps > MAX_KEEPER_BPS {
             return Err(Error::KeeperBpsTooHigh);
+        }
+        if referral_bps > MAX_REFERRAL_BPS {
+            return Err(Error::ReferralBpsTooHigh);
         }
 
         let id: u64 = env
@@ -98,12 +115,11 @@ impl PlanRegistry {
             period,
             active: true,
             keeper_bps,
+            payout: payout.unwrap_or_else(|| merchant.clone()),
+            referral_bps,
         };
 
-        env.storage().persistent().set(&DataKey::Plan(id), &plan);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Plan(id), PERSIST_THRESHOLD, PERSIST_BUMP);
+        Self::write_plan(&env, &plan);
 
         // One entry per position, so publishing a plan costs the same however
         // many plans the merchant already has.
@@ -115,6 +131,7 @@ impl PlanRegistry {
         p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
         p.set(&count_key, &(count + 1));
         p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        Self::write_slot(&env, id, count);
 
         env.storage()
             .instance()
@@ -131,6 +148,8 @@ impl PlanRegistry {
             period: plan.period,
             name,
             keeper_bps,
+            payout: plan.payout,
+            referral_bps,
         }
         .publish(&env);
 
@@ -226,6 +245,103 @@ impl PlanRegistry {
             .persistent()
             .get(&DataKey::Profile(merchant))
             .ok_or(Error::ProfileNotFound)
+    }
+
+    /// Propose handing a plan to `new_owner`. The current owner must sign;
+    /// the transfer completes only when `new_owner` calls
+    /// `accept_plan_owner`, so a plan can never be moved to an address that
+    /// cannot sign for itself. Proposing again replaces any earlier proposal.
+    pub fn propose_plan_owner(
+        env: Env,
+        merchant: Address,
+        plan_id: u64,
+        new_owner: Address,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+
+        let plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Plan(plan_id))
+            .ok_or(Error::PlanNotFound)?;
+        if plan.merchant != merchant {
+            return Err(Error::NotPlanOwner);
+        }
+        if plan.merchant == new_owner {
+            return Err(Error::OwnerUnchanged);
+        }
+
+        let key = DataKey::PendingOwner(plan_id);
+        env.storage().persistent().set(&key, &new_owner);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+        PlanOwnerProposed {
+            merchant,
+            plan_id,
+            new_owner,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Accepts a pending ownership transfer. Only the proposed owner can do
+    /// this. The plan moves between the two merchants' indexes in constant
+    /// time: the old owner's index swaps in its last entry, so no loop over
+    /// the index is needed however many plans it holds.
+    ///
+    /// If the plan paid out to the old owner's address, the payout follows the
+    /// plan to the new owner; an explicitly set payout (a treasury address) is
+    /// left untouched. Mandates that are already open are **not** changed:
+    /// they keep paying the merchant, payout and referral addresses frozen at
+    /// subscribe time, exactly as a plan edit cannot reprice them.
+    pub fn accept_plan_owner(env: Env, new_owner: Address, plan_id: u64) -> Result<(), Error> {
+        new_owner.require_auth();
+
+        let pending_key = DataKey::PendingOwner(plan_id);
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .ok_or(Error::NotPendingOwner)?;
+        if pending != new_owner {
+            return Err(Error::NotPendingOwner);
+        }
+
+        let plan_key = DataKey::Plan(plan_id);
+        let mut plan: Plan = env
+            .storage()
+            .persistent()
+            .get(&plan_key)
+            .ok_or(Error::PlanNotFound)?;
+        let old_owner = plan.merchant.clone();
+
+        Self::index_remove(&env, &old_owner, plan_id);
+        Self::index_append(&env, &new_owner, plan_id);
+
+        if plan.payout == old_owner {
+            plan.payout = new_owner.clone();
+        }
+        plan.merchant = new_owner.clone();
+        Self::write_plan(&env, &plan);
+
+        env.storage().persistent().remove(&pending_key);
+
+        PlanTransferred {
+            plan_id,
+            from: old_owner,
+            to: new_owner,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The address currently proposed to take over `plan_id`, if any.
+    pub fn pending_plan_owner(env: Env, plan_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingOwner(plan_id))
     }
 
     /// Deactivate up to `limit` of `merchant`'s plans, starting at position
@@ -325,5 +441,66 @@ impl PlanRegistry {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)
+    }
+}
+
+impl PlanRegistry {
+    fn write_plan(env: &Env, plan: &Plan) {
+        let key = DataKey::Plan(plan.id);
+        env.storage().persistent().set(&key, plan);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    fn write_slot(env: &Env, plan_id: u64, slot: u32) {
+        let key = DataKey::PlanSlot(plan_id);
+        env.storage().persistent().set(&key, &slot);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+    }
+
+    /// Append a plan to a merchant's index.
+    fn index_append(env: &Env, merchant: &Address, plan_id: u64) {
+        let count_key = DataKey::MerchantPlanCount(merchant.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let slot_key = DataKey::MerchantPlan(merchant.clone(), count);
+        let p = env.storage().persistent();
+        p.set(&slot_key, &plan_id);
+        p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        p.set(&count_key, &(count + 1));
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        Self::write_slot(env, plan_id, count);
+    }
+
+    /// Remove a plan from a merchant's index by swapping the last entry into
+    /// its slot, so the index stays dense and the call touches a constant
+    /// number of ledger entries.
+    fn index_remove(env: &Env, merchant: &Address, plan_id: u64) {
+        let count_key = DataKey::MerchantPlanCount(merchant.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let slot: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlanSlot(plan_id))
+            .unwrap_or(0);
+        if count == 0 || slot >= count {
+            return;
+        }
+
+        let p = env.storage().persistent();
+        let last = count - 1;
+        let last_key = DataKey::MerchantPlan(merchant.clone(), last);
+        if slot != last {
+            let moved: u64 = p.get(&last_key).unwrap_or(plan_id);
+            let slot_key = DataKey::MerchantPlan(merchant.clone(), slot);
+            p.set(&slot_key, &moved);
+            p.extend_ttl(&slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Self::write_slot(env, moved, slot);
+        }
+        p.remove(&last_key);
+        p.set(&count_key, &last);
+        p.extend_ttl(&count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
     }
 }

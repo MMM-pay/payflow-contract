@@ -347,3 +347,89 @@ fn admin_repoint_changes_only_the_subscription_pointer() {
     assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
     assert_ne!(h.vault.subscription(), original_subscription);
 }
+
+// ---------------------------------------------------------------------------
+// Funding someone else's vault
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deposit_for_credits_the_recipient_not_the_payer() {
+    let h = setup();
+    let payer = funded_user(&h, 10_000);
+    let recipient = Address::generate(&h.env);
+
+    h.vault.deposit_for(&payer, &recipient, &h.token, &4_000);
+
+    assert_eq!(h.vault.balance(&recipient, &h.token), 4_000);
+    assert_eq!(h.vault.balance(&payer, &h.token), 0);
+    assert_eq!(h.token_client.balance(&payer), 6_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 4_000);
+}
+
+/// Acceptance criterion: only the credited user can withdraw the funds. The
+/// payer's tokens are gone once credited; the recipient spends them.
+#[test]
+fn only_the_credited_user_can_withdraw_a_gift() {
+    let h = setup();
+    let payer = funded_user(&h, 10_000);
+    let recipient = Address::generate(&h.env);
+
+    h.vault.deposit_for(&payer, &recipient, &h.token, &4_000);
+
+    // The recipient owns the balance and can pull it back out.
+    h.vault.withdraw(&recipient, &h.token, &1_500);
+    assert_eq!(h.vault.balance(&recipient, &h.token), 2_500);
+    assert_eq!(h.token_client.balance(&recipient), 1_500);
+
+    // The payer cannot withdraw from the recipient's balance.
+    assert_eq!(
+        h.vault.try_withdraw(&payer, &h.token, &2_500),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(h.vault.balance(&recipient, &h.token), 2_500);
+}
+
+#[test]
+fn deposit_for_rejects_non_positive_amounts() {
+    let h = setup();
+    let payer = funded_user(&h, 10_000);
+    let recipient = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_deposit_for(&payer, &recipient, &h.token, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        h.vault.try_deposit_for(&payer, &recipient, &h.token, &-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(h.vault.balance(&recipient, &h.token), 0);
+}
+
+#[test]
+fn deposit_for_requires_the_payers_auth() {
+    let h = setup();
+    let payer = funded_user(&h, 10_000);
+    let recipient = Address::generate(&h.env);
+
+    // Drop every mocked authorization: the payer must sign, and the credited
+    // user's signature is not a substitute for it.
+    h.env.set_auths(&[]);
+    assert!(h
+        .vault
+        .try_deposit_for(&payer, &recipient, &h.token, &1_000)
+        .is_err());
+    assert_eq!(h.vault.balance(&recipient, &h.token), 0);
+}
+
+#[test]
+fn deposit_for_accumulates_with_the_recipients_own_deposits() {
+    let h = setup();
+    let payer = funded_user(&h, 10_000);
+    let recipient = funded_user(&h, 10_000);
+
+    h.vault.deposit(&recipient, &h.token, &1_000);
+    h.vault.deposit_for(&payer, &recipient, &h.token, &2_500);
+
+    assert_eq!(h.vault.balance(&recipient, &h.token), 3_500);
+}

@@ -19,4 +19,11 @@ pub enum Error {
     ProfileUrlTooLong = 10,
     /// `create_plan` was given a keeper tip above MAX_KEEPER_BPS.
     KeeperBpsTooHigh = 11,
+    /// `create_plan` was given a referral share above MAX_REFERRAL_BPS.
+    ReferralBpsTooHigh = 12,
+    /// `accept_plan_owner` was called by someone other than the proposed
+    /// owner, or no transfer has been proposed for the plan.
+    NotPendingOwner = 13,
+    /// A plan cannot be transferred to its current owner.
+    OwnerUnchanged = 14,
 }

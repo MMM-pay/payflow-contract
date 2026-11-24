@@ -83,6 +83,12 @@ subscriber pays.
   plan later **cannot** reprice an open mandate.
 - `max_charges` caps total collections. `0` means open-ended.
 - `cancel` is unilateral and immediate; the merchant is not consulted.
+- A plan can be sold or handed to a new merchant address with a two-step
+  `propose_plan_owner` / `accept_plan_owner`. Only mandates opened afterwards
+  use the new owner's terms; open mandates keep billing the merchant, payout
+  and referrer frozen when they were opened.
+- Anyone can fund another account's vault balance with `deposit_for`, but the
+  credited account is still the only one that can withdraw or spend it.
 - A merchant can end a mandate (`end_mandate`) when it stops offering the
   service. Ending can only stop future charges; it never takes anything.
 - Withdrawing from the vault starves any mandate. Funds are never locked.
@@ -95,6 +101,13 @@ subscriber pays.
 - A keeper tip is capped at 5% of the merchant's share (`MAX_KEEPER_BPS = 500`)
   and comes out of that share, never out of the subscriber's payment. It is
   frozen into the mandate when it is opened.
+- A referral share is capped at 10% of the merchant's share
+  (`MAX_REFERRAL_BPS = 1000`), is set per plan (0 disables it) and is also
+  frozen into the mandate. It is paid to the referrer out of the merchant's
+  share, so a subscriber never pays more for arriving through an affiliate.
+- The merchant's share is paid to the plan's `payout` address (a treasury or
+  multisig, defaulting to the merchant) while plan management still requires
+  the merchant's own signature.
 
 ## Design notes
 
@@ -167,7 +180,7 @@ deployed at are in [`deployments/testnet.env`](deployments/testnet.env).
 # prerequisites: Rust 1.96+, stellar-cli 27+
 rustup target add wasm32v1-none
 
-cargo test --all          # 63 tests
+cargo test --all          # 115 tests
 stellar contract build    # wasm -> target/wasm32v1-none/release
 ```
 
@@ -194,7 +207,7 @@ Smoke-test a live deployment end to end:
 contracts/
   plan-registry/   merchant plan catalogue
   vault/           subscriber custody
-  subscription/    mandates, scheduling, fee split
+  subscription/    mandates, scheduling, fee and referral split
 scripts/
   deploy.sh        ordered deploy + wiring
   demo.sh          end-to-end smoke test

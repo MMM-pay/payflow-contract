@@ -20,6 +20,12 @@ pub struct Subscribed {
     pub fee_bps: u32,
     /// The keeper tip frozen into this mandate, for the same reason.
     pub keeper_bps: u32,
+    /// Where the merchant's share is paid, for the same reason.
+    pub payout: Address,
+    /// The referral share frozen into this mandate. 0 disables referrals.
+    pub referral_bps: u32,
+    /// The referrer paid on every charge, `None` when the mandate has none.
+    pub referrer: Option<Address>,
 }
 
 #[contractevent]
@@ -39,6 +45,13 @@ pub struct Charged {
     pub tip: i128,
     /// Account that settled this charge and received the tip.
     pub keeper: Address,
+    /// Paid to `referrer` out of the merchant share. Part of `amount` plus
+    /// `tip` plus `referral` is the merchant share before either was taken.
+    pub referral: i128,
+    /// Account that received `referral`, if this mandate has one.
+    pub referrer: Option<Address>,
+    /// Account that received the merchant share.
+    pub payout: Address,
     pub charges_made: u32,
     pub next_charge: u64,
 }

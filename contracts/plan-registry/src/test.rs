@@ -35,6 +35,8 @@ fn create_plan_assigns_sequential_ids() {
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     let b = client.create_plan(
         &merchant,
@@ -43,6 +45,8 @@ fn create_plan_assigns_sequential_ids() {
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     assert_eq!(a, 1);
@@ -68,6 +72,8 @@ fn create_plan_stores_fields() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     let plan = client.get_plan(&id);
 
@@ -92,6 +98,8 @@ fn create_plan_stores_the_keeper_tip() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &MAX_KEEPER_BPS,
+        &0,
+        &None,
     );
 
     assert_eq!(client.get_plan(&id).keeper_bps, MAX_KEEPER_BPS);
@@ -110,6 +118,8 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &(MAX_KEEPER_BPS + 1),
+        &0,
+        &None,
     );
 
     assert_eq!(res, Err(Ok(Error::KeeperBpsTooHigh)));
@@ -128,6 +138,8 @@ fn create_plan_rejects_zero_amount() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -144,6 +156,8 @@ fn create_plan_rejects_negative_amount() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -160,6 +174,8 @@ fn create_plan_rejects_sub_minimum_period() {
         &(MIN_PERIOD - 1),
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
 }
@@ -182,6 +198,8 @@ fn set_plan_active_toggles() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     client.set_plan_active(&merchant, &id, &false);
@@ -204,6 +222,8 @@ fn set_plan_active_rejects_non_owner() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
 
     let res = client.try_set_plan_active(&attacker, &id, &false);
@@ -231,6 +251,8 @@ fn create_plan_stores_the_name() {
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(
         client.get_plan(&id).name,
@@ -252,6 +274,8 @@ fn create_plan_accepts_an_empty_name() {
         &604_800,
         &String::from_str(&env, ""),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
 }
@@ -270,6 +294,8 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &604_800,
         &String::from_str(&env, &at_limit),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
 }
@@ -288,6 +314,8 @@ fn create_plan_rejects_an_overlong_name() {
         &604_800,
         &String::from_str(&env, &too_long),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -300,7 +328,7 @@ fn merchant_plans_pages_are_bounded() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
     }
 
     assert_eq!(client.merchant_plan_count(&merchant), MAX_PAGE + 3);
@@ -450,7 +478,16 @@ fn deactivate_page_turns_off_a_page_of_plans() {
 
     let mut ids = Vec::<u64>::new(&env);
     for _ in 0..7 {
-        ids.push_back(client.create_plan(&merchant, &token, &1_000, &3_600, &name.clone(), &0));
+        ids.push_back(client.create_plan(
+            &merchant,
+            &token,
+            &1_000,
+            &3_600,
+            &name.clone(),
+            &0,
+            &0,
+            &None,
+        ));
     }
 
     assert_eq!(client.deactivate_page(&merchant, &2, &3), 3);
@@ -472,7 +509,7 @@ fn deactivate_page_is_idempotent() {
     let token = Address::generate(&env);
     let name = String::from_str(&env, "Plan");
 
-    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+    let id = client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
     assert!(!client.get_plan(&id).active);
@@ -489,7 +526,7 @@ fn deactivate_page_respects_the_page_cap() {
     let name = String::from_str(&env, "Plan");
 
     for _ in 0..(MAX_PAGE + 3) {
-        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0);
+        client.create_plan(&merchant, &token, &1_000, &3_600, &name, &0, &0, &None);
     }
 
     // A huge limit is capped at MAX_PAGE.
@@ -514,8 +551,8 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
 
     let a = Address::generate(&env);
     let b = Address::generate(&env);
-    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0);
-    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0);
+    let a_id = client.create_plan(&a, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let b_id = client.create_plan(&b, &token, &1_000, &3_600, &name, &0, &0, &None);
 
     client.deactivate_page(&a, &0, &10);
 
@@ -538,6 +575,8 @@ fn deactivate_page_requires_the_merchants_auth() {
         &3_600,
         &String::from_str(&env, "Plan"),
         &0,
+        &0,
+        &None,
     );
 
     // Drop every mocked authorization: the merchant must sign for itself.
@@ -563,6 +602,8 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &604_800,
         &String::from_str(&env, &name),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -584,6 +625,342 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &604_800,
         &String::from_str(&env, &name),
         &0,
+        &0,
+        &None,
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
+}
+
+// ---------------------------------------------------------------------------
+// Payout address and referral share
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_plan_defaults_the_payout_to_the_merchant() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &0,
+        &None,
+    );
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.payout, merchant);
+    assert_eq!(plan.referral_bps, 0);
+}
+
+#[test]
+fn create_plan_stores_a_separate_payout_and_referral_share() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &MAX_REFERRAL_BPS,
+        &Some(treasury.clone()),
+    );
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.merchant, merchant);
+    assert_eq!(plan.payout, treasury);
+    assert_eq!(plan.referral_bps, MAX_REFERRAL_BPS);
+}
+
+#[test]
+fn create_plan_rejects_a_referral_share_above_the_cap() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let res = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Monthly"),
+        &0,
+        &(MAX_REFERRAL_BPS + 1),
+        &None,
+    );
+
+    assert_eq!(res, Err(Ok(Error::ReferralBpsTooHigh)));
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Two-step ownership transfer
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transfer_moves_the_plan_between_merchant_indexes() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token = Address::generate(&env);
+    let name = String::from_str(&env, "Plan");
+
+    let first = client.create_plan(&a, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let second = client.create_plan(&a, &token, &1_000, &3_600, &name, &0, &0, &None);
+    let third = client.create_plan(&a, &token, &1_000, &3_600, &name, &0, &0, &None);
+
+    client.propose_plan_owner(&a, &second, &b);
+    assert_eq!(client.pending_plan_owner(&second), Some(b.clone()));
+    client.accept_plan_owner(&b, &second);
+
+    // The plan left the seller's index and joined the buyer's.
+    assert_eq!(client.get_plan(&second).merchant, b);
+    assert_eq!(
+        client.merchant_plans(&a, &0, &10),
+        soroban_sdk::vec![&env, first, third]
+    );
+    assert_eq!(
+        client.merchant_plans(&b, &0, &10),
+        soroban_sdk::vec![&env, second]
+    );
+    assert_eq!(client.merchant_plan_count(&a), 2);
+    assert_eq!(client.merchant_plan_count(&b), 1);
+    assert_eq!(client.pending_plan_owner(&second), None);
+
+    // The swap-with-last removal left the third plan at a usable slot: it can
+    // be transferred too.
+    client.propose_plan_owner(&a, &third, &b);
+    client.accept_plan_owner(&b, &third);
+    assert_eq!(
+        client.merchant_plans(&a, &0, &10),
+        soroban_sdk::vec![&env, first]
+    );
+    assert_eq!(
+        client.merchant_plans(&b, &0, &10),
+        soroban_sdk::vec![&env, second, third]
+    );
+    assert_eq!(client.merchant_plan_count(&a), 1);
+    assert_eq!(client.merchant_plan_count(&b), 2);
+}
+
+#[test]
+fn a_stranger_cannot_accept_a_transfer() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    client.propose_plan_owner(&owner, &id, &buyer);
+
+    assert_eq!(
+        client.try_accept_plan_owner(&stranger, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+    assert_eq!(client.get_plan(&id).merchant, owner);
+    assert_eq!(client.merchant_plan_count(&stranger), 0);
+}
+
+#[test]
+fn only_the_owner_can_propose_a_transfer() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    assert_eq!(
+        client.try_propose_plan_owner(&attacker, &id, &attacker),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    assert_eq!(client.pending_plan_owner(&id), None);
+}
+
+#[test]
+fn accept_without_a_proposal_is_rejected() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    assert_eq!(
+        client.try_accept_plan_owner(&owner, &id),
+        Err(Ok(Error::NotPendingOwner))
+    );
+}
+
+#[test]
+fn transferring_a_plan_to_its_current_owner_is_rejected() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+
+    assert_eq!(
+        client.try_propose_plan_owner(&owner, &id, &owner),
+        Err(Ok(Error::OwnerUnchanged))
+    );
+}
+
+#[test]
+fn transfer_requires_both_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = env.register(PlanRegistry, (owner.clone(),));
+    let client = PlanRegistryClient::new(&env, &id);
+
+    let plan_id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    client.propose_plan_owner(&owner, &plan_id, &buyer);
+
+    // With every mocked authorization dropped, neither half of the handover
+    // can be driven by someone else's signature.
+    env.set_auths(&[]);
+    assert!(client
+        .try_propose_plan_owner(&owner, &plan_id, &buyer)
+        .is_err());
+    assert!(client.try_accept_plan_owner(&buyer, &plan_id).is_err());
+    assert_eq!(client.get_plan(&plan_id).merchant, owner);
+}
+
+#[test]
+fn transfer_moves_a_default_payout_with_the_plan() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    assert_eq!(client.get_plan(&id).payout, owner);
+
+    client.propose_plan_owner(&owner, &id, &buyer);
+    client.accept_plan_owner(&buyer, &id);
+
+    // The payout defaulted to the owner, so it follows the plan.
+    assert_eq!(client.get_plan(&id).payout, buyer);
+}
+
+#[test]
+fn transfer_leaves_an_explicit_payout_untouched() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &Some(treasury.clone()),
+    );
+
+    client.propose_plan_owner(&owner, &id, &buyer);
+    client.accept_plan_owner(&buyer, &id);
+
+    // An explicit treasury address is not the owner's, so it is kept.
+    assert_eq!(client.get_plan(&id).payout, treasury);
+    assert_eq!(client.get_plan(&id).merchant, buyer);
+}
+
+#[test]
+fn the_new_owner_manages_the_plan_and_the_old_owner_cannot() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let id = client.create_plan(
+        &owner,
+        &token,
+        &1_000,
+        &3_600,
+        &String::from_str(&env, "Plan"),
+        &0,
+        &0,
+        &None,
+    );
+    client.propose_plan_owner(&owner, &id, &buyer);
+    client.accept_plan_owner(&buyer, &id);
+
+    client.set_plan_active(&buyer, &id, &false);
+    assert!(!client.get_plan(&id).active);
+
+    assert_eq!(
+        client.try_set_plan_active(&owner, &id, &true),
+        Err(Ok(Error::NotPlanOwner))
+    );
 }

@@ -15,7 +15,7 @@ pub use events::{
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{DataKey, Mandate, MandateStatus, Plan};
 
-use payflow_shared::MAX_KEEPER_BPS;
+use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -82,11 +82,18 @@ impl Subscription {
     /// The plan's terms are copied into the mandate here and never re-read, so
     /// a merchant cannot change the price of a subscription after the fact.
     /// The first charge is due immediately.
+    ///
+    /// `referrer` is the affiliate that brought this subscriber. It earns the
+    /// plan's `referral_bps` of the merchant share on every charge, out of the
+    /// merchant's money and never out of the subscriber's. The referrer is
+    /// frozen into the mandate, so a later plan edit cannot redirect an open
+    /// mandate's referral. The referrer does not sign: it is only ever paid.
     pub fn subscribe(
         env: Env,
         subscriber: Address,
         plan_id: u64,
         max_charges: u32,
+        referrer: Option<Address>,
     ) -> Result<u64, Error> {
         subscriber.require_auth();
 
@@ -114,12 +121,22 @@ impl Subscription {
         // passed to this deployment does not enforce the cap.
         let keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
 
+        // Same defensive clamp for the referral share. A referrer that is the
+        // merchant itself, or a plan with referrals disabled, records no
+        // referrer at all so `charge` never pays the merchant twice.
+        let referral_bps = match &referrer {
+            Some(r) if *r != plan.merchant => plan.referral_bps.min(MAX_REFERRAL_BPS),
+            _ => 0,
+        };
+        let referrer = if referral_bps == 0 { None } else { referrer };
+
         let now = env.ledger().timestamp();
         let mandate = Mandate {
             id,
             subscriber: subscriber.clone(),
             plan_id,
             merchant: plan.merchant.clone(),
+            payout: plan.payout.clone(),
             token: plan.token.clone(),
             amount: plan.amount,
             period: plan.period,
@@ -129,6 +146,8 @@ impl Subscription {
             max_charges,
             fee_bps,
             keeper_bps,
+            referral_bps,
+            referrer: referrer.clone(),
             status: MandateStatus::Active,
         };
 
@@ -164,6 +183,9 @@ impl Subscription {
             max_charges,
             fee_bps,
             keeper_bps,
+            payout: mandate.payout,
+            referral_bps,
+            referrer,
         }
         .publish(&env);
 
@@ -179,9 +201,11 @@ impl Subscription {
     /// Competing keepers are what keeps billing alive without trusting one
     /// operator to stay online.
     ///
-    /// The tip is paid out of the merchant's share (see the plan's
-    /// `keeper_bps`), so the subscriber is debited exactly `mandate.amount`
-    /// whether or not a tip is paid, and the protocol fee is unaffected.
+    /// The tip and the referral share are both paid out of the merchant's
+    /// share (see the plan's `keeper_bps` and `referral_bps`), so the
+    /// subscriber is debited exactly `mandate.amount` whether or not either is
+    /// paid, and the protocol fee is unaffected. The merchant's own share goes
+    /// to the `payout` address frozen into the mandate.
     ///
     /// `next_charge` advances to `now + period` rather than
     /// `next_charge + period`. A keeper outage therefore delays billing instead
@@ -216,7 +240,30 @@ impl Subscription {
             .checked_mul(tip_bps as i128)
             .ok_or(Error::AmountOverflow)?
             / BPS_DENOMINATOR;
-        let merchant_amount = merchant_gross - tip;
+
+        // The referral share is a fraction of the same merchant share, capped
+        // again here so a mandate can never pay out more than
+        // MAX_REFERRAL_BPS of it. Integer basis points only: the fractions
+        // dropped by truncation stay with the merchant, so a charge always
+        // accounts for exactly `merchant_gross`.
+        let referral_bps = mandate.referral_bps.min(MAX_REFERRAL_BPS);
+        let (referral, referrer) = match &mandate.referrer {
+            Some(r) if referral_bps > 0 => {
+                let share = merchant_gross
+                    .checked_mul(referral_bps as i128)
+                    .ok_or(Error::AmountOverflow)?
+                    / BPS_DENOMINATOR;
+                (share, Some((r.clone(), share)))
+            }
+            _ => (0, None),
+        };
+
+        let merchant_amount = merchant_gross - tip - referral;
+        if merchant_amount < 0 {
+            // Unreachable while both caps hold, but never pay out more than
+            // the merchant share if a cap is ever raised past 100%.
+            return Err(Error::AmountOverflow);
+        }
 
         let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
         let vault = VaultClient::new(&env, &vault_addr);
@@ -224,7 +271,7 @@ impl Subscription {
         vault.debit(
             &mandate.subscriber,
             &mandate.token,
-            &mandate.merchant,
+            &mandate.payout,
             &merchant_amount,
         );
 
@@ -235,6 +282,12 @@ impl Subscription {
 
         if tip > 0 {
             vault.debit(&mandate.subscriber, &mandate.token, &keeper, &tip);
+        }
+
+        if let Some((referrer_addr, amount)) = &referrer {
+            if *amount > 0 {
+                vault.debit(&mandate.subscriber, &mandate.token, referrer_addr, amount);
+            }
         }
 
         mandate.charges_made += 1;
@@ -256,6 +309,9 @@ impl Subscription {
             fee,
             tip,
             keeper,
+            referral,
+            referrer: referrer.map(|(addr, _)| addr),
+            payout: mandate.payout.clone(),
             charges_made: mandate.charges_made,
             next_charge: mandate.next_charge,
         }

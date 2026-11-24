@@ -78,19 +78,40 @@ fn world() -> World<'static> {
 }
 
 impl World<'_> {
-    /// A plan with no keeper tip, which is what most tests want.
+    /// A plan with no keeper tip, no referral share and no separate payout,
+    /// which is what most tests want.
     fn plan(&self) -> u64 {
-        self.plan_with_keeper(0)
+        self.plan_full(PRICE, 0, 0, None)
     }
 
     fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
+        self.plan_full(PRICE, keeper_bps, 0, None)
+    }
+
+    fn plan_with_referral(&self, referral_bps: u32) -> u64 {
+        self.plan_full(PRICE, 0, referral_bps, None)
+    }
+
+    fn plan_with_payout(&self, payout: &Address) -> u64 {
+        self.plan_full(PRICE, 0, 0, Some(payout.clone()))
+    }
+
+    fn plan_full(
+        &self,
+        amount: i128,
+        keeper_bps: u32,
+        referral_bps: u32,
+        payout: Option<Address>,
+    ) -> u64 {
         self.registry.create_plan(
             &self.merchant,
             &self.token,
-            &PRICE,
+            &amount,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
             &keeper_bps,
+            &referral_bps,
+            &payout,
         )
     }
 
@@ -114,7 +135,7 @@ fn subscribe_copies_plan_terms_into_mandate() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     let m = w.sub.get_mandate(&id);
 
     assert_eq!(m.subscriber, user);
@@ -128,20 +149,33 @@ fn subscribe_copies_plan_terms_into_mandate() {
 
 /// Pull a u32 field out of the data map of any emitted contract event.
 fn event_field_u32(env: &Env, field: &str) -> Option<u32> {
-    for event in env.events().all().events() {
-        let ContractEventBody::V0(body) = &event.body;
-        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+    event_field(env, field, |v| match v {
+        ScVal::U32(v) => Some(*v),
+        _ => None,
+    })
+}
+
+/// Pull an i128 field out of the data map of any emitted contract event.
+fn event_field_i128(env: &Env, field: &str) -> Option<i128> {
+    event_field(env, field, |v| match v {
+        ScVal::I128(parts) => Some(i128::from(parts.lo) | (i128::from(parts.hi) << 64)),
+        _ => None,
+    })
+}
+
+/// Scan the last emitted event for a named data field.
+fn event_field<T>(env: &Env, field: &str, parse: impl Fn(&ScVal) -> Option<T>) -> Option<T> {
+    let last = env.events().all().events().last().cloned()?;
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+        return None;
+    };
+    for entry in entries.iter() {
+        let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
             continue;
         };
-        for entry in entries.iter() {
-            let ScVal::Symbol(ScSymbol(name)) = &entry.key else {
-                continue;
-            };
-            if name.to_utf8_string_lossy() == field {
-                if let ScVal::U32(v) = entry.val {
-                    return Some(v);
-                }
-            }
+        if name.to_utf8_string_lossy() == field {
+            return parse(&entry.val);
         }
     }
     None
@@ -153,7 +187,7 @@ fn subscribe_event_carries_the_spend_cap() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &3);
+    let id = w.sub.subscribe(&user, &plan_id, &3, &None);
 
     // The cap must be recoverable from the event alone. An indexer that reads
     // only events must not have to guess it, or it will report a capped
@@ -174,7 +208,7 @@ fn subscribe_rejects_inactive_plan() {
     let user = w.subscriber(100_000);
 
     assert_eq!(
-        w.sub.try_subscribe(&user, &plan_id, &0),
+        w.sub.try_subscribe(&user, &plan_id, &0, &None),
         Err(Ok(Error::PlanInactive))
     );
 }
@@ -184,7 +218,7 @@ fn first_charge_is_due_immediately_and_splits_fee() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     assert!(w.sub.is_due(&id));
     w.sub.charge(&w.keeper, &id);
@@ -207,7 +241,7 @@ fn any_account_can_settle_a_charge() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     // An unrelated account may settle the mandate: `charge` needs no
     // subscriber or merchant signature, and the vault accepts the debit purely
@@ -225,7 +259,7 @@ fn charge_requires_the_keeper_to_authorize() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     // The tip is paid to the caller, so the caller must prove it controls
     // that address. With every authorization dropped, nothing settles.
@@ -240,7 +274,7 @@ fn a_different_signer_cannot_collect_the_tip() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     // The subscriber signs, but the caller is the keeper: the signature does
     // not cover the keeper address, so the charge is rejected.
@@ -262,7 +296,7 @@ fn keeper_tip_is_paid_from_the_merchant_share() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
@@ -289,8 +323,8 @@ fn subscriber_pays_the_same_total_with_or_without_a_tip() {
 
     let without = w.subscriber(100_000);
     let with = w.subscriber(100_000);
-    let plain_id = w.sub.subscribe(&without, &plain, &0);
-    let tipped_id = w.sub.subscribe(&with, &tipped, &0);
+    let plain_id = w.sub.subscribe(&without, &plain, &0, &None);
+    let tipped_id = w.sub.subscribe(&with, &tipped, &0, &None);
 
     w.sub.charge(&w.keeper, &plain_id);
     w.sub.charge(&w.keeper, &tipped_id);
@@ -304,12 +338,209 @@ fn subscriber_pays_the_same_total_with_or_without_a_tip() {
     assert_eq!(w.token_client.balance(&w.keeper), tip);
 }
 
+const REFERRAL_BPS: u32 = 500; // 5% of the merchant share
+
+#[test]
+fn referral_share_is_paid_from_the_merchant_share() {
+    let w = world();
+    let plan_id = w.plan_with_referral(REFERRAL_BPS);
+    let user = w.subscriber(100_000);
+    let referrer = Address::generate(&w.env);
+
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &Some(referrer.clone()));
+
+    let fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let merchant_gross = PRICE - fee;
+    let referral = merchant_gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&referrer), referral);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        merchant_gross - referral
+    );
+    // The protocol fee is untouched by the referral share.
+    assert_eq!(w.token_client.balance(&w.fee_to), fee);
+    // The subscriber pays the plan price, no more.
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+
+    // The referrer and its rate are frozen into the mandate.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.referrer, Some(referrer));
+    assert_eq!(m.referral_bps, REFERRAL_BPS);
+}
+
+/// Acceptance criterion: merchants disable referrals by setting 0 bps.
+#[test]
+fn a_plan_with_zero_referral_bps_pays_no_referrer() {
+    let w = world();
+    let plan_id = w.plan(); // referral_bps = 0
+    let user = w.subscriber(100_000);
+    let referrer = Address::generate(&w.env);
+
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &Some(referrer.clone()));
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&referrer), 0);
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE - 100);
+
+    // No referrer is recorded, so no charge can ever pay this address.
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.referrer, None);
+    assert_eq!(m.referral_bps, 0);
+}
+
+#[test]
+fn a_referrer_that_is_the_merchant_gets_no_separate_referral() {
+    let w = world();
+    let plan_id = w.plan_with_referral(REFERRAL_BPS);
+    let user = w.subscriber(100_000);
+
+    // Paying the merchant a "referral" would mean two debits to one address;
+    // the merchant just keeps its full share instead.
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &Some(w.merchant.clone()));
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE - 100);
+    assert_eq!(w.sub.get_mandate(&id).referrer, None);
+    assert_eq!(w.sub.get_mandate(&id).referral_bps, 0);
+}
+
+/// Acceptance criterion: integer bps only, with no rounding loss beyond one
+/// stroop. 99 stroops at 5% is 4.95 stroops of referral; the 0.95 stroop left
+/// over stays with the merchant, and the three legs add back to the gross.
+#[test]
+fn referral_split_is_exact_integer_math_with_at_most_one_stroop_lost() {
+    let w = world();
+    let plan_id = w.plan_full(99, 0, REFERRAL_BPS, None);
+    let user = w.subscriber(99);
+    let referrer = Address::generate(&w.env);
+
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &Some(referrer.clone()));
+    w.sub.charge(&w.keeper, &id);
+
+    let gross: i128 = 99; // fee bps is 100, but 99 * 100 / 10_000 truncates to 0
+    let expected_referral = gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+    let merchant = w.token_client.balance(&w.merchant);
+
+    assert_eq!(expected_referral, 4);
+    assert_eq!(w.token_client.balance(&referrer), expected_referral);
+    assert_eq!(merchant, gross - expected_referral);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
+    // The truncated fraction (0.95 stroop) stays with the merchant, so the
+    // legs add back to the gross exactly: no stroop is lost to rounding.
+    assert_eq!(merchant + expected_referral, gross);
+    // The subscriber is debited the plan price exactly.
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+}
+
+/// Acceptance criterion: events report the referral amount, so an indexer can
+/// account for affiliate payouts from events alone.
+#[test]
+fn charged_event_reports_the_referral_amount() {
+    let w = world();
+    let plan_id = w.plan_with_referral(REFERRAL_BPS);
+    let user = w.subscriber(100_000);
+    let referrer = Address::generate(&w.env);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &Some(referrer));
+    w.sub.charge(&w.keeper, &id);
+
+    let gross = PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let referral = gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+
+    assert_eq!(event_field_i128(&w.env, "referral"), Some(referral));
+    // `amount` is now the merchant's share after the fee and the referral.
+    assert_eq!(event_field_i128(&w.env, "amount"), Some(gross - referral));
+}
+
+#[test]
+fn tip_and_referral_together_never_exceed_the_merchant_share() {
+    let w = world();
+    let plan_id = w.plan_full(PRICE, KEEPER_BPS, REFERRAL_BPS, None);
+    let user = w.subscriber(100_000);
+    let referrer = Address::generate(&w.env);
+
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &Some(referrer.clone()));
+    w.sub.charge(&w.keeper, &id);
+
+    let gross = PRICE - PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;
+    let tip = gross * KEEPER_BPS as i128 / BPS_DENOMINATOR;
+    let referral = gross * REFERRAL_BPS as i128 / BPS_DENOMINATOR;
+
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&referrer), referral);
+    assert_eq!(w.token_client.balance(&w.merchant), gross - tip - referral);
+    // The three legs add back to the merchant share; the subscriber still paid
+    // only the plan price.
+    assert_eq!(
+        w.token_client.balance(&w.merchant)
+            + w.token_client.balance(&w.keeper)
+            + w.token_client.balance(&referrer),
+        gross
+    );
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn merchant_share_is_paid_to_the_plans_payout_address() {
+    let w = world();
+    let treasury = Address::generate(&w.env);
+    let plan_id = w.plan_with_payout(&treasury);
+    let user = w.subscriber(100_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&treasury), PRICE - 100);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+    // The mandate carries the payout address so a later plan transfer cannot
+    // redirect money from an already-open mandate.
+    assert_eq!(w.sub.get_mandate(&id).payout, treasury);
+}
+
+#[test]
+fn open_mandates_keep_paying_the_payout_frozen_at_subscribe() {
+    let w = world();
+    let treasury = Address::generate(&w.env);
+    let new_owner = Address::generate(&w.env);
+    let plan_id = w.plan_with_payout(&treasury);
+    let user = w.subscriber(100_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
+
+    // The merchant sells the plan to another address. The mandate is not
+    // re-read from the registry, so it keeps the terms it was opened with.
+    w.registry
+        .propose_plan_owner(&w.merchant, &plan_id, &new_owner);
+    w.registry.accept_plan_owner(&new_owner, &plan_id);
+
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    assert_eq!(w.token_client.balance(&treasury), PRICE - 100);
+    assert_eq!(w.token_client.balance(&new_owner), 0);
+    assert_eq!(w.sub.get_mandate(&id).merchant, w.merchant);
+    assert_eq!(w.sub.get_mandate(&id).payout, treasury);
+}
+
 #[test]
 fn second_charge_before_period_elapses_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
     assert!(!w.sub.is_due(&id));
@@ -324,7 +555,7 @@ fn charge_succeeds_once_period_elapses() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -339,7 +570,7 @@ fn keeper_outage_does_not_create_a_chargeable_backlog() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
     // Nobody calls charge for five periods.
@@ -356,7 +587,7 @@ fn cancel_stops_billing_permanently() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
     w.sub.cancel(&user, &id);
@@ -376,7 +607,7 @@ fn cancel_rejects_non_subscriber() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     let attacker = Address::generate(&w.env);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     assert_eq!(
         w.sub.try_cancel(&attacker, &id),
@@ -389,7 +620,7 @@ fn cancel_twice_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.cancel(&user, &id);
     assert_eq!(
@@ -403,7 +634,7 @@ fn pause_suspends_billing_and_resume_restores_it() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.set_paused(&user, &id, &true);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Paused);
@@ -424,7 +655,7 @@ fn pausing_a_cancelled_mandate_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.cancel(&user, &id);
     assert_eq!(
@@ -438,7 +669,7 @@ fn max_charges_completes_the_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &None);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -462,7 +693,7 @@ fn charge_fails_when_vault_is_underfunded() {
     let plan_id = w.plan();
     // Funded for one charge only.
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.vault.balance(&user, &w.token), 0);
@@ -478,7 +709,7 @@ fn subscriber_can_withdraw_and_starve_a_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.vault.withdraw(&user, &w.token, &100_000);
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
@@ -490,8 +721,8 @@ fn indexes_track_both_sides() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let a = w.sub.subscribe(&user, &plan_id, &0);
-    let b = w.sub.subscribe(&user, &plan_id, &0);
+    let a = w.sub.subscribe(&user, &plan_id, &0, &None);
+    let b = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     assert_eq!(
         w.sub.subscriber_mandates(&user, &0, &10),
@@ -542,12 +773,14 @@ fn zero_fee_pays_merchant_in_full() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
+        &None,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
     vault.deposit(&user, &token, &100_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0);
+    let id = sub.subscribe(&user, &plan_id, &0, &None);
     sub.charge(&keeper, &id);
 
     assert_eq!(TokenClient::new(&env, &token).balance(&merchant), PRICE);
@@ -593,7 +826,7 @@ fn set_fee_bps_changes_the_fee_for_new_mandates() {
     assert_eq!(w.sub.fee_bps(), 0);
 
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     w.sub.charge(&w.keeper, &id);
 
     // Zero fee: the merchant receives the whole charge.
@@ -608,7 +841,7 @@ fn an_admin_fee_change_cannot_reprice_an_open_mandate() {
     let user = w.subscriber(100_000);
 
     // Subscriber opens at 1%.
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     assert_eq!(w.sub.get_mandate(&id).fee_bps, FEE_BPS);
 
     // Admin raises the fee to the 10% ceiling afterwards.
@@ -629,12 +862,12 @@ fn mandates_opened_before_and_after_a_fee_change_keep_their_own_fees() {
     let w = world();
     let plan_id = w.plan();
     let before = w.subscriber(100_000);
-    let old_id = w.sub.subscribe(&before, &plan_id, &0);
+    let old_id = w.sub.subscribe(&before, &plan_id, &0, &None);
 
     w.sub.set_fee_bps(&0);
 
     let after = w.subscriber(100_000);
-    let new_id = w.sub.subscribe(&after, &plan_id, &0);
+    let new_id = w.sub.subscribe(&after, &plan_id, &0, &None);
 
     assert_eq!(w.sub.get_mandate(&old_id).fee_bps, FEE_BPS);
     assert_eq!(w.sub.get_mandate(&new_id).fee_bps, 0);
@@ -684,7 +917,7 @@ fn index_pages_are_bounded_and_ordered() {
 
     let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
     for _ in 0..5 {
-        ids.push_back(w.sub.subscribe(&user, &plan_id, &0));
+        ids.push_back(w.sub.subscribe(&user, &plan_id, &0, &None));
     }
 
     assert_eq!(
@@ -713,7 +946,7 @@ fn index_page_size_is_capped() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     for _ in 0..(MAX_PAGE + 5) {
-        w.sub.subscribe(&user, &plan_id, &0);
+        w.sub.subscribe(&user, &plan_id, &0, &None);
     }
 
     assert_eq!(w.sub.merchant_mandate_count(&w.merchant), MAX_PAGE + 5);
@@ -740,11 +973,11 @@ fn subscribe_cost_does_not_grow_with_the_merchant_index() {
     let user = w.subscriber(100_000);
 
     for _ in 0..300 {
-        w.sub.subscribe(&user, &plan_id, &0);
+        w.sub.subscribe(&user, &plan_id, &0, &None);
     }
 
     let latecomer = w.subscriber(100_000);
-    let id = w.sub.subscribe(&latecomer, &plan_id, &0);
+    let id = w.sub.subscribe(&latecomer, &plan_id, &0, &None);
     assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 301);
     assert_eq!(
         w.sub.merchant_mandates(&w.merchant, &300, &1),
@@ -761,7 +994,7 @@ fn merchant_can_end_a_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     w.sub.charge(&w.keeper, &id);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -783,7 +1016,7 @@ fn merchant_can_end_a_paused_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     w.sub.set_paused(&user, &id, &true);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -801,7 +1034,7 @@ fn only_the_mandates_merchant_can_end_it() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     let stranger = Address::generate(&w.env);
     assert_eq!(
@@ -822,14 +1055,14 @@ fn ending_a_finished_mandate_is_rejected() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0);
+    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &None);
     w.sub.cancel(&user, &cancelled);
     assert_eq!(
         w.sub.try_end_mandate(&w.merchant, &cancelled),
         Err(Ok(Error::MandateNotActive))
     );
 
-    let completed = w.sub.subscribe(&user, &plan_id, &1);
+    let completed = w.sub.subscribe(&user, &plan_id, &1, &None);
     w.sub.charge(&w.keeper, &completed);
     assert_eq!(
         w.sub.get_mandate(&completed).status,
@@ -846,7 +1079,7 @@ fn end_mandate_requires_the_merchants_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
 
     w.sub.end_mandate(&w.merchant, &id);
 
@@ -860,7 +1093,7 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &None);
     w.sub.charge(&w.keeper, &id);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -919,12 +1152,14 @@ fn fee_paid_to_address() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
+        &None,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
     vault.deposit(&user, &token, &100_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0);
+    let id = sub.subscribe(&user, &plan_id, &0, &None);
     sub.charge(&keeper, &id);
 
     // The merchant should receive the price minus the fee.
@@ -963,7 +1198,7 @@ fn charges_keep_vault_balances_in_sync() {
         w.minter.mint(&users[i], &200_000);
         w.vault.deposit(&users[i], &w.token, &100_000);
         expected[i] = 100_000;
-        ids[i] = w.sub.subscribe(&users[i], &plan_id, &0);
+        ids[i] = w.sub.subscribe(&users[i], &plan_id, &0, &None);
     }
 
     assert_vault_invariant(&w, &users, &expected);
@@ -1076,12 +1311,14 @@ fn fee_to_contract_address_receives_the_fee() {
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
         &0,
+        &0,
+        &None,
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);
     vault.deposit(&user, &token, &50_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0);
+    let id = sub.subscribe(&user, &plan_id, &0, &None);
     sub.charge(&keeper, &id);
 
     let expected_fee = PRICE * FEE_BPS as i128 / BPS_DENOMINATOR;

@@ -8,7 +8,7 @@ mod types;
 mod test;
 
 pub use error::Error;
-pub use events::{Debit, Deposit, Withdraw};
+pub use events::{Debit, Deposit, DepositFor, Withdraw};
 pub use types::DataKey;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -73,6 +73,39 @@ impl Vault {
         Self::write_balance(&env, &user, &token, new_balance);
 
         Deposit {
+            user,
+            token,
+            amount,
+            balance: new_balance,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Move `amount` of `token` from `from`'s wallet into `user`'s vault
+    /// balance. The payer signs; the credited account does not, because it can
+    /// only ever gain. The credited balance belongs to `user` from then on:
+    /// only `user` can withdraw it or spend it through a mandate.
+    pub fn deposit_for(
+        env: Env,
+        from: Address,
+        user: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        from.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let vault = env.current_contract_address();
+        token::TokenClient::new(&env, &token).transfer(&from, &vault, &amount);
+
+        let new_balance = Self::read_balance(&env, &user, &token) + amount;
+        Self::write_balance(&env, &user, &token, new_balance);
+
+        DepositFor {
+            from,
             user,
             token,
             amount,
