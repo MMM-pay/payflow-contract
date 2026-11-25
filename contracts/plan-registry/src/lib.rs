@@ -195,6 +195,9 @@ mod contract {
             max_subscribers: u32,
         ) -> Result<u64, Error> {
             merchant.require_auth();
+            if !payflow_common::is_valid_token_address(&env, &token) {
+                return Err(Error::InvalidAddress);
+            }
 
             let params = PlanParams {
                 token,

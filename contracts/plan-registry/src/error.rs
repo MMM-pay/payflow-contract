@@ -67,6 +67,8 @@ pub enum Error {
     /// The address accepting the admin role is not the one the current admin
     /// proposed in `propose_admin` (#238).
     NotPendingAdmin = 1026,
+    /// A configured token address is zero/burn or otherwise invalid (#235).
+    InvalidAddress = 1027,
 }
 
 impl From<Error> for ErrorCode {

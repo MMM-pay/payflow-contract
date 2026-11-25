@@ -213,3 +213,7 @@ This is a hardening change: it reduces the maximum refundable amount for
 mandates with referrers or keeper tips. No mandate can now refund more than the
 merchant actually collected. Existing mandates without referrers or tips are
 unaffected.
+
+## Token Address Validation (#235)
+
+- `vault::set_token_allowed` (when `allowed == true`) and `plan-registry::create_plan` reject zero/burn addresses (`CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4`, `GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`) and self-referential contract addresses with `Error::InvalidAddress`.

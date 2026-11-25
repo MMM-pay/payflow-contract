@@ -70,3 +70,19 @@ where
 {
     env.storage().instance().get::<K, V>(key).ok_or(error)
 }
+
+/// Returns `true` if `token` is not an obviously invalid, zero/burn, or
+/// self-referential address.
+pub fn is_valid_token_address(env: &soroban_sdk::Env, token: &soroban_sdk::Address) -> bool {
+    let zero_contract = soroban_sdk::Address::from_str(
+        env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    );
+    let zero_account = soroban_sdk::Address::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    *token != zero_contract
+        && *token != zero_account
+        && *token != env.current_contract_address()
+}
