@@ -37,7 +37,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1023 | `BatchTooLarge` | A batch exceeds the contract's maximum size. |
 | 1024 | `PlanIdOverflow` | The next plan ID would exceed `u64`; no plan is written. |
 
-## Subscription (2001–2040)
+## Subscription (2001–2043)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -81,6 +81,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2038 | `PlanChargesPaused` | Charges are paused for the referenced plan. |
 | 2039 | `ProtocolPaused` | Protocol-wide operations are paused. |
 | 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
+| 2041 | `ExtraChargeNotAuthorized` | No subscriber-authorized one-off charge is pending. |
+| 2042 | `ExtraChargeExceedsCap` | A one-off charge exceeds the subscriber-authorized cap. |
+| 2043 | `ExtraChargeAlreadyUsed` | The mandate's one-time extra-charge authorization was already consumed. |
 
 ## Vault (3001–3016)
 

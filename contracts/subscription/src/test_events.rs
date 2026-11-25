@@ -248,3 +248,42 @@ fn protocol_pause_changed_layout() {
         },
     );
 }
+
+#[test]
+fn extra_charge_cap_changed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "extra_charge_cap_changed",
+        super::ExtraChargeCapChanged::spec_xdr(),
+        &super::ExtraChargeCapChanged {
+            mandate_id: 11,
+            subscriber: address(&env),
+            cap: 5_000,
+        },
+    );
+}
+
+#[test]
+fn extra_charged_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "extra_charged",
+        super::ExtraCharged::spec_xdr(),
+        &super::ExtraCharged {
+            mandate_id: 11,
+            subscriber: a.clone(),
+            merchant: a.clone(),
+            token: a.clone(),
+            amount: 4_000,
+            merchant_amount: 3_900,
+            fee: 100,
+            tip: 50,
+            keeper: a.clone(),
+            referral: 25,
+            referrer: Some(a),
+        },
+    );
+}

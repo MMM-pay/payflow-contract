@@ -84,14 +84,15 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged,
-    MandateCompleted, MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged,
-    PauseChanged, ProtocolPauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
+    Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded,
+    ExtraChargeCapChanged, ExtraCharged, FeeChanged, MandateCompleted, MandateEnded,
+    MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, ProtocolPauseChanged,
+    Refunded, SeatsChanged, Subscribed, Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
     ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, Mandate, MandateStatus,
-    MandateSummary, Plan, UpgradeRecord,
+    MandateSummary, MandateTerms, Plan, UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
@@ -156,13 +157,14 @@ mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
         ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
-        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
-        MandateEnded, MandateStatus, MandateSummary, MandateTransferred, MandateUpdated,
-        MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded,
-        SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec,
-        BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON,
-        MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
-        PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
+        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, ExtraChargeCapChanged, ExtraCharged,
+        FeeChanged, Mandate, MandateCompleted, MandateEnded, MandateStatus, MandateSummary,
+        MandateTerms, MandateTransferred, MandateUpdated, MaxChargesChanged, PauseChanged, Plan,
+        PlanRegistryClient, ProtocolPauseChanged, Refunded, SeatsChanged, String, Subscribed,
+        UpgradeRecord, Upgraded, VaultClient, Vec, BPS_DENOMINATOR, CANCEL_REASON_NONE,
+        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS,
+        MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD,
+        SECONDS_PER_LEDGER,
     };
 
     /// Billing engine for pull-based recurring payments.
@@ -452,6 +454,9 @@ mod contract {
                 referrer: referrer.clone(),
                 referral_bps,
                 status: MandateStatus::Active,
+                extra_charge_cap: 0,
+                extra_charge_merchant_received: 0,
+                extra_charge_used: false,
             };
 
             Self::write_mandate(&env, &mandate);
@@ -689,6 +694,222 @@ mod contract {
                 fee,
                 charges_made,
                 next_charge,
+                completed,
+            })
+        }
+
+        /// Set or revoke a one-time authorization for an additional charge.
+        ///
+        /// The cap is consumed by one successful `charge_extra`; a failed
+        /// settlement leaves it available. Setting the cap to 0 revokes it.
+        /// The extra charge counts toward `max_charges` and `max_total`, but
+        /// does not advance the recurring `next_charge`.
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`ExtraChargeCapChanged`].
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::NotSubscriber`] if the caller is not its subscriber,
+        /// [`Error::MandateNotActive`] if it is cancelled or completed,
+        /// [`Error::InvalidAmount`] if `cap` is negative, or
+        /// [`Error::ExtraChargeAlreadyUsed`] if a new non-zero cap is set after
+        /// the authorization has been consumed.
+        pub fn set_extra_charge_cap(
+            env: Env,
+            subscriber: Address,
+            mandate_id: u64,
+            cap: i128,
+        ) -> Result<(), Error> {
+            subscriber.require_auth();
+            if cap < 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.subscriber != subscriber {
+                return Err(Error::NotSubscriber);
+            }
+            if !matches!(
+                mandate.status,
+                MandateStatus::Active | MandateStatus::Paused
+            ) {
+                return Err(Error::MandateNotActive);
+            }
+            if mandate.extra_charge_used && cap != 0 {
+                return Err(Error::ExtraChargeAlreadyUsed);
+            }
+
+            mandate.extra_charge_cap = cap;
+            Self::write_mandate(&env, &mandate);
+            MandateUpdated {
+                mandate_id,
+                mandate,
+            }
+            .publish(&env);
+            ExtraChargeCapChanged {
+                mandate_id,
+                subscriber,
+                cap,
+            }
+            .publish(&env);
+            Ok(())
+        }
+
+        /// Settle the subscriber's single pre-authorized additional charge.
+        ///
+        /// The amount must be positive and no greater than the subscriber's
+        /// current cap. Settlement is permissionless once authorized, like a
+        /// recurring charge. It may happen before the next recurring due date;
+        /// the authorization is consumed only if the vault debit succeeds.
+        /// The extra charge counts toward the mandate's charge and spend caps,
+        /// but leaves its recurring schedule unchanged.
+        ///
+        /// # Auth
+        /// Requires authorization from `keeper`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`ExtraCharged`]. If this charge reaches
+        /// a mandate cap, also emits [`MandateCompleted`].
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::MandateNotActive`] if it is not chargeable,
+        /// [`Error::ExtraChargeNotAuthorized`] if no authorization is pending,
+        /// [`Error::ExtraChargeExceedsCap`] if the amount exceeds its cap,
+        /// [`Error::MaxChargesReached`] if a mandate cap would be exceeded,
+        /// [`Error::ExtraChargeAlreadyUsed`] if the authorization was consumed,
+        /// [`Error::InvalidAmount`] if `amount <= 0`,
+        /// [`Error::PlanChargesPaused`] if the merchant paused the plan,
+        /// [`Error::ProtocolPaused`] if the admin paused settlement,
+        /// [`Error::AmountOverflow`] if amount or fee math overflows,
+        /// [`Error::VaultCallFailed`] if the debit fails, or
+        /// [`Error::PlanNotFound`] if the registry cannot provide the plan's
+        /// pause state.
+        pub fn charge_extra(
+            env: Env,
+            keeper: Address,
+            mandate_id: u64,
+            amount: i128,
+        ) -> Result<ChargeResult, Error> {
+            keeper.require_auth();
+            Self::require_not_protocol_paused(&env)?;
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            let now = env.ledger().timestamp();
+            if !super::lifecycle::active_at(&mandate, now) {
+                return Err(Error::MandateNotActive);
+            }
+            if mandate.extra_charge_used {
+                return Err(Error::ExtraChargeAlreadyUsed);
+            }
+            if mandate.extra_charge_cap == 0 {
+                return Err(Error::ExtraChargeNotAuthorized);
+            }
+            if amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+            if amount > mandate.extra_charge_cap {
+                return Err(Error::ExtraChargeExceedsCap);
+            }
+            if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
+                return Err(Error::MaxChargesReached);
+            }
+            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+                return Err(Error::PlanChargesPaused);
+            }
+
+            let next_total = mandate
+                .total_spent
+                .checked_add(amount)
+                .ok_or(Error::AmountOverflow)?;
+            if mandate.max_total != 0 && next_total > mandate.max_total {
+                return Err(Error::MaxChargesReached);
+            }
+            let (fee, tip, referral, merchant_amount) =
+                super::charge::split_amount(&mandate, amount)?;
+            let charges_made = mandate
+                .charges_made
+                .checked_add(1)
+                .ok_or(Error::AmountOverflow)?;
+            let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
+                || (mandate.max_total != 0 && next_total >= mandate.max_total);
+
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            let fee_to: Address = Self::cfg_address(&env, DataKey::FeeTo)?;
+            let mut legs = Vec::new(&env);
+            legs.push_back((mandate.payout.clone(), merchant_amount));
+            if fee > 0 {
+                legs.push_back((fee_to, fee));
+            }
+            if tip > 0 {
+                legs.push_back((keeper.clone(), tip));
+            }
+            if referral > 0 {
+                if let Some(referrer) = &mandate.referrer {
+                    legs.push_back((referrer.clone(), referral));
+                }
+            }
+            if VaultClient::new(&env, &vault_addr)
+                .try_debit_multi_mandate(&mandate.subscriber, &mandate.token, &mandate_id, &legs)
+                .is_err()
+            {
+                return Err(Error::VaultCallFailed);
+            }
+
+            if mandate.status == MandateStatus::Paused {
+                mandate.status = MandateStatus::Active;
+                mandate.paused_until = 0;
+            }
+            mandate.charges_made = charges_made;
+            mandate.total_spent = next_total;
+            mandate.last_charge = now;
+            mandate.extra_charge_cap = 0;
+            mandate.extra_charge_merchant_received = merchant_amount;
+            mandate.extra_charge_used = true;
+            if completed {
+                mandate.status = MandateStatus::Completed;
+                Self::plan_open_dec(&env, mandate.plan_id);
+            }
+
+            Self::write_mandate(&env, &mandate);
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+            ExtraCharged {
+                mandate_id,
+                subscriber: mandate.subscriber.clone(),
+                merchant: mandate.merchant.clone(),
+                token: mandate.token.clone(),
+                amount,
+                merchant_amount,
+                fee,
+                tip,
+                keeper,
+                referral,
+                referrer: mandate.referrer.clone(),
+            }
+            .publish(&env);
+            if completed {
+                MandateCompleted {
+                    mandate_id,
+                    subscriber: mandate.subscriber,
+                    charges_made: mandate.charges_made,
+                }
+                .publish(&env);
+            }
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
+
+            Ok(ChargeResult {
+                merchant_amount,
+                fee,
+                charges_made,
+                next_charge: mandate.next_charge,
                 completed,
             })
         }
@@ -1683,6 +1904,32 @@ mod contract {
         /// Look up a mandate by its unique ID.
         pub fn get_mandate(env: Env, mandate_id: u64) -> Result<Mandate, Error> {
             Self::read_mandate(&env, mandate_id)
+        }
+
+        /// Read the mandate's price, billing period, fees, caps, pause state
+        /// and next scheduled charge in one call.
+        ///
+        /// `paused` is true only while a mandate-level pause currently blocks
+        /// charging; an expired scheduled pause is reported as resumed. It does
+        /// not include plan-level or protocol-wide pauses.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist.
+        pub fn mandate_terms(env: Env, mandate_id: u64) -> Result<MandateTerms, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let paused = mandate.status == MandateStatus::Paused
+                && !super::lifecycle::active_at(&mandate, env.ledger().timestamp());
+            Ok(MandateTerms {
+                amount: mandate.amount,
+                period: mandate.period,
+                fee_bps: mandate.fee_bps,
+                max_charges: mandate.max_charges,
+                max_total: mandate.max_total,
+                max_pause_secs: mandate.max_pause_secs,
+                extra_charge_cap: mandate.extra_charge_cap,
+                paused,
+                next_charge: mandate.next_charge,
+            })
         }
 
         /// Estimate when the mandate's final capped charge is scheduled.

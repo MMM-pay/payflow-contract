@@ -184,7 +184,25 @@ export const Error = {
    * and plan upgrades are refused until it is resumed; reads,
    * cancellations, refunds and vault withdrawals are unaffected.
    */
-  2039 : { message: "ProtocolPaused" }
+  2039 : { message: "ProtocolPaused" },
+  /**
+   * A refund transfer did not deliver exactly the recorded refund amount,
+   * so the token is unsafe for exact-amount accounting (for example a
+   * fee-on-transfer token). The refund is rolled back.
+   */
+  2040 : { message: "UnexpectedTransferAmount" },
+  /**
+   * No subscriber-authorized one-off charge is pending.
+   */
+  2041 : { message: "ExtraChargeNotAuthorized" },
+  /**
+   * A one-off charge exceeds the subscriber-authorized cap.
+   */
+  2042 : { message: "ExtraChargeExceedsCap" },
+  /**
+   * The mandate's one-time extra-charge authorization has already been used.
+   */
+  2043 : { message: "ExtraChargeAlreadyUsed" }
 }
 
 /**
@@ -204,6 +222,20 @@ export interface Mandate {
    * Unix seconds when the mandate was opened.
    */
   created_at: bigint;
+  /**
+   * Maximum amount a one-off charge may debit. Zero means no authorization
+   * is pending; a successful one-off charge consumes the authorization.
+   */
+  extra_charge_cap: bigint;
+  /**
+   * Merchant's net proceeds from the one-off charge, included in the refund
+   * ceiling. Zero for mandates without a settled extra charge.
+   */
+  extra_charge_merchant_received: bigint;
+  /**
+   * Whether this mandate's single one-off authorization has been used.
+   */
+  extra_charge_used: boolean;
   /**
    * Protocol fee in basis points, frozen at subscribe time. An admin fee
    * change therefore cannot alter the economics of a mandate that is
@@ -390,6 +422,48 @@ export interface EstimatedEnd {
    * Unix seconds of the final scheduled (or, once completed, actual) charge.
    */
   timestamp: bigint;
+}
+
+/**
+ * Frozen billing terms and current pause state for a mandate.
+ */
+export interface MandateTerms {
+  /**
+   * Amount charged for each scheduled billing period.
+   */
+  amount: bigint;
+  /**
+   * Maximum amount of a pending one-off charge (0 = none).
+   */
+  extra_charge_cap: bigint;
+  /**
+   * Protocol fee in basis points, frozen when the mandate was opened.
+   */
+  fee_bps: number;
+  /**
+   * Maximum number of charges (0 = unlimited).
+   */
+  max_charges: number;
+  /**
+   * Maximum continuous pause length in seconds (0 = unlimited).
+   */
+  max_pause_secs: bigint;
+  /**
+   * Maximum lifetime debit (0 = unlimited).
+   */
+  max_total: bigint;
+  /**
+   * Unix seconds when the next scheduled charge falls due.
+   */
+  next_charge: bigint;
+  /**
+   * Whether a pause currently prevents charging.
+   */
+  paused: boolean;
+  /**
+   * Billing period in seconds.
+   */
+  period: bigint;
 }
 
 /**
@@ -854,6 +928,59 @@ export interface ChargeFailedEvent {
 }
 
 /**
+ * Emitted when a mandate's one-time additional charge settles successfully.
+ */
+export interface ExtraChargedEvent {
+  name: "ExtraCharged";
+  data: {
+    /**
+     * ID of the charged mandate.
+     */
+    mandate_id: bigint;
+    /**
+     * Account of the subscriber debited.
+     */
+    subscriber: string;
+    /**
+     * Account of the merchant credited.
+     */
+    merchant: string;
+    /**
+     * Token used for the one-off charge.
+     */
+    token?: string;
+    /**
+     * Total additional amount debited from the subscriber.
+     */
+    amount?: bigint;
+    /**
+     * Merchant's net share after fees, keeper tip and referral.
+     */
+    merchant_amount?: bigint;
+    /**
+     * Protocol fee deducted.
+     */
+    fee?: bigint;
+    /**
+     * Keeper tip paid out of the merchant's share.
+     */
+    tip?: bigint;
+    /**
+     * Keeper who settled the one-off charge.
+     */
+    keeper?: string;
+    /**
+     * Referral share paid out of the merchant's share.
+     */
+    referral?: bigint;
+    /**
+     * Account paid the referral share, if any.
+     */
+    referrer?: string | null;
+  };
+}
+
+/**
  * Emitted when the merchant ends a mandate, for example because it stopped
  * offering the service. The mandate is cancelled exactly as if the
  * subscriber had cancelled it; the event records who did it.
@@ -1043,6 +1170,27 @@ export interface ProtocolPauseChangedEvent {
 }
 
 /**
+ * Emitted when a subscriber sets, changes or revokes the one-off charge cap.
+ */
+export interface ExtraChargeCapChangedEvent {
+  name: "ExtraChargeCapChanged";
+  data: {
+    /**
+     * ID of the mandate whose one-off authorization changed.
+     */
+    mandate_id: bigint;
+    /**
+     * Subscriber who authorized the one-off charge.
+     */
+    subscriber: string;
+    /**
+     * Maximum amount authorized, or 0 when revoked.
+     */
+    cap?: bigint;
+  };
+}
+
+/**
  * Emitted when a plan's committed revenue per period changes. This allows
  * dashboards to track MRR/ARR on-chain without scanning all mandates.
  */
@@ -1075,4 +1223,4 @@ export interface CommittedRevenueChangedEvent {
     period?: bigint;
   };
 }
-    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;
+    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | ExtraChargedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | ExtraChargeCapChangedEvent | CommittedRevenueChangedEvent;

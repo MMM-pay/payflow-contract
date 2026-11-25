@@ -66,6 +66,8 @@ first charge is due at `start`.
 `charge` is permissionless ([ADR 0005](adr/0005-permissionless-charge.md)): any
 keeper may call it once a mandate is due. The vault, not the keeper, is the
 one that pays every leg.
+The [settlement threat model](settlement-threat-model.md) describes the trust
+assumptions and attack surface for this flow, vault debits and refunds.
 
 ```mermaid
 sequenceDiagram
@@ -98,6 +100,43 @@ sequenceDiagram
 
 If the vault cannot cover a due charge, anyone may call `flag_failed_charge`,
 which asks the vault `can_debit` and records the failure without moving money.
+
+## One-off extra charge
+
+The subscriber can authorize a one-time cap separately from the recurring
+schedule. Settlement is permissionless once authorized; the exact amount is
+chosen by the caller up to that cap. A successful extra charge consumes the
+authorization and counts toward the mandate's charge and spend caps, but does
+not move `next_charge`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Subscriber
+    actor K as Keeper (anyone)
+    participant Sub as Subscription
+    participant Reg as PlanRegistry
+    participant V as Vault
+    participant T as Token
+
+    S->>Sub: set_extra_charge_cap(subscriber, mandate_id, cap)
+    Note over Sub: subscriber.require_auth(); store cap
+    Note over Sub: events: MandateUpdated, ExtraChargeCapChanged
+    K->>Sub: charge_extra(keeper, mandate_id, amount)
+    Note over Sub: keeper.require_auth(); amount > 0 and amount <= cap
+    Sub->>Reg: plan_charges_paused(plan_id)
+    Reg-->>Sub: bool
+    Sub->>V: debit_multi_mandate(subscriber, token, mandate_id, legs)
+    V->>T: transfer(vault → payout, merchant net)
+    V->>T: transfer(vault → fee/tip/referral recipients), if non-zero
+    Note over Sub,V: any rejected debit rolls back state and leaves the cap available
+    Note over Sub: consume cap; update charges_made and total_spent;<br/>leave next_charge unchanged
+    Note over Sub: events: MandateUpdated, ExtraCharged,<br/>MandateCompleted if a cap was reached
+```
+
+The subscriber authorizes a maximum amount, not a particular future usage
+measurement. Any caller may settle an amount up to that cap, so do not set a
+cap unless that permissionless behavior is acceptable.
 
 ## Cancel
 

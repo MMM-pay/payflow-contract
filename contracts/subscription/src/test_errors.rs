@@ -46,6 +46,10 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::VaultCallFailed, 37),
         (Error::PlanChargesPaused, 38),
         (Error::ProtocolPaused, 39),
+        (Error::UnexpectedTransferAmount, 40),
+        (Error::ExtraChargeNotAuthorized, 41),
+        (Error::ExtraChargeExceedsCap, 42),
+        (Error::ExtraChargeAlreadyUsed, 43),
     ];
 
     let mut seen = std::vec::Vec::new();

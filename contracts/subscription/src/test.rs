@@ -826,6 +826,186 @@ fn charge_succeeds_once_period_elapses() {
 }
 
 #[test]
+fn extra_charge_is_single_use_and_does_not_move_the_recurring_schedule() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let next_charge = w.sub.get_mandate(&id).next_charge;
+
+    w.sub.set_extra_charge_cap(&user, &id, &5_000);
+    let result = w.sub.charge_extra(&w.keeper, &id, &4_000);
+
+    assert_eq!(result.merchant_amount, 3_960);
+    assert_eq!(result.fee, 40);
+    assert_eq!(result.next_charge, next_charge);
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.charges_made, 1);
+    assert_eq!(mandate.total_spent, 4_000);
+    assert_eq!(mandate.extra_charge_cap, 0);
+    assert_eq!(mandate.extra_charge_merchant_received, 3_960);
+    assert!(mandate.extra_charge_used);
+    assert_eq!(mandate.next_charge, next_charge);
+    assert_eq!(w.vault.balance(&user, &w.token), 96_000);
+    assert_eq!(w.token_client.balance(&w.merchant), 3_960);
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &1),
+        Err(Ok(Error::ExtraChargeAlreadyUsed))
+    );
+}
+
+#[test]
+fn extra_charge_rejects_missing_authorization_and_amounts_above_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &1),
+        Err(Ok(Error::ExtraChargeNotAuthorized))
+    );
+    w.sub.set_extra_charge_cap(&user, &id, &100);
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &101),
+        Err(Ok(Error::ExtraChargeExceedsCap))
+    );
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, 100);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
+#[test]
+fn set_extra_charge_cap_requires_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.set_auths(&[]);
+
+    assert!(w.sub.try_set_extra_charge_cap(&user, &id, &5_000).is_err());
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, 0);
+}
+
+#[test]
+fn charge_extra_requires_the_keeper_to_authorize() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &5_000);
+    w.env.set_auths(&[]);
+
+    assert!(w.sub.try_charge_extra(&w.keeper, &id, &1_000).is_err());
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, 5_000);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
+#[test]
+fn failed_extra_charge_keeps_the_authorization_available() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &200);
+
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &200),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, 200);
+    assert!(!w.sub.get_mandate(&id).extra_charge_used);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
+#[test]
+fn extra_charge_split_overflow_does_not_consume_authorization() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &i128::MAX);
+
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &i128::MAX),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, i128::MAX);
+    assert!(!w.sub.get_mandate(&id).extra_charge_used);
+}
+
+#[test]
+fn extra_charge_obeys_the_lifetime_spend_cap() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &5, &5_000, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &5_001);
+
+    assert_eq!(
+        w.sub.try_charge_extra(&w.keeper, &id, &5_001),
+        Err(Ok(Error::MaxChargesReached))
+    );
+    assert_eq!(w.sub.get_mandate(&id).extra_charge_cap, 5_001);
+    w.sub.charge_extra(&w.keeper, &id, &5_000);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.total_spent, 5_000);
+    assert_eq!(mandate.status, MandateStatus::Completed);
+    assert_eq!(mandate.next_charge, w.env.ledger().timestamp());
+}
+
+#[test]
+fn mandate_terms_returns_billing_terms_and_current_pause_state() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &3, &40_000, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &2_500);
+
+    let terms = w.sub.mandate_terms(&id);
+    assert_eq!(terms.amount, PRICE);
+    assert_eq!(terms.period, MONTH);
+    assert_eq!(terms.fee_bps, FEE_BPS);
+    assert_eq!(terms.max_charges, 3);
+    assert_eq!(terms.max_total, 40_000);
+    assert_eq!(terms.max_pause_secs, 0);
+    assert_eq!(terms.extra_charge_cap, 2_500);
+    assert!(!terms.paused);
+    assert_eq!(terms.next_charge, w.env.ledger().timestamp());
+
+    w.sub.set_paused(&user, &id, &true);
+    assert!(w.sub.mandate_terms(&id).paused);
+    w.sub.set_paused(&user, &id, &false);
+    assert!(!w.sub.mandate_terms(&id).paused);
+    assert_eq!(
+        w.sub.try_mandate_terms(&u64::MAX),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn mandate_terms_treats_an_expired_scheduled_pause_as_resumed() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let until = w.env.ledger().timestamp() + 10;
+
+    w.sub.pause_until(&user, &id, &until);
+    assert!(w.sub.mandate_terms(&id).paused);
+    w.advance(10);
+    assert!(!w.sub.mandate_terms(&id).paused);
+}
+
+#[test]
 fn keeper_outage_does_not_create_a_chargeable_backlog() {
     let w = world();
     let plan_id = w.plan();
@@ -2998,6 +3178,23 @@ fn refund_cap_grows_with_every_charge() {
         w.sub.try_refund(&w.merchant, &id, &1),
         Err(Ok(Error::RefundExceedsReceived))
     );
+}
+
+#[test]
+fn refund_cap_includes_the_extra_charge_merchant_receipt() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_extra_charge_cap(&user, &id, &5_000);
+    w.sub.charge_extra(&w.keeper, &id, &4_000);
+
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &3_961),
+        Err(Ok(Error::RefundExceedsReceived))
+    );
+    w.sub.refund(&w.merchant, &id, &3_960);
+    assert_eq!(w.sub.get_mandate(&id).refunded, 3_960);
 }
 
 #[test]
