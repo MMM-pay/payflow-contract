@@ -111,6 +111,10 @@ pub enum Error {
     /// and plan upgrades are refused until it is resumed; reads,
     /// cancellations, refunds and vault withdrawals are unaffected.
     ProtocolPaused = 2039,
+    /// A refund transfer did not deliver exactly the recorded refund amount,
+    /// so the token is unsafe for exact-amount accounting (for example a
+    /// fee-on-transfer token). The refund is rolled back.
+    UnexpectedTransferAmount = 2040,
 }
 
 impl From<Error> for ErrorCode {

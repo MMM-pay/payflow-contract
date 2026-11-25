@@ -1,6 +1,6 @@
 call,cpu_instructions,memory_bytes,write_entries,write_bytes
 subscribe,956138,348268,11,2572
-charge_success,1169170,419093,7,1884
+charge_success,1373567,459930,7,1884
 charge_missing_auth,31663,25365,0,0
 charge_vault_failure,345515,183807,1,0
 simulate_charge,237112,135911,0,0
