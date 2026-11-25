@@ -104,8 +104,8 @@ Handover now takes two calls:
 2. `accept_admin(new_admin)` — authorized by `new_admin`. The role moves only
    when the proposed address itself accepts, and the pending proposal is
    consumed. Accepting with no proposal fails with `PendingAdminNotFound`
-   (1025 / 2041 / 3018) and accepting from any other address fails with
-   `NotPendingAdmin` (1026 / 2042 / 3019).
+   (1025 / 2041 / 3020) and accepting from any other address fails with
+   `NotPendingAdmin` (1026 / 2042 / 3021).
 
 Clients that call `update_admin` must switch to the two-step flow. The admin
 returned by `admin()` is unchanged until acceptance, and every admin-gated

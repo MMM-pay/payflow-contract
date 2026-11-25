@@ -31,6 +31,13 @@ struct Harness<'a> {
 }
 
 fn setup() -> Harness<'static> {
+    // Existing tests predate the reserve cap (#348) and reserve the whole
+    // balance, so they run with the cap fully open. The cap's own tests below
+    // deploy with a real limit.
+    setup_with_reserve_cap(BPS_DENOMINATOR)
+}
+
+fn setup_with_reserve_cap(reserve_cap_bps: u32) -> Harness<'static> {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -41,7 +48,7 @@ fn setup() -> Harness<'static> {
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let token = sac.address();
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), reserve_cap_bps));
     let vault = VaultClient::new(&env, &vault_id);
     vault.set_subscription(&subscription);
 
@@ -1070,7 +1077,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
     let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
-    let vault_id = env.register(Vault, (admin,));
+    let vault_id = env.register(Vault, (admin, BPS_DENOMINATOR));
     let vault = VaultClient::new(&env, &vault_id);
     vault.set_subscription(&subscription);
 
@@ -2553,6 +2560,94 @@ fn reserves_are_scoped_to_user_and_token() {
     assert_eq!(h.vault.reserved_total(&alice, &h.token), 1_000);
 }
 
+// ---------------------------------------------------------------------------
+// Total reserve cap per subscriber (#348): many mandates can no longer
+// earmark the whole balance, so a minimum free balance stays withdrawable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reserve_cap_keeps_a_minimum_free_balance() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+    assert_eq!(h.vault.reserve_cap_bps(), DEFAULT_RESERVE_CAP_BPS);
+
+    // 90% of 1,000 is 900, so the whole balance can no longer be earmarked.
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &901),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &900);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 100);
+
+    // Releasing a reserve is always allowed, cap or no cap.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn ten_mandates_fill_the_cap_and_the_eleventh_is_rejected() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+
+    // Ten mandates at 90 each reach exactly the 900 cap.
+    for id in 1..=10u64 {
+        h.vault.set_reserve(&user, &h.token, &id, &90);
+    }
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 100);
+
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &11u64, &90),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+
+    // Releasing one mandate's reserve makes room for the eleventh.
+    h.vault.set_reserve(&user, &h.token, &1u64, &0);
+    h.vault.set_reserve(&user, &h.token, &11u64, &90);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+}
+
+#[test]
+fn reducing_a_reserve_is_allowed_even_under_the_cap() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &900);
+    // Replacing it with a smaller reserve must not be mistaken for growth.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &100);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 100);
+
+    // Growing it again is still bound by the cap.
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &901),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+}
+
+#[test]
+fn a_zero_cap_forbids_reserving() {
+    let h = setup_with_reserve_cap(0);
+    let user = depositor(&h, 1_000);
+
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &1),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+    // Releasing (or leaving at zero) is still a no-op that succeeds.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+}
+
+#[test]
+fn a_full_balance_cap_keeps_the_previous_behaviour() {
+    let h = setup_with_reserve_cap(BPS_DENOMINATOR);
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &1_000);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 1_000);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+}
+
 #[test]
 fn can_debit_reports_reserve_aware_headroom() {
     let h = setup();
@@ -3039,7 +3134,7 @@ fn failing_vault_views_are_side_effect_free_too() {
 
     // An unconfigured vault reports a typed error, still without writing.
     let admin = Address::generate(env);
-    let bare = VaultClient::new(env, &env.register(Vault, (admin,)));
+    let bare = VaultClient::new(env, &env.register(Vault, (admin, BPS_DENOMINATOR)));
     assert_eq!(
         assert_read_only(env, "subscription (unset)", || bare.try_subscription()),
         Err(Ok(Error::SubscriptionNotSet))

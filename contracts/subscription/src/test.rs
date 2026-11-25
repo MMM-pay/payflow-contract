@@ -12,7 +12,7 @@ use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
+    xdr::{ContractEventBody, Limits, ReadXdr, ScMap, ScSymbol, ScVal, WriteXdr},
     Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal,
 };
 
@@ -30,6 +30,7 @@ const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_subscription.was
 struct World<'a> {
     env: Env,
     sub: SubscriptionClient<'a>,
+    sub_id: Address,
     registry: RegistryClient<'a>,
     vault: RealVaultClient<'a>,
     token: Address,
@@ -58,7 +59,7 @@ fn world() -> World<'static> {
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     let sub_id = env.register(
@@ -80,6 +81,7 @@ fn world() -> World<'static> {
         minter: StellarAssetClient::new(&env, &token),
         env,
         sub,
+        sub_id,
         registry,
         vault,
         token,
@@ -1321,7 +1323,7 @@ fn zero_fee_pays_merchant_in_full() {
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
     let sub_id = env.register(
         Subscription,
@@ -2514,7 +2516,7 @@ fn fee_paid_to_address() {
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
     vault.set_subscription(&Address::generate(&env));
 
@@ -3276,7 +3278,7 @@ fn fee_to_contract_address_receives_the_fee() {
     let token_client = TokenClient::new(&env, &token);
     let minter = StellarAssetClient::new(&env, &token);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     // fee_to = the registry contract address (a contract, not an account).
@@ -3403,7 +3405,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     let sub_id = env.register(
@@ -9364,4 +9366,98 @@ fn maximum_value_subscribe_requires_the_subscribers_auth() {
     assert_eq!(w.sub.next_mandate_id(), 1);
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
     assert_eq!(w.vault.balance(&user, &w.token), PRICE);
+}
+
+// ---------------------------------------------------------------------------
+// #363: event log ordering across several entry points in one transaction.
+// ---------------------------------------------------------------------------
+
+/// Calls three state-changing subscription entry points from one top-level
+/// invocation. `env.events().all()` only reports the most recent top-level
+/// invocation, so several calls in one transaction have to come from a
+/// contract in between rather than from the test itself.
+#[contract]
+pub struct EntryPointBatch;
+
+#[contractimpl]
+impl EntryPointBatch {
+    /// Subscribe, settle the first charge, then cancel - in that order - and
+    /// return the mandate id so the caller can check the final state.
+    pub fn subscribe_charge_cancel(
+        env: Env,
+        subscription: Address,
+        subscriber: Address,
+        plan_id: u64,
+        keeper: Address,
+    ) -> u64 {
+        let client = SubscriptionClient::new(&env, &subscription);
+        let id = client.subscribe(&subscriber, &plan_id, &0u32, &0i128, &None::<Address>);
+        let _ = client.charge(&keeper, &id);
+        client.cancel(&subscriber, &id);
+        id
+    }
+}
+
+#[test]
+fn events_follow_call_order_across_a_multi_entry_point_transaction() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    // The calls inside the batch are not the root invocation, so plain
+    // `mock_all_auths` (which only covers the root) is not enough here.
+    w.env.mock_all_auths_allowing_non_root_auth();
+    let batch_addr = w.env.register(EntryPointBatch, ());
+    let batch = EntryPointBatchClient::new(&w.env, &batch_addr);
+
+    let id = batch.subscribe_charge_cancel(&w.sub_id, &user, &plan_id, &w.keeper);
+
+    // Read the log before any further call: `events().all()` reports the most
+    // recent invocation, and a view call would replace the batch's log.
+    let events = w.env.events().all();
+    let events = events.events();
+    assert!(!events.is_empty(), "the batch emitted no events");
+
+    // Every event must be well-formed XDR that round-trips byte for byte.
+    for event in events {
+        let encoded = WriteXdr::to_xdr(event, Limits::none()).expect("event encodes as XDR");
+        let decoded = soroban_sdk::xdr::ContractEvent::from_xdr(&encoded, Limits::none())
+            .expect("event decodes as XDR");
+        assert_eq!(&decoded, event);
+    }
+
+    // Only the subscription contract's own events, in emission order. The
+    // vault's debit events and the registry's committed-revenue events are
+    // interleaved with these; they are other contracts' events and are not
+    // part of the sequence this test pins.
+    let names: std::vec::Vec<std::string::String> = events
+        .iter()
+        .filter_map(|event| {
+            let ContractEventBody::V0(body) = &event.body;
+            match body.topics.first() {
+                Some(ScVal::Symbol(ScSymbol(name))) => Some(name.to_utf8_string_lossy()),
+                _ => None,
+            }
+        })
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "mandate_updated" | "subscribed" | "charged" | "cancelled"
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        std::vec![
+            "mandate_updated",
+            "subscribed",
+            "mandate_updated",
+            "charged",
+            "mandate_updated",
+            "cancelled",
+        ],
+        "events must appear in call order with no event dropped or duplicated"
+    );
+
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
 }

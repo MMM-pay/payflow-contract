@@ -86,7 +86,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2041 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 2042 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
-## Vault (3001–3019)
+## Vault (3001–3021)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -107,7 +107,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3015 | `RateLimitExceeded` | The operation exceeds the configured rate limit. |
 | 3016 | `UnexpectedTransferAmount` | A token transfer did not move the exact amount (for example a fee-on-transfer token); the operation is rolled back. |
 | 3017 | `ZeroAddress` | A withdrawal or payout destination is the zero/unset account or contract address. |
-| 3018 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
-| 3019 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
+| 3018 | `ReserveCapExceeded` | A reserve would take the subscriber's total reserve above the vault's configured reserve cap. |
+| 3019 | `InvalidReserveCap` | The constructor was given a reserve cap above 10,000 basis points. |
+| 3020 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
+| 3021 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.

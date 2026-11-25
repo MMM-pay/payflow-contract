@@ -9,7 +9,7 @@
 #![no_std]
 #![deny(missing_docs)]
 
-use soroban_sdk::{Env, IntoVal, Val};
+use soroban_sdk::{Env, IntoVal, TryFromVal, Val};
 
 /// Number of ledgers in a day, assuming ~5 second close times.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -42,4 +42,31 @@ where
     env.storage()
         .persistent()
         .extend_ttl(key, PERSIST_THRESHOLD, PERSIST_BUMP);
+}
+
+/// Read `key` from persistent storage, or return `error` when it is absent.
+///
+/// Contract code used to repeat
+/// `env.storage().persistent().get(&key).ok_or(ProjectError::NotFound)?` at
+/// every entry point. This keeps the error mapping in one place while still
+/// naming the storage location at the call site, so a reader can tell a
+/// persistent read from an instance one.
+#[inline]
+pub fn load_or_err<K, V, E>(env: &Env, key: &K, error: E) -> Result<V, E>
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: TryFromVal<Env, Val>,
+{
+    env.storage().persistent().get::<K, V>(key).ok_or(error)
+}
+
+/// Read `key` from instance storage (contract configuration), or return
+/// `error` when it is absent. See [`load_or_err`].
+#[inline]
+pub fn load_instance_or_err<K, V, E>(env: &Env, key: &K, error: E) -> Result<V, E>
+where
+    K: IntoVal<Env, Val> + Clone,
+    V: TryFromVal<Env, Val>,
+{
+    env.storage().instance().get::<K, V>(key).ok_or(error)
 }
