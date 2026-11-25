@@ -13,3 +13,4 @@ choice changes. They are linked from [README.md](../../README.md).
 | [0004](./0004-per-position-indexes.md) | Per-position indexes |
 | [0005](./0005-permissionless-charge.md) | Permissionless `charge` |
 | [0006](./0006-prorated-upgrade-charging.md) | Prorated upgrade charging |
+| [0007](./0007-ttl-refresh-on-access.md) | TTL refresh on access for hot keys |

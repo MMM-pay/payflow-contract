@@ -31,12 +31,18 @@ pub enum DataKey {
     /// Sum of every `Reserved` entry for (user, token). Always at most the
     /// (user, token) balance, so the unreserved part never goes negative.
     ReservedTotal(Address, Address),
+    /// Largest share of a subscriber's balance that may be reserved, in basis
+    /// points; fixed when the contract is deployed (#348).
+    ReserveCapBps,
     /// Fixed-window counter for deposit/withdraw operations (#314): where the
     /// current window starts and how many operations it already contains.
     OperationWindow(Address, Address),
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
+    PendingAdmin,
 }
 
 /// A subscriber's optional ceiling on total debits per fixed time window,

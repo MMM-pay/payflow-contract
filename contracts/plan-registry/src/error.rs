@@ -58,6 +58,15 @@ pub enum Error {
     EmptyBatch = 1022,
     /// `create_plans` was given more plans than `MAX_BATCH_PLANS`.
     BatchTooLarge = 1023,
+    /// The next plan ID cannot be represented: the counter is at `u64::MAX`,
+    /// or a batch would carry it past `u64::MAX`. No plan is written.
+    PlanIdOverflow = 1024,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 1025,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 1026,
 }
 
 impl From<Error> for ErrorCode {

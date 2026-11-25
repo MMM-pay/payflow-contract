@@ -248,3 +248,17 @@ fn protocol_pause_changed_layout() {
         },
     );
 }
+
+#[test]
+fn mandate_deleted_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "mandate_deleted",
+        super::MandateDeleted::spec_xdr(),
+        &super::MandateDeleted {
+            mandate_id: 11,
+            subscriber: address(&env),
+        },
+    );
+}

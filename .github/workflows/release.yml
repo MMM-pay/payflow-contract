@@ -40,7 +40,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Attach artifacts to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             target/wasm32v1-none/release/payflow_subscription.wasm
