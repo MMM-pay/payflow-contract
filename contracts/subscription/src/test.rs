@@ -7406,3 +7406,730 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #245: two active mandates interleaving debits against one subscriber
+// balance can never double-spend it
+// ---------------------------------------------------------------------------
+
+/// One subscriber, two merchants, and two active mandates drawing on the same
+/// vault balance.
+///
+/// Soroban runs each invocation to completion before the next one starts, so
+/// "interleaving" here means alternating `charge` calls for mandate A and
+/// mandate B against that one balance, with the ledger clock set to an
+/// absolute timestamp for every billing period. Every settled step checks the
+/// exact token movement, and every rejected step checks that nothing moved at
+/// all. After every step the conservation invariant is checked against totals
+/// the test tracks itself rather than reads back from the contracts.
+mod interleaved_mandates {
+    use super::*;
+    use core::cell::Cell;
+    use payflow_plan_registry::Error as RegistryError;
+    use payflow_vault::Error as VaultError;
+    use soroban_sdk::testutils::{AuthorizedFunction, AuthorizedInvocation};
+
+    /// The subscriber's opening vault balance: enough for some of the combined
+    /// debits, never all of them.
+    const START: i128 = 100_000;
+    /// A larger opening balance for the lifecycle tests, so mandate B can keep
+    /// billing for several periods after mandate A stops.
+    const ROOMY: i128 = 200_000;
+    /// Mandate A's price, paid to merchant A.
+    const AMOUNT_A: i128 = 30_000;
+    /// Mandate B's price, paid to merchant B.
+    const AMOUNT_B: i128 = 40_000;
+    /// Ledger timestamp of billing period 0. Each period is set as the
+    /// absolute timestamp `T0 + n * MONTH`; nothing relies on the default
+    /// ledger or on wall-clock time.
+    const T0: u64 = 1_000_000;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Which {
+        A,
+        B,
+    }
+
+    /// Every balance a charge could touch, read from the vault's ledger and
+    /// from the token contract itself.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Balances {
+        /// The subscriber's balance in the vault's internal ledger.
+        vault_ledger: i128,
+        /// Tokens the vault contract actually holds.
+        vault_tokens: i128,
+        /// The subscriber's own wallet, outside the vault.
+        wallet: i128,
+        merchant_a: i128,
+        merchant_b: i128,
+        fee_to: i128,
+        keeper: i128,
+    }
+
+    struct Pair {
+        w: World<'static>,
+        user: Address,
+        merchant_a: Address,
+        merchant_b: Address,
+        plan_a: u64,
+        a: u64,
+        b: u64,
+        /// Net amount the subscriber put into the vault (deposits minus
+        /// withdrawals), tracked by the test, not read from the vault.
+        deposited: Cell<i128>,
+        /// Sum of every charge that settled, tracked by the test.
+        debited: Cell<i128>,
+    }
+
+    fn fee(amount: i128) -> i128 {
+        amount * i128::from(FEE_BPS) / BPS_DENOMINATOR
+    }
+
+    fn price(which: Which) -> i128 {
+        match which {
+            Which::A => AMOUNT_A,
+            Which::B => AMOUNT_B,
+        }
+    }
+
+    /// Two merchants with one monthly plan each, and one subscriber holding
+    /// `funding` in the vault with an active mandate on both plans. Both
+    /// mandates are due at `T0`. The subscriber's wallet keeps another
+    /// `funding` outside the vault for top-ups.
+    fn pair(funding: i128) -> Pair {
+        let w = world();
+        w.env.ledger().set_timestamp(T0);
+
+        let merchant_a = w.merchant.clone();
+        let merchant_b = Address::generate(&w.env);
+        let plan_a = w.plan_amount(AMOUNT_A, MONTH);
+        let plan_b = w.registry.create_plan(
+            &merchant_b,
+            &w.token,
+            &AMOUNT_B,
+            &MONTH,
+            &String::from_str(&w.env, "Plan B"),
+            &String::from_str(&w.env, ""),
+            &0,
+            &Symbol::new(&w.env, ""),
+            &String::from_str(&w.env, ""),
+            &0u64,
+            &0u32,
+            &None::<Address>,
+            &0u32,
+        );
+
+        let user = w.subscriber(funding);
+        let a = w.sub.subscribe(&user, &plan_a, &0, &0, &None::<Address>);
+        let b = w.sub.subscribe(&user, &plan_b, &0, &0, &None::<Address>);
+
+        let p = Pair {
+            w,
+            user,
+            merchant_a,
+            merchant_b,
+            plan_a,
+            a,
+            b,
+            deposited: Cell::new(funding),
+            debited: Cell::new(0),
+        };
+        p.assert_invariants();
+        p
+    }
+
+    impl Pair {
+        fn id(&self, which: Which) -> u64 {
+            match which {
+                Which::A => self.a,
+                Which::B => self.b,
+            }
+        }
+
+        /// Move the ledger clock to the start of billing period `n`.
+        fn period(&self, n: u64) {
+            self.w.env.ledger().set_timestamp(T0 + n * MONTH);
+        }
+
+        fn balances(&self) -> Balances {
+            let t = &self.w.token_client;
+            Balances {
+                vault_ledger: self.w.vault.balance(&self.user, &self.w.token),
+                vault_tokens: t.balance(&self.w.vault.address),
+                wallet: t.balance(&self.user),
+                merchant_a: t.balance(&self.merchant_a),
+                merchant_b: t.balance(&self.merchant_b),
+                fee_to: t.balance(&self.w.fee_to),
+                keeper: t.balance(&self.w.keeper),
+            }
+        }
+
+        /// The invariants that make a double-spend impossible to miss.
+        fn assert_invariants(&self) {
+            let b = self.balances();
+            let deposited = self.deposited.get();
+            let debited = self.debited.get();
+
+            assert!(
+                b.vault_ledger >= 0,
+                "subscriber balance went negative: {b:?}"
+            );
+            assert!(
+                debited <= deposited,
+                "charged {debited} against only {deposited} deposited"
+            );
+            // Conservation: what went in is exactly what is left plus what
+            // was charged.
+            assert_eq!(
+                deposited,
+                b.vault_ledger + debited,
+                "conservation broken: {b:?}"
+            );
+            // Every charged unit reached a payee; none was created or lost.
+            assert_eq!(
+                b.merchant_a + b.merchant_b + b.fee_to + b.keeper,
+                debited,
+                "payees received a different total than was charged: {b:?}"
+            );
+            // The vault's ledger is backed one for one by tokens it holds.
+            assert_eq!(b.vault_tokens, b.vault_ledger, "vault ledger unbacked");
+            assert!(
+                self.w.vault.reserved_total(&self.user, &self.w.token) <= b.vault_ledger,
+                "reserves exceed the balance"
+            );
+        }
+
+        /// Settle `which` with `caller` as the keeper and check it moved
+        /// exactly its own price: the subscriber down by the price, its own
+        /// merchant up by the price less the fee, the fee recipient up by the
+        /// fee, and nobody else touched. Returns the auths the charge used.
+        fn settles_by(
+            &self,
+            which: Which,
+            caller: &Address,
+        ) -> std::vec::Vec<(Address, AuthorizedInvocation)> {
+            let id = self.id(which);
+            let amount = price(which);
+            let now = self.w.env.ledger().timestamp();
+            let before = self.balances();
+            let mandate = self.w.sub.get_mandate(&id);
+
+            let result = self.w.sub.charge(caller, &id);
+            // `env.auths()` only covers the most recent invocation, so read it
+            // before any balance query.
+            let auths = self.w.env.auths();
+
+            let mut expected = before;
+            expected.vault_ledger -= amount;
+            expected.vault_tokens -= amount;
+            expected.fee_to += fee(amount);
+            match which {
+                Which::A => expected.merchant_a += amount - fee(amount),
+                Which::B => expected.merchant_b += amount - fee(amount),
+            }
+            assert_eq!(
+                self.balances(),
+                expected,
+                "charge of {which:?} at {now} did not move exactly {amount}"
+            );
+            assert_eq!(result.merchant_amount + result.fee, amount);
+
+            let after = self.w.sub.get_mandate(&id);
+            assert_eq!(after.charges_made, mandate.charges_made + 1);
+            assert_eq!(after.total_spent, mandate.total_spent + amount);
+            assert_eq!(after.last_charge, now);
+            assert_eq!(after.next_charge, now + MONTH);
+
+            self.debited.set(self.debited.get() + amount);
+            self.assert_invariants();
+            auths
+        }
+
+        fn settles(&self, which: Which) {
+            self.settles_by(which, &self.w.keeper);
+        }
+
+        /// Charge `which`, expect exactly `error`, and check that no balance
+        /// and neither mandate changed.
+        fn rejected(&self, which: Which, error: Error) {
+            let id = self.id(which);
+            let now = self.w.env.ledger().timestamp();
+            let before = self.balances();
+            let mandate_a = self.w.sub.get_mandate(&self.a);
+            let mandate_b = self.w.sub.get_mandate(&self.b);
+
+            assert_eq!(
+                self.w.sub.try_charge(&self.w.keeper, &id),
+                Err(Ok(error)),
+                "charge of {which:?} at {now}"
+            );
+
+            assert_eq!(
+                self.balances(),
+                before,
+                "rejected charge of {which:?} at {now} moved funds"
+            );
+            assert_eq!(self.w.sub.get_mandate(&self.a), mandate_a);
+            assert_eq!(self.w.sub.get_mandate(&self.b), mandate_b);
+            self.assert_invariants();
+        }
+
+        /// A due charge the remaining balance cannot cover: the vault refuses
+        /// the debit, the subscription contract surfaces `VaultCallFailed`,
+        /// and nothing moves.
+        fn unaffordable(&self, which: Which) {
+            assert!(
+                !self
+                    .w
+                    .vault
+                    .can_debit(&self.user, &self.w.token, &self.id(which), &price(which)),
+                "{which:?} should not be affordable here"
+            );
+            self.rejected(which, Error::VaultCallFailed);
+        }
+
+        fn top_up(&self, amount: i128) {
+            self.w.vault.deposit(&self.user, &self.w.token, &amount);
+            self.deposited.set(self.deposited.get() + amount);
+            self.assert_invariants();
+        }
+
+        fn withdraw(&self, amount: i128) {
+            let wallet = self.balances().wallet;
+            self.w.vault.withdraw(&self.user, &self.w.token, &amount);
+            self.deposited.set(self.deposited.get() - amount);
+            assert_eq!(self.balances().wallet, wallet + amount);
+            self.assert_invariants();
+        }
+    }
+
+    // ---- happy path / no double-spend ----
+
+    /// A, B, A, B, ... across billing periods on a balance that covers only
+    /// three of the six debits. Every settled debit moves exactly its price,
+    /// and once the balance runs dry every further debit fails without
+    /// moving anything.
+    #[test]
+    fn alternating_debits_never_spend_more_than_the_shared_balance() {
+        let p = pair(START);
+        // (period, mandate, settles?) — a hard-coded interleaving.
+        let schedule = [
+            (0, Which::A, true),  // 100_000 -> 70_000
+            (0, Which::B, true),  //  70_000 -> 30_000
+            (1, Which::A, true),  //  30_000 ->      0
+            (1, Which::B, false), // 0 cannot cover 40_000
+            (2, Which::A, false),
+            (2, Which::B, false),
+            (3, Which::A, false),
+            (3, Which::B, false),
+        ];
+
+        for (period, which, settles) in schedule {
+            p.period(period);
+            if settles {
+                p.settles(which);
+            } else {
+                p.unaffordable(which);
+            }
+        }
+
+        assert_eq!(p.debited.get(), START);
+        assert_eq!(p.w.vault.balance(&p.user, &p.w.token), 0);
+        assert_eq!(p.w.sub.get_mandate(&p.a).charges_made, 2);
+        assert_eq!(p.w.sub.get_mandate(&p.b).charges_made, 1);
+        let b = p.balances();
+        assert_eq!(b.merchant_a, 2 * (AMOUNT_A - fee(AMOUNT_A)));
+        assert_eq!(b.merchant_b, AMOUNT_B - fee(AMOUNT_B));
+        assert_eq!(b.fee_to, 2 * fee(AMOUNT_A) + fee(AMOUNT_B));
+    }
+
+    /// When the larger debit no longer fits, it fails and moves nothing, and
+    /// the smaller one can still use the remainder in the same period.
+    #[test]
+    fn a_debit_the_balance_cannot_cover_moves_nothing_and_the_smaller_one_still_settles() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.settles(Which::B); // 30_000
+
+        p.period(1);
+        p.unaffordable(Which::B); // 30_000 < 40_000
+        p.settles(Which::A); // exactly 30_000 -> 0
+
+        // The failed attempt did not advance B's schedule: B is still due,
+        // still unaffordable, and A is now not due.
+        assert!(p.w.sub.is_due(&p.b));
+        p.unaffordable(Which::B);
+        p.rejected(Which::A, Error::NotDue);
+
+        p.period(2);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    // ---- double-charge protection ----
+
+    /// Neither mandate can be charged twice in one period, however the calls
+    /// are interleaved, and each rejected repeat leaves every balance as it
+    /// was.
+    #[test]
+    fn neither_mandate_can_be_debited_twice_in_one_period() {
+        let p = pair(START);
+
+        p.settles(Which::A);
+        p.rejected(Which::A, Error::NotDue);
+        p.settles(Which::B);
+        p.rejected(Which::B, Error::NotDue);
+        p.rejected(Which::A, Error::NotDue);
+
+        // One second before the next period, both are still not due.
+        p.w.env.ledger().set_timestamp(T0 + MONTH - 1);
+        p.rejected(Which::B, Error::NotDue);
+        p.rejected(Which::A, Error::NotDue);
+
+        // At the period boundary each is due again, once.
+        p.period(1);
+        p.settles(Which::A); // 30_000 -> 0
+        p.rejected(Which::A, Error::NotDue);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Two debits in the same ledger on a balance that covers either one but
+    /// not both: whichever runs first settles, and the second cannot reach
+    /// the funds the first already consumed.
+    #[test]
+    fn back_to_back_debits_in_one_ledger_cannot_share_funds() {
+        const EITHER: i128 = 50_000;
+        for (first, second) in [(Which::A, Which::B), (Which::B, Which::A)] {
+            let p = pair(EITHER);
+            p.settles(first);
+            p.unaffordable(second);
+            assert_eq!(p.debited.get(), price(first));
+            assert_eq!(
+                p.w.vault.balance(&p.user, &p.w.token),
+                EITHER - price(first)
+            );
+        }
+    }
+
+    /// Funds the subscriber reserved for mandate B are out of mandate A's
+    /// reach even when the total balance would cover A, so A cannot spend
+    /// what B is owed; B then draws its reserve down.
+    #[test]
+    fn a_reserve_for_one_mandate_cannot_be_spent_by_the_other() {
+        let p = pair(START);
+        p.w.vault.set_reserve(&p.user, &p.w.token, &p.b, &AMOUNT_B);
+
+        p.settles(Which::A); // unreserved 60_000 -> 30_000
+        p.period(1);
+        p.settles(Which::A); // unreserved 30_000 -> 0
+
+        p.period(2);
+        // 40_000 is left, all of it B's reserve: enough for A on paper, but
+        // not A's to spend.
+        assert_eq!(p.w.vault.balance(&p.user, &p.w.token), AMOUNT_B);
+        p.unaffordable(Which::A);
+        // Nor can the subscriber pull B's reserve out from under it.
+        assert_eq!(
+            p.w.vault.try_withdraw(&p.user, &p.w.token, &1),
+            Err(Ok(VaultError::InsufficientBalance))
+        );
+        p.assert_invariants();
+
+        p.settles(Which::B); // draws the reserve down to 0
+        assert_eq!(p.w.vault.reserved(&p.user, &p.w.token, &p.b), 0);
+        assert_eq!(p.w.vault.reserved_total(&p.user, &p.w.token), 0);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    // ---- authorization ----
+
+    /// With no signatures at all, neither mandate's charge settles and no
+    /// funds move; restoring the keeper's signature lets the interleaving
+    /// resume where it was.
+    #[test]
+    fn charges_without_the_keepers_signature_move_nothing() {
+        let p = pair(START);
+        p.settles(Which::A);
+
+        p.w.env.mock_auths(&[]);
+        for which in [Which::B, Which::A] {
+            let before = p.balances();
+            let mandate = p.w.sub.get_mandate(&p.id(which));
+            let result = p.w.sub.try_charge(&p.w.keeper, &p.id(which));
+            assert!(
+                matches!(result, Err(Err(_))),
+                "unsigned charge of {which:?} was not rejected by the host: {result:?}"
+            );
+            assert_eq!(p.balances(), before);
+            assert_eq!(p.w.sub.get_mandate(&p.id(which)), mandate);
+        }
+        p.assert_invariants();
+
+        p.w.env.mock_all_auths();
+        p.settles(Which::B);
+        p.period(1);
+        p.settles(Which::A);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Merchant B may settle mandate A, since `charge` is permissionless, but
+    /// it signs only for itself and A's money still goes to merchant A. The
+    /// vault debit is authorized by the subscription contract being its
+    /// direct caller, never by a merchant or subscriber signature.
+    #[test]
+    fn another_merchant_can_settle_a_mandate_but_never_receives_its_funds() {
+        let p = pair(START);
+        let env = &p.w.env;
+
+        for (which, caller) in [
+            (Which::A, p.merchant_b.clone()),
+            (Which::B, p.merchant_a.clone()),
+        ] {
+            let id = p.id(which);
+            env.mock_auths(&[MockAuth {
+                address: &caller,
+                invoke: &MockAuthInvoke {
+                    contract: &p.w.sub.address,
+                    fn_name: "charge",
+                    args: (&caller, &id).into_val(env),
+                    sub_invokes: &[],
+                },
+            }]);
+
+            // `settles_by` checks that the money reached `which`'s own
+            // merchant and that the caller got nothing.
+            let auths = p.settles_by(which, &caller);
+            assert_eq!(
+                auths,
+                std::vec![(
+                    caller.clone(),
+                    AuthorizedInvocation {
+                        function: AuthorizedFunction::Contract((
+                            p.w.sub.address.clone(),
+                            Symbol::new(env, "charge"),
+                            (&caller, id).into_val(env),
+                        )),
+                        sub_invocations: std::vec![],
+                    }
+                )]
+            );
+        }
+
+        let b = p.balances();
+        assert_eq!(b.merchant_a, AMOUNT_A - fee(AMOUNT_A));
+        assert_eq!(b.merchant_b, AMOUNT_B - fee(AMOUNT_B));
+    }
+
+    /// Nobody but the subscription contract can debit the vault, even naming
+    /// a real mandate and holding a valid signature of their own: merchant B
+    /// cannot pull mandate A's price (or B's own) straight out of the vault.
+    #[test]
+    fn vault_debits_that_bypass_the_subscription_contract_are_rejected() {
+        let p = pair(START);
+        let env = &p.w.env;
+        p.settles(Which::A);
+
+        let mut legs = soroban_sdk::Vec::new(env);
+        legs.push_back((p.merchant_b.clone(), AMOUNT_A));
+        env.mock_auths(&[MockAuth {
+            address: &p.merchant_b,
+            invoke: &MockAuthInvoke {
+                contract: &p.w.vault.address,
+                fn_name: "debit_multi_mandate",
+                args: (&p.user, &p.w.token, &p.a, legs.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+        let before = p.balances();
+        assert!(matches!(
+            p.w.vault
+                .try_debit_multi_mandate(&p.user, &p.w.token, &p.a, &legs),
+            Err(Err(_))
+        ));
+        assert_eq!(p.balances(), before);
+
+        env.mock_auths(&[MockAuth {
+            address: &p.merchant_b,
+            invoke: &MockAuthInvoke {
+                contract: &p.w.vault.address,
+                fn_name: "debit_mandate",
+                args: (&p.user, &p.w.token, &p.b, &p.merchant_b, &AMOUNT_B).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(matches!(
+            p.w.vault
+                .try_debit_mandate(&p.user, &p.w.token, &p.b, &p.merchant_b, &AMOUNT_B),
+            Err(Err(_))
+        ));
+        assert_eq!(p.balances(), before);
+        p.assert_invariants();
+
+        // The legitimate path is unaffected and still bounded by the balance.
+        env.mock_all_auths();
+        p.settles(Which::B);
+        p.period(1);
+        p.settles(Which::A);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Merchant B cannot end, pause or cancel mandate A, nor pause charging
+    /// on merchant A's plan, so it cannot interfere with how A draws on the
+    /// shared balance.
+    #[test]
+    fn a_merchant_cannot_end_pause_or_cancel_another_merchants_mandate() {
+        let p = pair(START);
+        let mb = &p.merchant_b;
+
+        assert_eq!(
+            p.w.sub.try_end_mandate(mb, &p.a),
+            Err(Ok(Error::NotMerchant))
+        );
+        assert_eq!(
+            p.w.sub.try_set_paused(mb, &p.a, &true),
+            Err(Ok(Error::NotSubscriber))
+        );
+        assert_eq!(p.w.sub.try_cancel(mb, &p.a), Err(Ok(Error::NotSubscriber)));
+        assert_eq!(
+            p.w.registry
+                .try_set_plan_charges_paused(mb, &p.plan_a, &true),
+            Err(Ok(RegistryError::NotPlanOwner))
+        );
+
+        assert_eq!(p.w.sub.get_mandate(&p.a).status, MandateStatus::Active);
+        p.settles(Which::A);
+        p.settles(Which::B);
+    }
+
+    // ---- failure / lifecycle ----
+
+    /// Closing mandate A mid-sequence, by the subscriber cancelling or by
+    /// merchant A ending it, stops A for good without moving funds, while B
+    /// keeps billing until the balance runs out.
+    #[test]
+    fn closing_one_mandate_mid_sequence_leaves_the_other_billing() {
+        for subscriber_cancels in [true, false] {
+            let p = pair(ROOMY);
+            p.settles(Which::A); // 170_000
+            p.settles(Which::B); // 130_000
+
+            if subscriber_cancels {
+                p.w.sub.cancel(&p.user, &p.a);
+                assert_eq!(p.w.sub.get_mandate(&p.a).status, MandateStatus::Cancelled);
+            } else {
+                p.w.sub.end_mandate(&p.merchant_a, &p.a);
+            }
+            p.assert_invariants();
+
+            for period in 1..=3 {
+                p.period(period);
+                p.rejected(Which::A, Error::MandateNotActive);
+                p.settles(Which::B); // 90_000, 50_000, 10_000
+            }
+            p.period(4);
+            p.rejected(Which::A, Error::MandateNotActive);
+            p.unaffordable(Which::B);
+
+            assert_eq!(p.w.sub.get_mandate(&p.a).charges_made, 1);
+            assert_eq!(p.w.sub.get_mandate(&p.b).charges_made, 4);
+            assert_eq!(p.debited.get(), AMOUNT_A + 4 * AMOUNT_B);
+        }
+    }
+
+    /// A paused mandate A is skipped without moving funds while B bills;
+    /// once resumed, A competes for the balance again and the two together
+    /// still cannot overdraw it.
+    #[test]
+    fn pausing_one_mandate_mid_sequence_skips_it_without_moving_funds() {
+        let p = pair(ROOMY);
+        p.settles(Which::A); // 170_000
+        p.settles(Which::B); // 130_000
+
+        p.w.sub.set_paused(&p.user, &p.a, &true);
+        p.period(1);
+        p.rejected(Which::A, Error::MandateNotActive);
+        p.settles(Which::B); // 90_000
+
+        p.w.sub.set_paused(&p.user, &p.a, &false);
+        p.settles(Which::A); // 60_000, still due from period 1
+
+        p.period(2);
+        p.settles(Which::A); // 30_000
+        p.unaffordable(Which::B);
+        p.period(3);
+        p.settles(Which::A); // 0
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), ROOMY);
+    }
+
+    /// While merchant A has charging paused on its plan, A's charges fail
+    /// with `PlanChargesPaused` and move nothing; B spends the balance in the
+    /// meantime, so when A is resumed it cannot overdraw what is left.
+    #[test]
+    fn a_plan_charge_pause_on_one_mandate_does_not_unlock_extra_spend() {
+        let p = pair(START);
+        p.w.registry
+            .set_plan_charges_paused(&p.merchant_a, &p.plan_a, &true);
+
+        p.rejected(Which::A, Error::PlanChargesPaused);
+        p.settles(Which::B); // 60_000
+        p.period(1);
+        p.rejected(Which::A, Error::PlanChargesPaused);
+        p.settles(Which::B); // 20_000
+
+        p.w.registry
+            .set_plan_charges_paused(&p.merchant_a, &p.plan_a, &false);
+        p.unaffordable(Which::A); // 20_000 < 30_000
+        assert_eq!(p.debited.get(), 2 * AMOUNT_B);
+    }
+
+    /// A top-up mid-sequence funds a mandate that had just failed, exactly
+    /// once: it settles in the same period because the failure never
+    /// advanced its schedule, and it cannot settle a second time.
+    #[test]
+    fn a_top_up_mid_sequence_funds_later_debits_exactly_once() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.settles(Which::B); // 30_000
+
+        p.period(1);
+        p.unaffordable(Which::B);
+        p.top_up(50_000); // 80_000
+        p.settles(Which::B); // 40_000
+        p.rejected(Which::B, Error::NotDue);
+        p.settles(Which::A); // 10_000
+        p.rejected(Which::A, Error::NotDue);
+
+        p.period(2);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START + 50_000 - 10_000);
+    }
+
+    /// Withdrawals interleaved with debits: the subscriber can take back only
+    /// what has not been charged, a withdrawal reduces what later debits can
+    /// reach, and nothing already charged can be reclaimed.
+    #[test]
+    fn withdrawals_mid_sequence_cannot_reclaim_charged_funds_or_overdraw() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.withdraw(20_000); // 50_000
+        p.settles(Which::B); // 10_000
+
+        assert_eq!(
+            p.w.vault.try_withdraw(&p.user, &p.w.token, &10_001),
+            Err(Ok(VaultError::InsufficientBalance))
+        );
+        p.assert_invariants();
+
+        p.period(1);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        p.withdraw(10_000); // 0
+
+        assert_eq!(p.debited.get(), AMOUNT_A + AMOUNT_B);
+        assert_eq!(p.balances().wallet, START + 30_000);
+    }
+}
