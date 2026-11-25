@@ -248,3 +248,28 @@ fn protocol_pause_changed_layout() {
         },
     );
 }
+
+#[test]
+fn committed_revenue_event_excludes_derivable_previous_value() {
+    use soroban_sdk::xdr::{Limits, WriteXdr};
+
+    let env = Env::default();
+    let event = super::CommittedRevenueChanged {
+        plan_id: 7,
+        merchant: address(&env),
+        token: address(&env),
+        new_committed: 12_000,
+        period: 86_400,
+    };
+    // The wire event still carries the plan identity, token, period and new
+    // aggregate; an indexer recovers the old aggregate from its prior state.
+    let encoded = event
+        .to_xdr(&env, &address(&env))
+        .to_xdr(Limits::none())
+        .unwrap();
+    assert!(!encoded.is_empty());
+
+    let spec = super::CommittedRevenueChanged::spec_xdr();
+    assert!(!spec.windows(b"old_committed".len()).any(|w| w == b"old_committed"));
+    assert!(spec.windows(b"new_committed".len()).any(|w| w == b"new_committed"));
+}
