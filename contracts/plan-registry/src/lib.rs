@@ -123,6 +123,7 @@ mod contract {
         MAX_NAME_LEN, MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT,
         MIN_PERIOD, PERSIST_BUMP, PERSIST_THRESHOLD,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Contract implementation for publishing and managing subscription plans.
     #[contract]
@@ -656,10 +657,7 @@ mod contract {
 
         /// `merchant`'s self-declared profile, if one has been set.
         pub fn profile(env: Env, merchant: Address) -> Result<Profile, Error> {
-            env.storage()
-                .persistent()
-                .get(&DataKey::Profile(merchant))
-                .ok_or(Error::ProfileNotFound)
+            load_or_err(&env, &DataKey::Profile(merchant), Error::ProfileNotFound)
         }
 
         /// Deactivate up to `limit` of `merchant`'s plans, starting at position
@@ -818,10 +816,7 @@ mod contract {
         /// The id the next published plan will get. Plans are numbered from 1, so
         /// `next_plan_id() - 1` is the number of plans published so far.
         pub fn next_plan_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
         /// Hand the admin role to another address. Only the current admin may
@@ -845,10 +840,7 @@ mod contract {
 
         /// Address of the contract administrator.
         pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::Admin, Error::NotInitialized)
         }
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
@@ -953,11 +945,8 @@ mod contract {
             new_owner.require_auth();
 
             let proposal_key = DataKey::PlanOwnerProposal(plan_id);
-            let proposed: Address = env
-                .storage()
-                .persistent()
-                .get(&proposal_key)
-                .ok_or(Error::PendingOwnershipNotFound)?;
+            let proposed: Address =
+                load_or_err(&env, &proposal_key, Error::PendingOwnershipNotFound)?;
             if proposed != new_owner {
                 return Err(Error::NotPendingOwner);
             }
@@ -1018,10 +1007,7 @@ mod contract {
         }
 
         fn read_next_plan_id(env: &Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
         fn set_next_plan_id(env: &Env, next: u64) {

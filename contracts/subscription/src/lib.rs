@@ -164,6 +164,7 @@ mod contract {
         MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
         PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -399,11 +400,8 @@ mod contract {
                 return Err(Error::PlanFull);
             }
 
-            let id: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)?;
+            let id: u64 =
+                load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)?;
 
             // Freeze the plan's current grace window into this mandate. The
             // registry is the source of truth, and existing mandates never
@@ -411,11 +409,7 @@ mod contract {
             // mandate was promised (#312).
             let grace_period_secs = Self::read_plan_grace_period(&env, &registry, plan_id)?;
 
-            let fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let fee_bps: u32 = load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             // The registry already caps this, but clamp again here: the mandate's
             // tip must never exceed MAX_KEEPER_BPS even if the registry contract
@@ -1176,19 +1170,19 @@ mod contract {
                 return Err(Error::MandateNotActive);
             }
 
-            let pending_owner: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingMandateOwner(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let pending_owner: Address = load_or_err(
+                &env,
+                &DataKey::PendingMandateOwner(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
             if pending_owner != new_subscriber {
                 return Err(Error::NotProposedOwner);
             }
-            let subscriber_position: u32 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingSubscriberPosition(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let subscriber_position: u32 = load_or_err(
+                &env,
+                &DataKey::PendingSubscriberPosition(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
 
             let old_subscriber = mandate.subscriber.clone();
             Self::index_len(
@@ -1565,11 +1559,8 @@ mod contract {
                 return Err(Error::FeeTooHigh);
             }
 
-            let old_fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let old_fee_bps: u32 =
+                load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
             env.storage()
@@ -2231,18 +2222,12 @@ mod contract {
         /// The id the next opened mandate will get. Mandates are numbered from 1,
         /// so `next_mandate_id() - 1` is the number of mandates opened so far.
         pub fn next_mandate_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)
         }
 
         /// Current protocol fee rate in basis points.
         pub fn fee_bps(env: Env) -> Result<u32, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)
         }
 
         /// Hand the admin role to another address. Only the current admin may
@@ -2330,10 +2315,7 @@ mod contract {
         }
 
         fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&key)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &key, Error::NotInitialized)
         }
 
         /// Read a mandate and refresh its TTL when it is close to expiry (#247).
@@ -2409,9 +2391,7 @@ mod contract {
             let storage = env.storage().persistent();
 
             if position != last_position {
-                let moved_id: u64 = storage
-                    .get(&last_key)
-                    .ok_or(Error::InvalidSubscriberIndex)?;
+                let moved_id: u64 = load_or_err(env, &last_key, Error::InvalidSubscriberIndex)?;
                 if moved_id == mandate_id {
                     return Err(Error::InvalidSubscriberIndex);
                 }
