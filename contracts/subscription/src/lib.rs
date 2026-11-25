@@ -2551,7 +2551,6 @@ mod contract {
                 plan_id,
                 merchant: merchant.clone(),
                 token: token.clone(),
-                old_committed,
                 new_committed,
                 period,
             }
