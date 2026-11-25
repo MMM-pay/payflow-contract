@@ -70,6 +70,8 @@ mod events;
 #[allow(missing_docs)]
 mod interfaces;
 #[allow(missing_docs)]
+mod storage_keys;
+#[allow(missing_docs)]
 mod types;
 
 #[cfg(test)]
