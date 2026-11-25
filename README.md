@@ -102,7 +102,8 @@ subscriber pays.
   A more expensive plan collects the price difference for the part of the
   current period that is still ahead, prorated and rounded in the subscriber's
   favour; a cheaper plan takes effect at the next charge and never refunds
-  anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+  anything. See [Plan Upgrade and Downgrade Semantics](docs/plan-changes.md)
+  and [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
 - A merchant can pause charging for one plan without ending its mandates or
   closing it to new subscribers. Pausing only blocks settlement; resuming
   restores the same mandates.
@@ -143,6 +144,11 @@ See the [event contribution guide](docs/adding-events.md) to add or change a
 typed contract event, test its wire layout and regenerate bindings.
 
 The complete numeric error reference is in [`docs/ERRORS.md`](docs/ERRORS.md), including the trigger condition for every contract error.
+
+Detailed lifecycle guides:
+
+- [`docs/plan-changes.md`](docs/plan-changes.md) — plan upgrade proration, downgrade behaviour, and state transitions for `Subscription::upgrade`
+- [`docs/vault-reserves.md`](docs/vault-reserves.md) — per-mandate vault reserve lifecycle, reserve delta table, and expired vs. cancelled mandate behaviour
 
 ## Architecture decision records
 

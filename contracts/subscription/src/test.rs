@@ -615,6 +615,67 @@ fn a_zero_fee_charge_emits_one_debit() {
 }
 
 #[test]
+fn charge_correctly_handles_zero_fee_bps() {
+    let w = world();
+    let plan_id = w.plan();
+    let min_plan_id = w.plan_priced(payflow_shared::MIN_CHARGE_AMOUNT);
+
+    // Give the fee recipient a non-zero starting balance so we prove it stays
+    // strictly untouched rather than merely remaining zero.
+    w.minter.mint(&w.fee_to, &1_000);
+    let fee_before = w.token_client.balance(&w.fee_to);
+    assert_eq!(fee_before, 1_000);
+
+    w.sub.set_fee_bps(&0);
+    assert_eq!(w.sub.fee_bps(), 0);
+
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let min_id = w
+        .sub
+        .subscribe(&user, &min_plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.get_mandate(&id).fee_bps, 0);
+    assert_eq!(w.sub.get_mandate(&min_id).fee_bps, 0);
+
+    // First charge at full plan price: single debit leg, full amount to merchant.
+    let res1 = w.sub.charge(&w.keeper, &id);
+    assert_eq!(res1.fee, 0);
+    assert_eq!(res1.merchant_amount, PRICE);
+    assert_eq!(res1.charges_made, 1);
+    assert_eq!(vault_debit_event_count(&w.env), 1);
+    assert_eq!(last_event_field_i128(&w.env, "fee"), Some(0));
+    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(PRICE));
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE);
+
+    // Minimum charge amount also settles without panics or underflow.
+    let min_res = w.sub.charge(&w.keeper, &min_id);
+    assert_eq!(min_res.fee, 0);
+    assert_eq!(min_res.merchant_amount, payflow_shared::MIN_CHARGE_AMOUNT);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        PRICE + payflow_shared::MIN_CHARGE_AMOUNT
+    );
+
+    // Second period charge behaves identically.
+    w.advance(MONTH);
+    let res2 = w.sub.charge(&w.keeper, &id);
+    assert_eq!(res2.fee, 0);
+    assert_eq!(res2.merchant_amount, PRICE);
+    assert_eq!(res2.charges_made, 2);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        2 * PRICE + payflow_shared::MIN_CHARGE_AMOUNT
+    );
+    assert_eq!(
+        w.vault.balance(&user, &w.token),
+        100_000 - 2 * PRICE - payflow_shared::MIN_CHARGE_AMOUNT
+    );
+}
+
+#[test]
 fn a_tipped_charge_still_pays_three_payees() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
