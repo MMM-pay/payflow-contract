@@ -49,6 +49,7 @@ declare -A allowlist_vault=(
     [deposit_cap]=1
     [spend_limit]=1
     [balance]=1
+    [top_up_target]=1  # view: intentionally permissionless
     [allowlist_enabled]=1
     [token_allowed]=1
     [can_deposit]=1
