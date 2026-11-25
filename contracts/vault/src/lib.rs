@@ -28,6 +28,7 @@
 //! | `debit` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `debit_split` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `balance` | 0 | 0 | 1 (Balance) | 0 | |
+//! | `top_up_target` | 0 | 0 | 3 (Balance, ReservedTotal, Reserved) | 0 | |
 //! | `allowlist_enabled` | 1 (AllowlistEnabled) | 0 | 0 | 0 | |
 //! | `token_allowed` | 0 | 0 | 1 (TokenAllowed) | 0 | |
 //! | `can_deposit` | 1 (AllowlistEnabled) | 0 | 1 (TokenAllowed) | 0 | |
@@ -770,6 +771,36 @@ mod contract {
         /// not. See `unreserved_balance` for the part outside every reserve.
         pub fn balance(env: Env, user: Address, token: Address) -> i128 {
             Self::read_balance(&env, &user, &token)
+        }
+
+        /// Amount the subscriber would need to deposit for `periods` charges
+        /// of `charge_amount` each under `mandate_id`.
+        ///
+        /// The available amount includes the mandate's own reserve and
+        /// unreserved funds, but excludes reserves belonging to other mandates.
+        /// Pass the mandate's frozen per-charge amount. This view does not
+        /// change state or check the mandate's lifecycle or charge caps.
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidAmount`] if `charge_amount` is not positive,
+        /// or [`Error::AmountOverflow`] if the target total overflows `i128`.
+        pub fn top_up_target(
+            env: Env,
+            user: Address,
+            token: Address,
+            mandate_id: u64,
+            charge_amount: i128,
+            periods: u32,
+        ) -> Result<i128, Error> {
+            if charge_amount <= 0 {
+                return Err(Error::InvalidAmount);
+            }
+
+            let target = charge_amount
+                .checked_mul(i128::from(periods))
+                .ok_or(Error::AmountOverflow)?;
+            let available = Self::spendable(&env, &user, &token, Some(mandate_id));
+            Ok(target.saturating_sub(available).max(0))
         }
 
         /// Whether the token allowlist is enforced. Off unless the admin turned it

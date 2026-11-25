@@ -507,6 +507,57 @@ fn balance_of_unknown_user_is_zero() {
 }
 
 #[test]
+fn top_up_target_uses_only_funds_available_to_the_mandate() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+    h.vault.set_reserve(&user, &h.token, &77, &300);
+    h.vault.set_reserve(&user, &h.token, &88, &400);
+
+    assert_eq!(h.vault.top_up_target(&user, &h.token, &77, &250, &3), 150);
+}
+
+#[test]
+fn top_up_target_is_zero_when_funds_already_cover_requested_periods() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    assert_eq!(h.vault.top_up_target(&user, &h.token, &77, &250, &3), 0);
+}
+
+#[test]
+fn top_up_target_is_zero_for_zero_periods() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert_eq!(h.vault.top_up_target(&user, &h.token, &77, &250, &0), 0);
+}
+
+#[test]
+fn top_up_target_rejects_non_positive_charge_amount() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert_eq!(
+        h.vault.try_top_up_target(&user, &h.token, &77, &0, &1),
+        Err(Ok(Error::InvalidAmount))
+    );
+}
+
+#[test]
+fn top_up_target_reports_total_overflow() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    assert_eq!(
+        h.vault
+            .try_top_up_target(&user, &h.token, &77, &i128::MAX, &2),
+        Err(Ok(Error::AmountOverflow))
+    );
+}
+
+#[test]
 fn constructor_sets_admin() {
     let h = setup();
     // The constructor ran at registration, so the vault is already configured.
@@ -2624,6 +2675,9 @@ fn every_vault_view_leaves_storage_events_and_auth_untouched() {
     assert_read_only(env, "reserved", || v.reserved(&user, t, &7));
     assert_read_only(env, "reserved_total", || v.reserved_total(&user, t));
     assert_read_only(env, "unreserved_balance", || v.unreserved_balance(&user, t));
+    assert_read_only(env, "top_up_target", || {
+        v.top_up_target(&user, t, &7, &1_000, &3)
+    });
     assert_read_only(env, "spend_limit", || v.spend_limit(&user, t));
     // can_debit evaluates the spend window; checking it must not consume it.
     assert_read_only(env, "can_debit (reserved mandate)", || {
@@ -2650,6 +2704,9 @@ fn vault_views_need_no_signature() {
     assert_read_only(env, "balance (unsigned)", || v.balance(&user, t));
     assert_read_only(env, "unreserved_balance (unsigned)", || {
         v.unreserved_balance(&user, t)
+    });
+    assert_read_only(env, "top_up_target (unsigned)", || {
+        v.top_up_target(&user, t, &7, &1_000, &3)
     });
     assert_read_only(env, "can_debit (unsigned)", || {
         v.can_debit(&user, t, &7, &100)
