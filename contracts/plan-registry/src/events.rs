@@ -12,8 +12,8 @@ pub struct PlanCreated {
     /// Unique ID allocated for the newly published plan.
     #[topic]
     pub plan_id: u64,
-    /// Token contract address this plan is denominated in.
-    pub token: Address,
+    /// SEP-41 token contract addresses accepted by the plan.
+    pub accepted_tokens: Vec<Address>,
     /// Amount charged per billing period.
     pub amount: i128,
     /// Billing period in seconds.

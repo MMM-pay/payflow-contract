@@ -34,6 +34,7 @@ fn every_error_code_is_in_the_plan_registry_range() {
         (Error::PendingAdminNotFound, 25),
         (Error::NotPendingAdmin, 26),
         (Error::InvalidToken, 25),
+        (Error::InvalidAcceptedTokens, 25),
     ];
 
     let mut seen = std::vec::Vec::new();

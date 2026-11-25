@@ -1,6 +1,6 @@
 //! Data types and storage keys for the plan registry contract.
 
-use soroban_sdk::{contracttype, Address, String, Symbol};
+use soroban_sdk::{contracttype, Address, String, Symbol, Vec};
 
 /// `Plan` is defined once in `payflow-shared` and used by both this contract
 /// and the subscription contract that decodes it, so the two cannot drift.
@@ -22,8 +22,8 @@ pub use payflow_shared::{Plan, PlanChargeTerms};
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanParams {
-    /// Token contract address this plan is denominated in.
-    pub token: Address,
+    /// SEP-41 token contract addresses this plan accepts.
+    pub accepted_tokens: Vec<Address>,
     /// Amount charged per billing period, in the token's smallest unit.
     pub amount: i128,
     /// Billing period in seconds. At least `MIN_PERIOD`.
@@ -125,8 +125,8 @@ pub struct UpgradeRecord {
     pub wasm_hash: soroban_sdk::BytesN<32>,
 }
 
-/// One row of a plan listing (#288). Carries the settlement `token` alongside
-/// the price so a catalogue mixing tokens is unambiguous without a follow-up
+/// One row of a plan listing (#288). Carries the accepted tokens alongside the
+/// price so a catalogue can show every settlement option without a follow-up
 /// `get_plan` per row.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,8 +137,8 @@ pub struct PlanListing {
     pub merchant: Address,
     /// Display name.
     pub name: String,
-    /// Settlement token contract the plan is priced and charged in.
-    pub token: Address,
+    /// SEP-41 tokens accepted by the plan.
+    pub accepted_tokens: Vec<Address>,
     /// Price per period in the token's smallest unit.
     pub amount: i128,
     /// Billing period in seconds.

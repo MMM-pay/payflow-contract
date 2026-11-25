@@ -28,7 +28,7 @@ integer.
 ## Decision
 
 `upgrade(subscriber, mandate_id, new_plan_id)` moves a mandate onto another
-plan of the same merchant, denominated in the same token.
+plan of the same merchant that accepts the mandate's frozen token.
 
 - **The amount collected now is the price difference for the part of the
   current period that is still ahead:**
@@ -58,9 +58,10 @@ plan of the same merchant, denominated in the same token.
   the new plan is clamped to `MAX_KEEPER_BPS`. The tip is not paid on the
   upgrade itself: no charge was settled, so nobody earned it.
 
-- **The plan must be active, in the same token, and from the same merchant.**
-  A mandate's token is frozen when it is opened, and its merchant decides who
-  is paid and who may refund; moving between merchants is a cancel and a new
+- **The plan must be active, accept the mandate's frozen token, and belong to
+  the same merchant.** The token is selected by the subscriber when the mandate
+  is opened; a merchant cannot change it later. The merchant decides who is
+  paid and who may refund, so moving between merchants is a cancel and a new
   subscription, not an upgrade.
 
 ## Worked Examples

@@ -103,6 +103,16 @@ export const Error = {
    * A bulk reserve update contains the same mandate more than once.
    */
   3020 : { message: "DuplicateReserve" }
+   * The reserve would take the subscriber's total reserve above the cap the
+   * vault was deployed with (#348). A minimum free balance therefore stays
+   * withdrawable no matter how many mandates the subscriber reserves for.
+   */
+  3018 : { message: "ReserveCapExceeded" },
+  /**
+   * `__constructor` was given a reserve cap above 10,000 basis points
+   * (100% of the balance), which is not a meaningful cap (#348).
+   */
+  3019 : { message: "InvalidReserveCap" }
 }
 
 /**

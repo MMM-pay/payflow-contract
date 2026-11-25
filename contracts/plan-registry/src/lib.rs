@@ -244,11 +244,15 @@ mod contract {
         /// [`Error::NotInitialized`] if the contract or subscription address
         /// has not been initialized, or [`Error::PlanIdOverflow`] if the next
         /// plan ID would exceed `u64`.
+        /// [`Error::NotInitialized`] if the contract has not been initialized, or
+        /// [`Error::InvalidAcceptedTokens`] if `accepted_tokens` is empty or
+        /// contains duplicates, [`Error::PlanIdOverflow`] if the next plan ID
+        /// would exceed `u64`.
         #[allow(clippy::too_many_arguments)]
         pub fn create_plan(
             env: Env,
             merchant: Address,
-            token: Address,
+            accepted_tokens: Vec<Address>,
             amount: i128,
             period: u64,
             name: String,
@@ -268,7 +272,7 @@ mod contract {
             }
 
             let params = PlanParams {
-                token,
+                accepted_tokens,
                 amount,
                 period,
                 name,
@@ -706,7 +710,8 @@ mod contract {
         /// [`Error::NotPlanOwner`] if `merchant` does not own either plan,
         /// [`Error::SelfSuccessor`] if `successor_id == plan_id`,
         /// [`Error::SuccessorNotFound`] if the replacement plan does not exist, or
-        /// [`Error::SuccessorTokenMismatch`] if the plans use different tokens.
+        /// [`Error::SuccessorTokenMismatch`] if the plans have no accepted
+        /// token in common.
         pub fn set_successor(
             env: Env,
             merchant: Address,
@@ -731,7 +736,7 @@ mod contract {
             if successor.merchant != merchant {
                 return Err(Error::NotPlanOwner);
             }
-            if successor.token != plan.token {
+            if !Self::plans_share_token(&plan, &successor) {
                 return Err(Error::SuccessorTokenMismatch);
             }
 
@@ -911,7 +916,7 @@ mod contract {
             out
         }
 
-        /// How many plans are priced in `token`, active or not.
+        /// How many plans accept `token`, active or not.
         pub fn token_plan_count(env: Env, token: Address) -> u32 {
             env.storage()
                 .persistent()
@@ -919,7 +924,7 @@ mod contract {
                 .unwrap_or(0)
         }
 
-        /// Ids of the plans priced in `token`, oldest first, starting at
+        /// Ids of the plans accepting `token`, oldest first, starting at
         /// position `start`. Returns at most `min(limit, MAX_PAGE)` ids.
         pub fn token_plans(env: Env, token: Address, start: u32, limit: u32) -> Vec<u64> {
             let len = Self::token_plan_count(env.clone(), token.clone());
@@ -939,7 +944,7 @@ mod contract {
 
         /// Listing rows for the plans `merchant` published, in the same order
         /// and paging as [`merchant_plans`](Self::merchant_plans). Each row
-        /// names the plan's settlement token (#288).
+        /// carries the plan's complete accepted-token list (#288).
         pub fn merchant_plan_listings(
             env: Env,
             merchant: Address,
@@ -950,7 +955,7 @@ mod contract {
             Self::listings(&env, ids)
         }
 
-        /// Listing rows for the plans priced in `token`, in the same order and
+        /// Listing rows for the plans accepting `token`, in the same order and
         /// paging as [`token_plans`](Self::token_plans) (#288).
         pub fn token_plan_listings(
             env: Env,
@@ -1173,7 +1178,7 @@ mod contract {
                         id: plan.id,
                         merchant: plan.merchant,
                         name: plan.name,
-                        token: plan.token,
+                        accepted_tokens: plan.accepted_tokens,
                         amount: plan.amount,
                         period: plan.period,
                         active: plan.active,
@@ -1245,7 +1250,29 @@ mod contract {
             if params.referral_bps > MAX_REFERRAL_BPS {
                 return Err(Error::ReferralBpsTooHigh);
             }
+            if params.accepted_tokens.is_empty() {
+                return Err(Error::InvalidAcceptedTokens);
+            }
+            for i in 0..params.accepted_tokens.len() {
+                let token = params.accepted_tokens.get(i).unwrap();
+                for j in 0..i {
+                    if params.accepted_tokens.get(j).unwrap() == token {
+                        return Err(Error::InvalidAcceptedTokens);
+                    }
+                }
+            }
             Ok(())
+        }
+
+        fn plans_share_token(first: &Plan, second: &Plan) -> bool {
+            for first_token in first.accepted_tokens.iter() {
+                for second_token in second.accepted_tokens.iter() {
+                    if first_token == second_token {
+                        return true;
+                    }
+                }
+            }
+            false
         }
 
         /// Persist one validated plan and emit its `PlanCreated` event.
@@ -1260,7 +1287,7 @@ mod contract {
                 payout: payout.clone(),
                 name: params.name.clone(),
                 description: params.description.clone(),
-                token: params.token.clone(),
+                accepted_tokens: params.accepted_tokens.clone(),
                 amount: params.amount,
                 period: params.period,
                 active: true,
@@ -1289,21 +1316,20 @@ mod contract {
 
             let p = env.storage().persistent();
 
-            // One entry per position in the per-token index, so publishing a plan
-            // costs constant time and storage footprint regardless of how many
-            // plans already use the token.
-            let token_count_key = DataKey::TokenPlanCount(params.token.clone());
-            let token_count: u32 = p.get(&token_count_key).unwrap_or(0);
-            let token_slot_key = DataKey::TokenPlan(params.token.clone(), token_count);
-            p.set(&token_slot_key, &id);
-            p.extend_ttl(&token_slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
-            p.set(&token_count_key, &(token_count + 1));
-            p.extend_ttl(&token_count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            for token in params.accepted_tokens.iter() {
+                let token_count_key = DataKey::TokenPlanCount(token.clone());
+                let token_count: u32 = p.get(&token_count_key).unwrap_or(0);
+                let token_slot_key = DataKey::TokenPlan(token.clone(), token_count);
+                p.set(&token_slot_key, &id);
+                p.extend_ttl(&token_slot_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                p.set(&token_count_key, &(token_count + 1));
+                p.extend_ttl(&token_count_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            }
 
             PlanCreated {
                 merchant: merchant.clone(),
                 plan_id: id,
-                token: params.token.clone(),
+                accepted_tokens: params.accepted_tokens.clone(),
                 amount: params.amount,
                 period: params.period,
                 name: params.name.clone(),

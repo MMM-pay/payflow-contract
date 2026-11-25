@@ -168,6 +168,8 @@ pub enum Error {
     /// The subscriber's unreserved vault balance cannot cover one period's
     /// charge for a new mandate.
     InsufficientBalance = 2041,
+    /// The selected token is not accepted by the requested plan.
+    TokenNotAccepted = 2041,
 }
 
 impl From<Error> for ErrorCode {

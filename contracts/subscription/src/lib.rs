@@ -300,8 +300,9 @@ mod contract {
 
         /// Open a mandate against a published plan.
         ///
-        /// The plan's terms are copied into the mandate here and never re-read, so
-        /// a merchant cannot change the price of a subscription after the fact.
+        /// The plan's terms and the subscriber's selected token are copied into
+        /// the mandate here and never re-read, so a merchant cannot change the
+        /// price or settlement token of a subscription after the fact.
         /// The first charge is due immediately: this is `subscribe_at(..., now)`.
         ///
         /// # Auth
@@ -314,12 +315,15 @@ mod contract {
         /// Returns [`Error::InvalidMaxTotal`] if `max_total < 0`,
         /// [`Error::MinimumCommitmentNotMet`] if `max_charges` or `max_total`
         /// would let this mandate end before its plan's commitment,
+        /// Returns [`Error::TokenNotAccepted`] if `token` is not accepted by the
+        /// plan, [`Error::InvalidMaxTotal`] if `max_total < 0`,
         /// [`Error::PlanInactive`] if the target plan is inactive, or
         /// [`Error::NotInitialized`] if configuration keys are missing.
         pub fn subscribe(
             env: Env,
             subscriber: Address,
             plan_id: u64,
+            token: Address,
             max_charges: u32,
             max_total: i128,
             referrer: Option<Address>,
@@ -329,6 +333,7 @@ mod contract {
                 env,
                 subscriber,
                 plan_id,
+                token,
                 max_charges,
                 max_total,
                 now,
@@ -405,10 +410,12 @@ mod contract {
         ///
         /// # Errors
         /// As `subscribe`, plus any error the vault's `deposit` can return.
+        #[allow(clippy::too_many_arguments)]
         pub fn subscribe_with_deposit(
             env: Env,
             subscriber: Address,
             plan_id: u64,
+            token: Address,
             max_charges: u32,
             max_total: i128,
             deposit: i128,
@@ -419,10 +426,13 @@ mod contract {
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
             let plan = Self::read_plan(&env, &registry, plan_id)?;
+            if !Self::plan_accepts_token(&plan, &token) {
+                return Err(Error::TokenNotAccepted);
+            }
 
             let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
             if VaultClient::new(&env, &vault_addr)
-                .try_deposit(&subscriber, &plan.token, &deposit)
+                .try_deposit(&subscriber, &token, &deposit)
                 .is_err()
             {
                 return Err(Error::VaultCallFailed);
@@ -433,6 +443,7 @@ mod contract {
                 env,
                 subscriber,
                 plan_id,
+                token,
                 max_charges,
                 max_total,
                 now,
@@ -464,12 +475,16 @@ mod contract {
         /// [`Error::InvalidMaxTotal`] if `max_total < 0`,
         /// [`Error::MinimumCommitmentNotMet`] if `max_charges` or `max_total`
         /// would let this mandate end before its plan's commitment, [`Error::PlanInactive`]
+        /// [`Error::TokenNotAccepted`] if `token` is not accepted by the plan,
+        /// [`Error::InvalidMaxTotal`] if `max_total < 0`, [`Error::PlanInactive`]
         /// if the target plan is inactive, or [`Error::NotInitialized`] if
         /// configuration keys are missing.
+        #[allow(clippy::too_many_arguments)]
         pub fn subscribe_at(
             env: Env,
             subscriber: Address,
             plan_id: u64,
+            token: Address,
             max_charges: u32,
             max_total: i128,
             start: u64,
@@ -481,6 +496,7 @@ mod contract {
                 env,
                 subscriber,
                 plan_id,
+                token,
                 max_charges,
                 max_total,
                 start,
@@ -500,6 +516,7 @@ mod contract {
             env: Env,
             subscriber: Address,
             plan_id: u64,
+            token: Address,
             max_charges: u32,
             max_total: i128,
             start: u64,
@@ -530,6 +547,9 @@ mod contract {
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
             let plan = Self::read_plan(&env, &registry, plan_id)?;
+            if !Self::plan_accepts_token(&plan, &token) {
+                return Err(Error::TokenNotAccepted);
+            }
 
             // A plan that is switched off, or whose availability window has
             // passed, accepts no new subscribers. Existing mandates never
@@ -613,7 +633,7 @@ mod contract {
                 subscriber: subscriber.clone(),
                 plan_id,
                 merchant: plan.merchant.clone(),
-                token: plan.token.clone(),
+                token: token.clone(),
                 amount: plan.amount,
                 period: plan.period,
                 created_at: now,
@@ -1410,7 +1430,7 @@ mod contract {
             if !plan.active {
                 return Err(Error::PlanInactive);
             }
-            if plan.token != mandate.token {
+            if !Self::plan_accepts_token(&plan, &mandate.token) {
                 return Err(Error::DifferentToken);
             }
             if plan.merchant != mandate.merchant {
@@ -2704,6 +2724,10 @@ mod contract {
         /// Returns 0 if the plan has no active mandates or does not exist.
         pub fn plan_committed_revenue(env: Env, plan_id: u64) -> i128 {
             Self::read_committed_revenue(&env, plan_id)
+        /// Committed revenue per period for `plan_id` and `token`, normalized to
+        /// the plan's billing period. Returns 0 if no active mandates use the token.
+        pub fn plan_committed_revenue(env: Env, plan_id: u64, token: Address) -> i128 {
+            Self::read_committed_revenue(&env, plan_id, &token)
         }
 
         /// Committed amount per period for `plan_id`, normalized to that plan's
@@ -3257,6 +3281,12 @@ mod contract {
             }
         }
 
+        fn plan_accepts_token(plan: &Plan, token: &Address) -> bool {
+            plan.accepted_tokens
+                .iter()
+                .any(|accepted| accepted == *token)
+        }
+
         /// Fails with [`Error::ProtocolPaused`] while the admin's global pause
         /// is on (#285). Called first, after authorization, by every entry point
         /// that opens a mandate or moves money into the billing flow.
@@ -3536,10 +3566,10 @@ mod contract {
         }
 
         /// Read the stored committed revenue per period for a plan.
-        fn read_committed_revenue(env: &Env, plan_id: u64) -> i128 {
+        fn read_committed_revenue(env: &Env, plan_id: u64, token: &Address) -> i128 {
             env.storage()
                 .persistent()
-                .get(&DataKey::PlanCommittedRevenue(plan_id))
+                .get(&DataKey::PlanCommittedRevenue(plan_id, token.clone()))
                 .unwrap_or(0)
         }
 
@@ -3553,12 +3583,12 @@ mod contract {
             period: u64,
             new_committed: i128,
         ) {
-            let old_committed = Self::read_committed_revenue(env, plan_id);
+            let old_committed = Self::read_committed_revenue(env, plan_id, token);
             if old_committed == new_committed {
                 return;
             }
 
-            let key = DataKey::PlanCommittedRevenue(plan_id);
+            let key = DataKey::PlanCommittedRevenue(plan_id, token.clone());
             let p = env.storage().persistent();
             p.set(&key, &new_committed);
             p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -3606,7 +3636,6 @@ mod contract {
             period: u64,
         ) {
             let len = Self::index_len(env, DataKey::PlanMandateCount(plan_id));
-            let mut total: i128 = 0;
             let now = env.ledger().timestamp();
             for i in 0..len.min(MAX_PAGE) {
                 let slot_key = DataKey::PlanMandate(plan_id, i);
@@ -3639,6 +3668,45 @@ mod contract {
             }
 
             Self::write_committed_revenue(env, plan_id, merchant, token, period, total);
+            for token in plan.accepted_tokens.iter() {
+                let mut total: i128 = 0;
+                for i in 0..len.min(MAX_PAGE) {
+                    let slot_key = DataKey::PlanMandate(plan_id, i);
+                    let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot_key)
+                    else {
+                        continue;
+                    };
+                    let Some(mandate) = Self::read_mandate_opt(env, mandate_id) else {
+                        continue;
+                    };
+                    if mandate.token != token
+                        || !super::lifecycle::active_at(&mandate, now)
+                        || mandate.period == 0
+                    {
+                        continue;
+                    }
+                    let contribution = if mandate.period == plan.period {
+                        mandate.amount
+                    } else {
+                        mandate
+                            .amount
+                            .checked_mul(i128::from(plan.period))
+                            .ok_or(Error::AmountOverflow)
+                            .unwrap_or(0)
+                            / i128::from(mandate.period)
+                    };
+                    total = total.checked_add(contribution).unwrap_or(total);
+                }
+
+                Self::write_committed_revenue(
+                    env,
+                    plan_id,
+                    &plan.merchant,
+                    &token,
+                    plan.period,
+                    total,
+                );
+            }
         }
 
         fn index_len(env: &Env, count_key: DataKey) -> u32 {
