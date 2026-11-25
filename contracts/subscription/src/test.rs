@@ -8133,3 +8133,750 @@ mod interleaved_mandates {
         assert_eq!(p.balances().wallet, START + 30_000);
     }
 }
+
+// ---------------------------------------------------------------------------
+// #244: plan and mandate ids are reproducible given the same call sequence
+// ---------------------------------------------------------------------------
+
+/// Plan and mandate IDs must come out the same every time the same call
+/// sequence runs, because generated bindings, indexers and their tests key on
+/// them.
+///
+/// Both IDs are plain global counters: not hashes, not random, and not scoped
+/// per merchant, subscriber or plan.
+/// - Plan IDs come from the registry's `NextPlanId` (instance storage, starts
+///   at 1). `create_plan` and `create_plans` read it only after checking the
+///   merchant's auth and validating every plan.
+/// - Mandate IDs come from the subscription contract's `NextMandateId`
+///   (instance storage, starts at 1). The one creation path shared by
+///   `subscribe`, `subscribe_at` and `subscribe_with_deposit` reads it only
+///   after every check has passed.
+///
+/// A rejected call is rolled back whole by the host, so it must never consume
+/// an ID. These tests prove it by slipping failing and unauthorized creates
+/// between the steps of a fixed sequence and checking that the IDs that follow
+/// are exactly the ones a clean run assigns.
+mod deterministic_ids {
+    use super::*;
+    use payflow_plan_registry::{Error as RegistryError, PlanParams};
+    use soroban_sdk::testutils::{AuthorizedFunction, AuthorizedInvocation};
+    use soroban_sdk::{InvokeError, Val};
+
+    /// Ledger timestamp every run is pinned to.
+    const T0: u64 = 1_000_000;
+    /// Ledger sequence every run is pinned to.
+    const SEQ: u32 = 100;
+    /// What each subscriber holds in the vault, and again in its wallet.
+    const FUNDING: i128 = 1_000_000;
+    /// A plan ID no run ever reaches.
+    const MISSING_PLAN: u64 = 999;
+
+    // GOLDEN VALUES. Generated bindings, indexers and their fixtures rely on
+    // these exact IDs for this call sequence. A change that shifts any of them
+    // is a breaking change for every consumer of the IDs, so do not edit them
+    // just to make this test pass.
+
+    /// Plan IDs in creation order: A's plan, B's plan, then A's batch of two.
+    const GOLDEN_PLANS: [u64; 4] = [1, 2, 3, 4];
+    /// `(mandate ID, plan ID)` in creation order.
+    const GOLDEN_MANDATES: [(u64, u64); 5] = [(1, 1), (2, 1), (3, 2), (4, 3), (5, 4)];
+    /// The next IDs each contract will hand out once the sequence is done.
+    const GOLDEN_NEXT_PLAN_ID: u64 = 5;
+    const GOLDEN_NEXT_MANDATE_ID: u64 = 6;
+
+    type TryId<E> = Result<Result<u64, soroban_sdk::Error>, Result<E, InvokeError>>;
+
+    /// Calls slipped in between the steps of the sequence. Every one of them
+    /// must fail and leave both counters where they were.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Noise {
+        None,
+        /// Creates the contracts reject: bad input, a missing, closed or full
+        /// plan, a paused protocol, or a deposit the wallet cannot cover.
+        Failures,
+        /// Creates without the merchant's or subscriber's signature.
+        Unauthorized,
+    }
+
+    /// Everything one run assigned, as plain values that compare across
+    /// `Env`s. Addresses are read back from the stored plan and mandate
+    /// records as `ScVal`s, so comparing two runs also proves each ID points
+    /// at the same record in both.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Ids {
+        /// `(plan ID, merchant)` in creation order.
+        plans: std::vec::Vec<(u64, ScVal)>,
+        /// `(mandate ID, plan ID, subscriber, merchant)` in creation order.
+        mandates: std::vec::Vec<(u64, u64, ScVal, ScVal)>,
+        next_plan_id: u64,
+        next_mandate_id: u64,
+    }
+
+    impl Ids {
+        fn plan_ids(&self) -> std::vec::Vec<u64> {
+            self.plans.iter().map(|(id, _)| *id).collect()
+        }
+
+        fn mandate_ids(&self) -> std::vec::Vec<(u64, u64)> {
+            self.mandates
+                .iter()
+                .map(|(id, plan, _, _)| (*id, *plan))
+                .collect()
+        }
+    }
+
+    struct Run {
+        w: World<'static>,
+        merchant_a: Address,
+        merchant_b: Address,
+        u1: Address,
+        u2: Address,
+        /// An account that is never authorized for anything.
+        outsider: Address,
+        plans: std::vec::Vec<u64>,
+        mandates: std::vec::Vec<u64>,
+    }
+
+    fn sc(env: &Env, address: &Address) -> ScVal {
+        let val: Val = address.into_val(env);
+        ScVal::try_from_val(env, &val).unwrap()
+    }
+
+    /// A fresh `Env` with the three contracts deployed, the ledger pinned to
+    /// `T0` / `SEQ`, and every account the sequence uses created up front in
+    /// the same order whatever noise follows, so generated addresses line up
+    /// across runs.
+    fn fresh() -> Run {
+        let w = world();
+        w.env.ledger().with_mut(|l| {
+            l.timestamp = T0;
+            l.sequence_number = SEQ;
+        });
+        let merchant_a = w.merchant.clone();
+        let merchant_b = Address::generate(&w.env);
+        let outsider = Address::generate(&w.env);
+        let u1 = w.subscriber(FUNDING);
+        let u2 = w.subscriber(FUNDING);
+        Run {
+            w,
+            merchant_a,
+            merchant_b,
+            u1,
+            u2,
+            outsider,
+            plans: std::vec::Vec::new(),
+            mandates: std::vec::Vec::new(),
+        }
+    }
+
+    /// The fixed call sequence, with `noise` slipped in before every create
+    /// and once more at the end:
+    ///
+    /// 1. merchant A publishes a plan, then merchant B publishes one;
+    /// 2. A publishes two more in one `create_plans` batch, the second capped
+    ///    at one subscriber;
+    /// 3. u1 and u2 subscribe to A's first plan, and u1 to B's plan;
+    /// 4. B closes its plan to new sign-ups;
+    /// 5. u2 schedules a mandate on A's third plan with `subscribe_at`;
+    /// 6. u1 takes the only seat on A's capped plan with
+    ///    `subscribe_with_deposit`.
+    fn run(noise: Noise) -> Run {
+        let mut r = fresh();
+        let (a, b) = (r.merchant_a.clone(), r.merchant_b.clone());
+        let (u1, u2) = (r.u1.clone(), r.u2.clone());
+
+        r.plan_noise(noise);
+        let p1 = r.publish(&a, 10_000);
+        r.plan_noise(noise);
+        let p2 = r.publish(&b, 20_000);
+        r.plan_noise(noise);
+        let batch = r.w.registry.create_plans(
+            &a,
+            &soroban_sdk::vec![&r.w.env, r.params(30_000, 0), r.params(40_000, 1)],
+        );
+        r.plans.extend(batch.iter());
+        let (p3, p4) = (batch.get(0).unwrap(), batch.get(1).unwrap());
+
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u1, p1);
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u2, p1);
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u1, p2);
+
+        r.w.registry.set_plan_active(&b, &p2, &false);
+        if noise == Noise::Failures {
+            r.closed_plan_failures(p2);
+        }
+
+        r.mandate_noise(noise, p1);
+        let m4 = r.w.sub.subscribe_at(&u2, &p3, &0, &0, &(T0 + WEEK), &None);
+        r.mandates.push(m4);
+        r.mandate_noise(noise, p1);
+        let m5 =
+            r.w.sub
+                .subscribe_with_deposit(&u1, &p4, &0, &0, &10_000, &None);
+        r.mandates.push(m5);
+        if noise == Noise::Failures {
+            r.full_plan_failures(p4);
+        }
+
+        r.plan_noise(noise);
+        r.mandate_noise(noise, p1);
+        r
+    }
+
+    impl Run {
+        fn ids(&self) -> Ids {
+            let env = &self.w.env;
+            Ids {
+                plans: self
+                    .plans
+                    .iter()
+                    .map(|id| (*id, sc(env, &self.w.registry.get_plan(id).merchant)))
+                    .collect(),
+                mandates: self
+                    .mandates
+                    .iter()
+                    .map(|id| {
+                        let m = self.w.sub.get_mandate(id);
+                        (*id, m.plan_id, sc(env, &m.subscriber), sc(env, &m.merchant))
+                    })
+                    .collect(),
+                next_plan_id: self.w.registry.next_plan_id(),
+                next_mandate_id: self.w.sub.next_mandate_id(),
+            }
+        }
+
+        fn params(&self, amount: i128, max_subscribers: u32) -> PlanParams {
+            let env = &self.w.env;
+            PlanParams {
+                token: self.w.token.clone(),
+                amount,
+                period: MONTH,
+                name: String::from_str(env, "Plan"),
+                description: String::from_str(env, ""),
+                keeper_bps: 0,
+                category: Symbol::new(env, ""),
+                terms_uri: String::from_str(env, ""),
+                available_until: 0,
+                referral_bps: 0,
+                payout: None,
+                max_subscribers,
+            }
+        }
+
+        /// `create_plan`'s arguments, for building a `MockAuth` that matches
+        /// `try_publish` exactly.
+        fn plan_args(
+            &self,
+            merchant: &Address,
+            amount: i128,
+            period: u64,
+        ) -> soroban_sdk::Vec<Val> {
+            let env = &self.w.env;
+            (
+                merchant,
+                &self.w.token,
+                &amount,
+                &period,
+                &String::from_str(env, "Plan"),
+                &String::from_str(env, ""),
+                &0u32,
+                &Symbol::new(env, ""),
+                &String::from_str(env, ""),
+                &0u64,
+                &0u32,
+                &None::<Address>,
+                &0u32,
+            )
+                .into_val(env)
+        }
+
+        fn try_publish(
+            &self,
+            merchant: &Address,
+            amount: i128,
+            period: u64,
+        ) -> TryId<RegistryError> {
+            let env = &self.w.env;
+            self.w.registry.try_create_plan(
+                merchant,
+                &self.w.token,
+                &amount,
+                &period,
+                &String::from_str(env, "Plan"),
+                &String::from_str(env, ""),
+                &0,
+                &Symbol::new(env, ""),
+                &String::from_str(env, ""),
+                &0u64,
+                &0u32,
+                &None::<Address>,
+                &0u32,
+            )
+        }
+
+        fn publish(&mut self, merchant: &Address, amount: i128) -> u64 {
+            let id = self.try_publish(merchant, amount, MONTH).unwrap().unwrap();
+            self.plans.push(id);
+            id
+        }
+
+        fn try_subscribe(&self, user: &Address, plan_id: u64) -> TryId<Error> {
+            self.w
+                .sub
+                .try_subscribe(user, &plan_id, &0, &0, &None::<Address>)
+        }
+
+        fn subscribe(&mut self, user: &Address, plan_id: u64) -> u64 {
+            let id = self.try_subscribe(user, plan_id).unwrap().unwrap();
+            self.mandates.push(id);
+            id
+        }
+
+        /// Only `signer` signs the next call, for exactly `fn_name(args)`.
+        fn signed_by(
+            &self,
+            signer: &Address,
+            contract: &Address,
+            fn_name: &str,
+            args: soroban_sdk::Vec<Val>,
+        ) {
+            self.w.env.mock_auths(&[MockAuth {
+                address: signer,
+                invoke: &MockAuthInvoke {
+                    contract,
+                    fn_name,
+                    args,
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        /// Run `attempt`, which must fail, and check it consumed neither a
+        /// plan ID nor a mandate ID.
+        fn consumes_no_id(&self, what: &str, attempt: impl FnOnce(&Self)) {
+            let next_plan = self.w.registry.next_plan_id();
+            let next_mandate = self.w.sub.next_mandate_id();
+            attempt(self);
+            assert_eq!(
+                self.w.registry.next_plan_id(),
+                next_plan,
+                "{what} consumed a plan id"
+            );
+            assert_eq!(
+                self.w.sub.next_mandate_id(),
+                next_mandate,
+                "{what} consumed a mandate id"
+            );
+        }
+
+        fn plan_noise(&self, noise: Noise) {
+            match noise {
+                Noise::None => {}
+                Noise::Failures => self.plan_failures(),
+                Noise::Unauthorized => self.unauthorized_plans(),
+            }
+        }
+
+        fn mandate_noise(&self, noise: Noise, open_plan: u64) {
+            match noise {
+                Noise::None => {}
+                Noise::Failures => self.mandate_failures(open_plan),
+                Noise::Unauthorized => self.unauthorized_mandates(open_plan),
+            }
+        }
+
+        fn plan_failures(&self) {
+            let a = &self.merchant_a;
+            self.consumes_no_id("a zero-amount plan", |r| {
+                assert_eq!(
+                    r.try_publish(a, 0, MONTH),
+                    Err(Ok(RegistryError::InvalidAmount))
+                );
+            });
+            self.consumes_no_id("a plan with too short a period", |r| {
+                assert_eq!(
+                    r.try_publish(a, 10_000, 1),
+                    Err(Ok(RegistryError::InvalidPeriod))
+                );
+            });
+            self.consumes_no_id("a batch with one invalid plan", |r| {
+                let env = &r.w.env;
+                let batch = soroban_sdk::vec![env, r.params(10_000, 0), r.params(0, 0)];
+                assert_eq!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Ok(RegistryError::InvalidAmount))
+                );
+            });
+            self.consumes_no_id("an empty batch", |r| {
+                assert_eq!(
+                    r.w.registry
+                        .try_create_plans(a, &soroban_sdk::Vec::new(&r.w.env)),
+                    Err(Ok(RegistryError::EmptyBatch))
+                );
+            });
+            self.consumes_no_id("an oversized batch", |r| {
+                let mut batch = soroban_sdk::Vec::new(&r.w.env);
+                for _ in 0..=payflow_plan_registry::MAX_BATCH_PLANS {
+                    batch.push_back(r.params(10_000, 0));
+                }
+                assert_eq!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Ok(RegistryError::BatchTooLarge))
+                );
+            });
+        }
+
+        fn mandate_failures(&self, open_plan: u64) {
+            let u2 = &self.u2;
+            self.consumes_no_id("a mandate on a missing plan", |r| {
+                assert_eq!(
+                    r.try_subscribe(u2, MISSING_PLAN),
+                    Err(Ok(Error::PlanNotFound))
+                );
+            });
+            self.consumes_no_id("a deposit-and-subscribe on a missing plan", |r| {
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u2, &MISSING_PLAN, &0, &0, &10_000, &None),
+                    Err(Ok(Error::PlanNotFound))
+                );
+            });
+            self.consumes_no_id("a backdated mandate", |r| {
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_at(u2, &open_plan, &0, &0, &(T0 - 1), &None),
+                    Err(Ok(Error::InvalidStart))
+                );
+            });
+            self.consumes_no_id("a negative spend cap", |r| {
+                assert_eq!(
+                    r.w.sub.try_subscribe(u2, &open_plan, &0, &-1, &None),
+                    Err(Ok(Error::InvalidMaxTotal))
+                );
+            });
+            self.consumes_no_id("a deposit the wallet cannot cover", |r| {
+                let vault_before = r.w.vault.balance(u2, &r.w.token);
+                assert_eq!(
+                    r.w.sub.try_subscribe_with_deposit(
+                        u2,
+                        &open_plan,
+                        &0,
+                        &0,
+                        &(10 * FUNDING),
+                        &None
+                    ),
+                    Err(Ok(Error::VaultCallFailed))
+                );
+                assert_eq!(r.w.vault.balance(u2, &r.w.token), vault_before);
+            });
+            self.consumes_no_id("a mandate while the protocol is paused", |r| {
+                r.w.sub.set_protocol_paused(&true);
+                assert_eq!(
+                    r.try_subscribe(u2, open_plan),
+                    Err(Ok(Error::ProtocolPaused))
+                );
+                r.w.sub.set_protocol_paused(&false);
+            });
+        }
+
+        /// `closed` no longer accepts sign-ups. `subscribe_with_deposit`
+        /// deposits before it finds that out, so this also proves the deposit
+        /// is rolled back with the rest of the call.
+        fn closed_plan_failures(&self, closed: u64) {
+            let u2 = &self.u2;
+            self.consumes_no_id("a mandate on a closed plan", |r| {
+                assert_eq!(r.try_subscribe(u2, closed), Err(Ok(Error::PlanInactive)));
+            });
+            self.consumes_no_id("a deposit-and-subscribe on a closed plan", |r| {
+                let t = &r.w.token_client;
+                let (vault, wallet) = (r.w.vault.balance(u2, &r.w.token), t.balance(u2));
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u2, &closed, &0, &0, &10_000, &None),
+                    Err(Ok(Error::PlanInactive))
+                );
+                assert_eq!(r.w.vault.balance(u2, &r.w.token), vault);
+                assert_eq!(t.balance(u2), wallet);
+            });
+        }
+
+        fn full_plan_failures(&self, full: u64) {
+            self.consumes_no_id("a mandate on a full plan", |r| {
+                assert_eq!(r.try_subscribe(&r.u2, full), Err(Ok(Error::PlanFull)));
+            });
+        }
+
+        fn unauthorized_plans(&self) {
+            let a = &self.merchant_a;
+            let registry = &self.w.registry.address;
+            self.consumes_no_id("an unsigned plan", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+            });
+            self.consumes_no_id("a plan signed by someone else", |r| {
+                r.signed_by(
+                    &r.outsider,
+                    registry,
+                    "create_plan",
+                    r.plan_args(a, 10_000, MONTH),
+                );
+                assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+            });
+            self.consumes_no_id("a batch signed by the other merchant", |r| {
+                let env = &r.w.env;
+                let batch = soroban_sdk::vec![env, r.params(10_000, 0)];
+                r.signed_by(
+                    &r.merchant_b,
+                    registry,
+                    "create_plans",
+                    (a, batch.clone()).into_val(env),
+                );
+                assert!(matches!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Err(_))
+                ));
+            });
+            self.w.env.mock_all_auths();
+        }
+
+        fn unauthorized_mandates(&self, open_plan: u64) {
+            let u1 = &self.u1;
+            let sub = &self.w.sub.address;
+            self.consumes_no_id("an unsigned mandate", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+            });
+            self.consumes_no_id("a mandate signed by someone else", |r| {
+                let args = (u1, &open_plan, &0u32, &0i128, &None::<Address>).into_val(&r.w.env);
+                r.signed_by(&r.outsider, sub, "subscribe", args);
+                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+            });
+            self.consumes_no_id("a scheduled mandate signed by someone else", |r| {
+                let start = T0 + WEEK;
+                let args =
+                    (u1, &open_plan, &0u32, &0i128, &start, &None::<Address>).into_val(&r.w.env);
+                r.signed_by(&r.outsider, sub, "subscribe_at", args);
+                assert!(matches!(
+                    r.w.sub
+                        .try_subscribe_at(u1, &open_plan, &0, &0, &start, &None),
+                    Err(Err(_))
+                ));
+            });
+            self.consumes_no_id("an unsigned deposit-and-subscribe", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u1, &open_plan, &0, &0, &10_000, &None),
+                    Err(Err(_))
+                ));
+            });
+            self.w.env.mock_all_auths();
+        }
+    }
+
+    // ---- reproducibility ----
+
+    /// The same call sequence in two separate fresh `Env`s assigns the same
+    /// plan and mandate IDs, in the same order, to the same records.
+    #[test]
+    fn the_same_call_sequence_assigns_the_same_ids_in_fresh_envs() {
+        let first = run(Noise::None).ids();
+        let second = run(Noise::None).ids();
+        assert_eq!(first, second);
+    }
+
+    /// The sequence assigns exactly the pinned golden IDs, each to the record
+    /// the sequence created it for. See the note on the golden constants:
+    /// changing these is a breaking change for bindings and indexers.
+    #[test]
+    fn ids_match_the_pinned_golden_values() {
+        let r = run(Noise::None);
+        let ids = r.ids();
+        let env = &r.w.env;
+
+        assert_eq!(ids.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(ids.mandate_ids(), GOLDEN_MANDATES);
+        assert_eq!(ids.next_plan_id, GOLDEN_NEXT_PLAN_ID);
+        assert_eq!(ids.next_mandate_id, GOLDEN_NEXT_MANDATE_ID);
+
+        let (a, b) = (sc(env, &r.merchant_a), sc(env, &r.merchant_b));
+        let (u1, u2) = (sc(env, &r.u1), sc(env, &r.u2));
+        let merchants: std::vec::Vec<_> = ids.plans.iter().map(|(_, m)| m.clone()).collect();
+        assert_eq!(merchants, [a.clone(), b.clone(), a.clone(), a.clone()]);
+        let owners: std::vec::Vec<_> = ids
+            .mandates
+            .iter()
+            .map(|(_, _, s, m)| (s.clone(), m.clone()))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                (u1.clone(), a.clone()),
+                (u2.clone(), a.clone()),
+                (u1.clone(), b),
+                (u2, a.clone()),
+                (u1, a),
+            ]
+        );
+    }
+
+    /// No ID repeats within a run, across plans or across mandates.
+    #[test]
+    fn ids_are_unique_within_a_run() {
+        let ids = run(Noise::None).ids();
+        let mut plans = ids.plan_ids();
+        plans.sort_unstable();
+        plans.dedup();
+        assert_eq!(plans.len(), ids.plans.len());
+        let mut mandates: std::vec::Vec<u64> = ids.mandates.iter().map(|m| m.0).collect();
+        mandates.sort_unstable();
+        mandates.dedup();
+        assert_eq!(mandates.len(), ids.mandates.len());
+    }
+
+    /// IDs are one global sequence per contract, not one per merchant,
+    /// subscriber or plan: merchant B's first plan is 2 and u2's first mandate
+    /// is 2. The per-scope indexes list the global IDs in creation order, and
+    /// the two counters do not affect each other.
+    #[test]
+    fn ids_are_one_global_sequence_per_contract_not_per_scope() {
+        let r = run(Noise::None);
+        let w = &r.w;
+        let list = |v: soroban_sdk::Vec<u64>| -> std::vec::Vec<u64> { v.iter().collect() };
+
+        assert_eq!(
+            list(w.registry.merchant_plans(&r.merchant_a, &0, &10)),
+            [1, 3, 4]
+        );
+        assert_eq!(list(w.registry.merchant_plans(&r.merchant_b, &0, &10)), [2]);
+        assert_eq!(list(w.sub.subscriber_mandates(&r.u1, &0, &10)), [1, 3, 5]);
+        assert_eq!(list(w.sub.subscriber_mandates(&r.u2, &0, &10)), [2, 4]);
+        assert_eq!(
+            list(w.sub.merchant_mandates(&r.merchant_a, &0, &10)),
+            [1, 2, 4, 5]
+        );
+        assert_eq!(list(w.sub.merchant_mandates(&r.merchant_b, &0, &10)), [3]);
+        assert_eq!(list(w.sub.plan_mandates(&1, &0, &10)), [1, 2]);
+        assert_eq!(list(w.sub.plan_mandates(&2, &0, &10)), [3]);
+    }
+
+    /// IDs follow call order, so a different order assigns them differently,
+    /// and that different assignment is itself reproducible.
+    #[test]
+    fn a_different_call_order_assigns_different_but_reproducible_ids() {
+        /// Merchants A and B each publish one plan and u1 subscribes to both,
+        /// B first when `b_first`. Returns `(plan ID, mandate ID)` for A's
+        /// plan, then for B's.
+        fn two_merchants(b_first: bool) -> [(u64, u64); 2] {
+            let mut r = fresh();
+            let (a, b, u1) = (r.merchant_a.clone(), r.merchant_b.clone(), r.u1.clone());
+            let order = if b_first { [&b, &a] } else { [&a, &b] };
+            let plans = order.map(|m| r.publish(m, 10_000));
+            let mandates = plans.map(|p| r.subscribe(&u1, p));
+            let mut out = [(plans[0], mandates[0]), (plans[1], mandates[1])];
+            if b_first {
+                out.swap(0, 1);
+            }
+            out
+        }
+
+        assert_eq!(two_merchants(false), [(1, 1), (2, 2)]);
+        assert_eq!(two_merchants(true), [(2, 2), (1, 1)]);
+        assert_eq!(two_merchants(true), two_merchants(true));
+        assert_eq!(two_merchants(false), two_merchants(false));
+    }
+
+    // ---- failure paths ----
+
+    /// Rejected creates slipped in before every step consume no ID, so every
+    /// later create gets exactly the ID a clean run gives it. The rejections
+    /// cover bad plan input and bad batches, a missing plan, a closed plan, a
+    /// full plan, a backdated start, a negative spend cap, a paused protocol,
+    /// and a deposit the wallet cannot cover.
+    #[test]
+    fn failed_creates_do_not_consume_ids() {
+        let noisy = run(Noise::Failures).ids();
+        assert_eq!(noisy, run(Noise::None).ids());
+        assert_eq!(noisy.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(noisy.mandate_ids(), GOLDEN_MANDATES);
+    }
+
+    // ---- authorization ----
+
+    /// Creates without the merchant's or subscriber's signature, slipped in
+    /// before every step, consume no ID either.
+    #[test]
+    fn unauthorized_creates_do_not_consume_ids() {
+        let noisy = run(Noise::Unauthorized).ids();
+        assert_eq!(noisy, run(Noise::None).ids());
+        assert_eq!(noisy.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(noisy.mandate_ids(), GOLDEN_MANDATES);
+    }
+
+    /// With real auth checking (no `mock_all_auths`), a create that nobody or
+    /// the wrong account signs is rejected, and the first create its owner
+    /// signs still gets ID 1. The owner's signature is the only auth that
+    /// create needs.
+    #[test]
+    fn the_first_authorized_create_gets_id_1_and_needs_only_its_owners_auth() {
+        let r = fresh();
+        let env = &r.w.env;
+        let a = &r.merchant_a;
+        let registry = &r.w.registry.address;
+        let args = r.plan_args(a, 10_000, MONTH);
+
+        env.mock_auths(&[]);
+        assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+        r.signed_by(&r.outsider, registry, "create_plan", args.clone());
+        assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+        r.signed_by(a, registry, "create_plan", args.clone());
+        assert_eq!(r.try_publish(a, 10_000, MONTH), Ok(Ok(GOLDEN_PLANS[0])));
+        assert_eq!(
+            env.auths(),
+            std::vec![(
+                a.clone(),
+                AuthorizedInvocation {
+                    function: AuthorizedFunction::Contract((
+                        registry.clone(),
+                        Symbol::new(env, "create_plan"),
+                        args,
+                    )),
+                    sub_invocations: std::vec![],
+                }
+            )]
+        );
+
+        let u1 = &r.u1;
+        let sub = &r.w.sub.address;
+        let plan = GOLDEN_PLANS[0];
+        let args: soroban_sdk::Vec<Val> =
+            (u1, &plan, &0u32, &0i128, &None::<Address>).into_val(env);
+
+        env.mock_auths(&[]);
+        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        r.signed_by(&r.outsider, sub, "subscribe", args.clone());
+        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        r.signed_by(u1, sub, "subscribe", args.clone());
+        assert_eq!(r.try_subscribe(u1, plan), Ok(Ok(GOLDEN_MANDATES[0].0)));
+        assert_eq!(
+            env.auths(),
+            std::vec![(
+                u1.clone(),
+                AuthorizedInvocation {
+                    function: AuthorizedFunction::Contract((
+                        sub.clone(),
+                        Symbol::new(env, "subscribe"),
+                        args,
+                    )),
+                    sub_invocations: std::vec![],
+                }
+            )]
+        );
+
+        assert_eq!(r.w.registry.next_plan_id(), 2);
+        assert_eq!(r.w.sub.next_mandate_id(), 2);
+    }
+}
