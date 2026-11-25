@@ -42,7 +42,6 @@ declare -A allowlist_subscription=(
     [mandate_grace_period]=1
     [is_mandate_tombstoned]=1
     [version]=1
-    [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )
 
@@ -61,7 +60,6 @@ declare -A allowlist_vault=(
     [subscription]=1
     [admin]=1
     [version]=1
-    [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )
 
@@ -75,7 +73,6 @@ declare -A allowlist_plan_registry=(
     [merchant_plans]=1
     [next_plan_id]=1
     [admin]=1
-    [version]=1
     [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )

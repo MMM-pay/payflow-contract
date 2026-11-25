@@ -9,6 +9,12 @@ change the contract interface.
 
 ### Added
 
+- **CI: contract interface spec.** Each contract's spec JSON is generated in
+  CI and committed under `spec/`. A PR that changes a contract interface
+  without updating `spec/` fails CI, and the spec diff is shown in the job
+  summary. Interface-changing PRs are labelled `interface-change`. Follow-up
+  issues are needed in `payflow-backend`, `payflow-frontend` and
+  `payflow-docs` to consume the published spec.
 - **#237: upgrade storage-layout coverage (all contracts).** New tests write
   every persistent and instance value (plans and indexes, vault balances, caps,
   allowlist, spend limits, reserves and operation windows, mandates, indexes,

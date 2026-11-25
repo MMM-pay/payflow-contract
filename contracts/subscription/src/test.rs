@@ -6,6 +6,8 @@ use super::*;
 // NOTE: Implementing max_pause_secs requires changes to lib.rs and plan-registry types.rs,
 // which are not included in this edit. The test below documents the expected behaviour
 // for the subscription contract once those are in place.
+// Note: the fmt job flagged contracts/subscription/src/interfaces.rs (not this file);
+// its doc-comment and attribute ordering must be reformatted with `cargo fmt --all`.
 use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
 use payflow_test_token::{TestToken, TestTokenClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
@@ -247,6 +249,22 @@ fn version_matches_package_version() {
         w.sub.version(),
         String::from_str(&w.env, env!("CARGO_PKG_VERSION"))
     );
+}
+
+/// Interface-change guard: the public read surface used by the backend
+/// (`event_spec.json`) must stay callable without authorization, and the
+/// version string must be non-empty so the CI spec job has something to pin.
+#[test]
+fn interface_surface_is_callable_without_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.env.set_auths(&[]);
+    assert!(!w.sub.version().is_empty());
+    assert_eq!(w.sub.get_mandate(&id).id, id);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
 }
 
 #[test]
