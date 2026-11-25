@@ -8880,3 +8880,115 @@ mod deterministic_ids {
         assert_eq!(r.w.sub.next_mandate_id(), 2);
     }
 }
+// Numeric maximum values (#242)
+// ---------------------------------------------------------------------------
+
+fn set_next_mandate_id(w: &World, next: u64) {
+    w.env.as_contract(&w.sub.address, || {
+        w.env
+            .storage()
+            .instance()
+            .set(&DataKey::NextMandateId, &next);
+    });
+}
+
+#[test]
+fn maximum_amount_charge_is_safe_and_reports_max_committed_revenue() {
+    let w = world();
+    w.sub.set_fee_bps(&0);
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &i128::MAX);
+    w.vault.deposit(&user, &w.token, &i128::MAX);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Same-period normalisation must return the amount itself, not overflow
+    // to a zero contribution and leave the revenue cache empty.
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+
+    let result = w.sub.charge(&w.keeper, &id);
+    assert_eq!(result.merchant_amount, i128::MAX);
+    assert_eq!(result.fee, 0);
+    assert_eq!(result.charges_made, 1);
+    assert!(!result.completed);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&w.merchant), i128::MAX);
+    assert_eq!(w.token_client.balance(&w.vault.address), 0);
+    assert_eq!(w.sub.get_mandate(&id).total_spent, i128::MAX);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+
+    // A second charge would make total_spent + amount exceed i128::MAX. It
+    // must fail with a typed error and leave the settled mandate untouched.
+    let before = w.sub.get_mandate(&id);
+    w.advance(MONTH);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+    let after = w.sub.get_mandate(&id);
+    assert_eq!(after.charges_made, before.charges_made);
+    assert_eq!(after.total_spent, before.total_spent);
+    assert_eq!(after.next_charge, before.next_charge);
+}
+
+#[test]
+fn maximum_counts_seats_and_pause_are_stored_without_wrapping() {
+    let w = world();
+    let plan_id = w.plan_with_cap(u32::MAX);
+    let user = w.subscriber(PRICE * 4);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.max_charges, u32::MAX);
+    assert_eq!(mandate.max_total, i128::MAX);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+
+    // Re-setting the same maximum is a valid no-op, not an InvalidMaxCharges.
+    w.sub.set_max_charges(&user, &id, &u32::MAX);
+    w.sub.set_seats(&user, &id, &u32::MAX);
+    assert_eq!(w.sub.get_mandate(&id).seats, u32::MAX);
+
+    w.sub.pause_until(&user, &id, &u64::MAX);
+    let paused = w.sub.get_mandate(&id);
+    assert_eq!(paused.paused_until, u64::MAX);
+    assert_eq!(paused.next_charge, u64::MAX);
+    assert_eq!(paused.status, MandateStatus::Paused);
+}
+
+#[test]
+fn mandate_id_counter_exhaustion_is_a_typed_error_without_state_changes() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    set_next_mandate_id(&w, u64::MAX);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(w.sub.next_mandate_id(), u64::MAX);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(
+        w.sub.try_get_mandate(&u64::MAX),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn maximum_value_subscribe_requires_the_subscribers_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    w.env.set_auths(&[]);
+
+    assert!(w
+        .sub
+        .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>)
+        .is_err());
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), PRICE);
+}

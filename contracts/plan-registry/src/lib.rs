@@ -172,8 +172,9 @@ mod contract {
         /// if `name` exceeds [`MAX_NAME_LEN`], [`Error::DescriptionTooLong`] if `description`
         /// exceeds [`MAX_DESCRIPTION_LEN`], [`Error::InvalidPeriod`] if `period < MIN_PERIOD`,
         /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`,
-        /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`], or
-        /// [`Error::NotInitialized`] if the contract has not been initialized.
+        /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`],
+        /// [`Error::NotInitialized`] if the contract has not been initialized, or
+        /// [`Error::PlanIdOverflow`] if the next plan ID would exceed `u64`.
         #[allow(clippy::too_many_arguments)]
         pub fn create_plan(
             env: Env,
@@ -210,8 +211,9 @@ mod contract {
             Self::validate_plan(&params)?;
 
             let id = Self::read_next_plan_id(&env)?;
+            let next_id = id.checked_add(1).ok_or(Error::PlanIdOverflow)?;
             Self::store_plan(&env, &merchant, id, &params);
-            Self::set_next_plan_id(&env, id + 1);
+            Self::set_next_plan_id(&env, next_id);
 
             Ok(id)
         }
@@ -237,8 +239,9 @@ mod contract {
         /// # Errors
         /// Returns [`Error::EmptyBatch`] if `plans` is empty,
         /// [`Error::BatchTooLarge`] if it holds more than [`MAX_BATCH_PLANS`]
-        /// plans, and otherwise the same validation errors as `create_plan`
-        /// for the first invalid plan.
+        /// plans, [`Error::PlanIdOverflow`] if the batch would carry the plan
+        /// ID counter past `u64::MAX`, and otherwise the same validation errors
+        /// as `create_plan` for the first invalid plan.
         pub fn create_plans(
             env: Env,
             merchant: Address,
@@ -258,13 +261,20 @@ mod contract {
             }
 
             let first_id = Self::read_next_plan_id(&env)?;
+            // Reserve the whole range before writing any plan, so a batch that
+            // would carry the counter past `u64::MAX` writes nothing at all.
+            let next_id = first_id
+                .checked_add(u64::from(plans.len()))
+                .ok_or(Error::PlanIdOverflow)?;
             let mut plan_ids = Vec::new(&env);
             for i in 0..plans.len() {
-                let id = first_id + u64::from(i);
+                let id = first_id
+                    .checked_add(u64::from(i))
+                    .ok_or(Error::PlanIdOverflow)?;
                 Self::store_plan(&env, &merchant, id, &plans.get(i).unwrap());
                 plan_ids.push_back(id);
             }
-            Self::set_next_plan_id(&env, first_id + u64::from(plans.len()));
+            Self::set_next_plan_id(&env, next_id);
 
             PlansCreated {
                 merchant,

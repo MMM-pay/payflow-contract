@@ -4056,3 +4056,180 @@ fn plan_listings_follow_paging_and_reflect_status() {
     assert!(!rows.get(0).unwrap().active);
     assert!(rows.get(1).unwrap().active);
 }
+
+// ---------------------------------------------------------------------------
+// Numeric maximum values (#242)
+// ---------------------------------------------------------------------------
+
+fn set_next_plan_id(env: &Env, client: &PlanRegistryClient, next: u64) {
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::NextPlanId, &next);
+    });
+}
+
+#[test]
+fn create_plan_accepts_maximum_numeric_values() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let payout = Address::generate(&env);
+
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &i128::MAX,
+        &u64::MAX,
+        &String::from_str(&env, "Max Plan"),
+        &String::from_str(&env, ""),
+        &MAX_KEEPER_BPS,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, "https://example.com/terms"),
+        &u64::MAX,
+        &MAX_REFERRAL_BPS,
+        &Some(payout.clone()),
+        &u32::MAX,
+    );
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.amount, i128::MAX);
+    assert_eq!(plan.period, u64::MAX);
+    assert_eq!(plan.available_until, u64::MAX);
+    assert_eq!(plan.max_subscribers, u32::MAX);
+    assert_eq!(plan.keeper_bps, MAX_KEEPER_BPS);
+    assert_eq!(plan.referral_bps, MAX_REFERRAL_BPS);
+    assert_eq!(plan.payout, payout);
+    assert_eq!(client.merchant_plan_count(&merchant), 1);
+    assert_eq!(client.token_plan_count(&token), 1);
+    assert_eq!(client.next_plan_id(), 2);
+}
+
+#[test]
+fn create_plan_rejects_u32_maximum_basis_points_without_writing() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let keeper = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
+        &u32::MAX,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    assert_eq!(keeper, Err(Ok(Error::KeeperBpsTooHigh)));
+
+    let referral = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
+        &0u32,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &u32::MAX,
+        &None::<Address>,
+        &0u32,
+    );
+    assert_eq!(referral, Err(Ok(Error::ReferralBpsTooHigh)));
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.next_plan_id(), 1);
+}
+
+#[test]
+fn create_plan_with_maximum_values_requires_the_merchants_auth() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    env.set_auths(&[]);
+
+    assert!(client
+        .try_create_plan(
+            &merchant,
+            &token,
+            &i128::MAX,
+            &u64::MAX,
+            &String::from_str(&env, "Max Plan"),
+            &String::from_str(&env, ""),
+            &MAX_KEEPER_BPS,
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
+            &u64::MAX,
+            &MAX_REFERRAL_BPS,
+            &None::<Address>,
+            &u32::MAX,
+        )
+        .is_err());
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+    assert_eq!(client.next_plan_id(), 1);
+}
+
+#[test]
+fn plan_id_counter_accepts_the_last_ids_then_fails_with_a_typed_error() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    set_next_plan_id(&env, &client, u64::MAX - 2);
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 1_000, "Last"),
+        batch_plan(&env, &token, 1_100, "Last but one"),
+    ];
+    assert_eq!(
+        client.create_plans(&merchant, &plans),
+        soroban_sdk::vec![&env, u64::MAX - 2, u64::MAX - 1]
+    );
+    assert_eq!(client.next_plan_id(), u64::MAX);
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+
+    let result = client.try_create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Exhausted"),
+        &String::from_str(&env, ""),
+        &0u32,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    assert_eq!(result, Err(Ok(Error::PlanIdOverflow)));
+    assert_eq!(client.next_plan_id(), u64::MAX);
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+    assert_eq!(client.try_get_plan(&u64::MAX), Err(Ok(Error::PlanNotFound)));
+}
+
+#[test]
+fn batch_plan_id_overflow_writes_nothing() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    set_next_plan_id(&env, &client, u64::MAX);
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 1_000, "First"),
+        batch_plan(&env, &token, 1_100, "Second"),
+    ];
+    assert_eq!(
+        client.try_create_plans(&merchant, &plans),
+        Err(Ok(Error::PlanIdOverflow))
+    );
+    assert_eq!(client.next_plan_id(), u64::MAX);
+    assert_eq!(client.merchant_plan_count(&merchant), 0);
+}

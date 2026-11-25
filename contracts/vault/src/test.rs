@@ -2838,3 +2838,86 @@ fn deposit_for_signed_by_the_subscriber_instead_of_the_payer_is_rejected() {
     assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
     assert_eq!(h.token_client.balance(&stranger), 10_000);
 }
+
+// ---------------------------------------------------------------------------
+// Numeric maximum values (#242)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deposit_and_withdraw_i128_max_round_trip() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.vault.set_deposit_cap(&user, &h.token, &i128::MAX);
+
+    h.vault.deposit(&user, &h.token, &i128::MAX);
+    assert_eq!(h.vault.balance(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), i128::MAX);
+    assert_eq!(h.token_client.balance(&user), 0);
+    assert_eq!(h.token_client.balance(&h.vault_id), i128::MAX);
+
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), i128::MAX);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn reserve_and_spend_limit_at_i128_max_do_not_wrap() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    let recipient = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.vault.deposit(&user, &h.token, &i128::MAX);
+
+    h.vault.set_reserve(&user, &h.token, &1, &i128::MAX);
+    assert_eq!(h.vault.reserved(&user, &h.token, &1), i128::MAX);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &1),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 0);
+    h.vault.set_reserve(&user, &h.token, &1, &0);
+
+    h.vault
+        .set_spend_limit(&user, &h.token, &i128::MAX, &u64::MAX);
+    let limit = h.vault.spend_limit(&user, &h.token);
+    assert_eq!(limit.amount, i128::MAX);
+    assert_eq!(limit.window_secs, u64::MAX);
+
+    // Put the current window at its largest representable spent total while
+    // the balance still has room, which a replenished account can reach.
+    h.env.as_contract(&h.vault_id, || {
+        h.env.storage().persistent().set(
+            &DataKey::SpendWindow(user.clone(), h.token.clone()),
+            &SpendWindow {
+                start: h.env.ledger().timestamp(),
+                spent: i128::MAX,
+            },
+        );
+    });
+
+    // spent == i128::MAX would make `spent + amount` overflow. It must be a
+    // typed SpendLimitExceeded error and leave the balance untouched.
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &recipient, &1),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), i128::MAX);
+    assert_eq!(h.token_client.balance(&recipient), 0);
+}
+
+#[test]
+fn maximum_deposit_requires_the_users_auth() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.env.set_auths(&[]);
+
+    assert!(h.vault.try_deposit(&user, &h.token, &i128::MAX).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), i128::MAX);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}

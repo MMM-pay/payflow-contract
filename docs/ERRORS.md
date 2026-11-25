@@ -8,7 +8,7 @@ This page is the integration reference for the errors returned by the contracts 
 
 The Rust enums remain the source of truth: [plan-registry errors](../contracts/plan-registry/src/error.rs), [subscription errors](../contracts/subscription/src/error.rs), and [vault errors](../contracts/vault/src/error.rs). Error variants are append-only so existing client mappings remain stable.
 
-## Plan registry (1001–1023)
+## Plan registry (1001–1024)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -35,6 +35,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1021 | `NotPendingOwner` | The caller is not the pending owner. |
 | 1022 | `EmptyBatch` | A batch operation was submitted without items. |
 | 1023 | `BatchTooLarge` | A batch exceeds the contract's maximum size. |
+| 1024 | `PlanIdOverflow` | The next plan ID would exceed `u64`; no plan is written. |
 
 ## Subscription (2001–2039)
 
