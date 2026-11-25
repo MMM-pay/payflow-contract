@@ -1650,6 +1650,17 @@ fn set_subscription_requires_admin_auth() {
 }
 
 #[test]
+fn set_subscription_rejects_self_address() {
+    let h = setup();
+    let before = h.vault.subscription();
+    assert_eq!(
+        h.vault.try_set_subscription(&h.vault_id),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(h.vault.subscription(), before);
+}
+
+#[test]
 fn spend_limit_caps_debits_and_the_next_window_resets() {
     let h = setup();
     let user = funded_user(&h, 100_000);

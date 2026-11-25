@@ -131,6 +131,9 @@ pub enum Error {
     /// An active or paused mandate cannot be deleted until it is cancelled or
     /// completed (#368).
     MandateStillActive = 2046,
+    /// A configured address is the contract itself or otherwise invalid for
+    /// this role (#282).
+    InvalidAddress = 2047,
 }
 
 impl From<Error> for ErrorCode {

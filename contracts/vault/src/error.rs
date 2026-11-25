@@ -70,6 +70,9 @@ pub enum Error {
     /// The address accepting the admin role is not the one the current admin
     /// proposed in `propose_admin` (#238).
     NotPendingAdmin = 3021,
+    /// A configured address is the contract itself or otherwise invalid for
+    /// this role (#282).
+    InvalidAddress = 3022,
 }
 
 impl From<Error> for ErrorCode {

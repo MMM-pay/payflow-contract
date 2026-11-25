@@ -172,9 +172,13 @@ mod contract {
         /// Emits no events.
         ///
         /// # Errors
-        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        /// Returns [`Error::NotInitialized`] if no admin is configured, or
+        /// [`Error::InvalidAddress`] if `subscription` is this vault contract.
         pub fn set_subscription(env: Env, subscription: Address) -> Result<(), Error> {
             Self::require_admin(&env)?;
+            if subscription == env.current_contract_address() {
+                return Err(Error::InvalidAddress);
+            }
 
             env.storage()
                 .instance()

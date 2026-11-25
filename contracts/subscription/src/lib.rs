@@ -201,7 +201,9 @@ mod contract {
         /// Emits no events.
         ///
         /// # Errors
-        /// Returns [`Error::FeeTooHigh`] if `fee_bps > MAX_FEE_BPS`.
+        /// Returns [`Error::FeeTooHigh`] if `fee_bps > MAX_FEE_BPS`, or
+        /// [`Error::InvalidAddress`] if `plan_registry` or `vault` is this
+        /// contract, or if `vault` equals `plan_registry`.
         pub fn __constructor(
             env: Env,
             admin: Address,
@@ -212,6 +214,10 @@ mod contract {
         ) -> Result<(), Error> {
             if fee_bps > MAX_FEE_BPS {
                 return Err(Error::FeeTooHigh);
+            }
+            let self_addr = env.current_contract_address();
+            if plan_registry == self_addr || vault == self_addr || vault == plan_registry {
+                return Err(Error::InvalidAddress);
             }
 
             let s = env.storage().instance();
@@ -625,7 +631,8 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
-        /// [`Error::MandateNotActive`] if the mandate is not active,
+        /// [`Error::MandateNotActive`] if the mandate is cancelled, completed,
+        /// or otherwise not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if the mandate reached its cap,
         /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
@@ -635,6 +642,12 @@ mod contract {
             Self::require_not_protocol_paused(&env)?;
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if matches!(
+                mandate.status,
+                MandateStatus::Cancelled | MandateStatus::Completed
+            ) {
+                return Err(Error::MandateNotActive);
+            }
 
             let now = env.ledger().timestamp();
             if !super::lifecycle::active_at(&mandate, now) {
@@ -799,7 +812,8 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
-        /// [`Error::MandateNotActive`] if it is not active,
+        /// [`Error::MandateNotActive`] if it is cancelled, completed, or not
+        /// active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if it reached a cap,
         /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
@@ -807,6 +821,12 @@ mod contract {
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
             let mandate = Self::read_mandate(&env, mandate_id)?;
+            if matches!(
+                mandate.status,
+                MandateStatus::Cancelled | MandateStatus::Completed
+            ) {
+                return Err(Error::MandateNotActive);
+            }
 
             // The same gates `charge` applies, in the same order, so a mandate
             // that `charge` would reject for timing, status or caps is

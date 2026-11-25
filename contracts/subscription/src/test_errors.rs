@@ -53,6 +53,7 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::MandateAlreadyExists, 44),
         (Error::InvalidMandateId, 45),
         (Error::MandateStillActive, 46),
+        (Error::InvalidAddress, 47),
     ];
 
     let mut seen = std::vec::Vec::new();

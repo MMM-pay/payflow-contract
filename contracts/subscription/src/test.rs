@@ -964,6 +964,54 @@ fn cancel_stops_billing_permanently() {
 }
 
 #[test]
+fn cancelled_or_ended_mandate_can_never_be_charged() {
+    let w = world();
+    let plan_id = w.plan();
+    let cancelled_user = w.subscriber(100_000);
+    let ended_user = w.subscriber(100_000);
+
+    let cancelled_id = w
+        .sub
+        .subscribe(&cancelled_user, &plan_id, &0, &0, &None::<Address>);
+    let ended_id = w
+        .sub
+        .subscribe(&ended_user, &plan_id, &0, &0, &None::<Address>);
+
+    let before_cancelled = w.sub.get_mandate(&cancelled_id);
+    let before_ended = w.sub.get_mandate(&ended_id);
+    let merchant_before = w.token_client.balance(&w.merchant);
+    let cancelled_before = w.token_client.balance(&cancelled_user);
+    let ended_before = w.token_client.balance(&ended_user);
+
+    w.sub.cancel(&cancelled_user, &cancelled_id);
+    w.sub.end_mandate(&w.merchant, &ended_id);
+    w.advance(MONTH);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &cancelled_id),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &ended_id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    let after_cancelled = w.sub.get_mandate(&cancelled_id);
+    let after_ended = w.sub.get_mandate(&ended_id);
+    assert_eq!(after_cancelled.status, MandateStatus::Cancelled);
+    assert_eq!(after_ended.status, MandateStatus::Cancelled);
+    assert_eq!(after_cancelled.charges_made, before_cancelled.charges_made);
+    assert_eq!(after_ended.charges_made, before_ended.charges_made);
+    assert_eq!(after_cancelled.total_spent, before_cancelled.total_spent);
+    assert_eq!(after_ended.total_spent, before_ended.total_spent);
+    assert_eq!(after_cancelled.next_charge, before_cancelled.next_charge);
+    assert_eq!(after_ended.next_charge, before_ended.next_charge);
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_before);
+    assert_eq!(w.token_client.balance(&cancelled_user), cancelled_before);
+    assert_eq!(w.token_client.balance(&ended_user), ended_before);
+}
+
+#[test]
 fn cancel_rejects_non_subscriber() {
     let w = world();
     let plan_id = w.plan();
@@ -1471,6 +1519,58 @@ fn constructor_rejects_excessive_fee() {
     env.register(
         Subscription,
         (a.clone(), a.clone(), a.clone(), MAX_FEE_BPS + 1, a.clone()),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_same_vault_and_plan_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let shared = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    env.register(
+        Subscription,
+        (admin, shared.clone(), shared, FEE_BPS, fee_to),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_self_plan_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let vault = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    let contract_id = Address::generate(&env);
+    env.register_at(
+        &contract_id,
+        Subscription,
+        (admin.clone(), contract_id.clone(), vault, FEE_BPS, fee_to),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_self_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let registry = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    let contract_id = Address::generate(&env);
+    env.register_at(
+        &contract_id,
+        Subscription,
+        (
+            admin.clone(),
+            registry,
+            contract_id.clone(),
+            FEE_BPS,
+            fee_to,
+        ),
     );
 }
 

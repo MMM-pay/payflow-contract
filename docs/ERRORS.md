@@ -39,7 +39,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1025 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 1026 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
-## Subscription (2001–2046)
+## Subscription (2001–2047)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -89,8 +89,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2044 | `MandateAlreadyExists` | The requested mandate ID is already assigned to an existing mandate. |
 | 2045 | `InvalidMandateId` | The requested mandate ID is invalid (mandate IDs start at 1). |
 | 2046 | `MandateStillActive` | An active or paused mandate cannot be deleted until it is cancelled or completed. |
+| 2047 | `InvalidAddress` | A configured address is the contract itself or invalid for the required role (for example, vault equals plan registry). |
 
-## Vault (3001–3021)
+## Vault (3001–3022)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -115,5 +116,6 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3019 | `InvalidReserveCap` | The constructor was given a reserve cap above 10,000 basis points. |
 | 3020 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 3021 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
+| 3022 | `InvalidAddress` | A configured address is the contract itself or invalid for the required role. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.

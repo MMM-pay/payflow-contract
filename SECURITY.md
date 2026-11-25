@@ -88,6 +88,33 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ## Externally visible behaviour changes
 
+### Cancelled mandates are explicitly rejected by charge (#270)
+
+`charge` and `flag_failed_charge` already rejected cancelled or completed
+mandates with `MandateNotActive` (2005) through lifecycle checks. This change
+adds explicit terminal-state guards for `MandateStatus::Cancelled` and
+`MandateStatus::Completed` so a cancelled or merchant-ended mandate cannot be
+charged even if lifecycle helpers change in the future. There is no new error
+code or expected client-visible behavior change for valid callers; cancelled and
+ended mandates still fail with `MandateNotActive`.
+
+Regression tests: `cancelled_or_ended_mandate_can_never_be_charged`.
+
+### Deployment wiring rejects self-referential addresses (#282)
+
+`subscription::__constructor` now rejects invalid cross-contract wiring with
+`InvalidAddress` (2047) when `plan_registry` or `vault` is the subscription
+contract itself, or when `vault == plan_registry`. `vault::set_subscription`
+now rejects `InvalidAddress` (3022) when the configured subscription address is
+the vault contract itself. These checks fail before writing configuration, so a
+miswired deployment cannot leave a contract pointing at itself or confusing
+contract roles. Clients that previously relied on such wiring will now receive a
+typed contract error during deployment/configuration.
+
+Regression tests: `constructor_rejects_same_vault_and_plan_registry`,
+`constructor_rejects_self_referential_addresses`,
+`set_subscription_rejects_self_address`.
+
 ### Admin handover is two-step (#238)
 
 `update_admin(new_admin)` has been removed from `plan-registry`, `subscription`
