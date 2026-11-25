@@ -16,7 +16,7 @@
 //! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
 //! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
 //! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read and vault deposit; extends TTLs |
-//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
+//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | One registry call (`plan_charge_terms`); vault debit; extends persistent TTLs |
 //! | `upgrade` | 4 (config) | 0 | 2–4 (Mandate, Plan, pause view) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
 //! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
 //! | `cancel_page` | 0 | 0 | ≤100 (index + Mandates) | ≤50 (Mandates) | Page ≤50, extends persistent TTLs |
@@ -91,7 +91,7 @@ pub use events::{
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
     ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, Mandate, MandateStatus,
-    MandateSummary, Plan, UpgradeRecord,
+    MandateSummary, Plan, PlanChargeTerms, UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
@@ -158,11 +158,11 @@ mod contract {
         ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
         ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
         MandateEnded, MandateStatus, MandateSummary, MandateTransferred, MandateUpdated,
-        MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded,
-        SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec,
-        BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON,
-        MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
-        PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
+        MaxChargesChanged, PauseChanged, Plan, PlanChargeTerms, PlanRegistryClient,
+        ProtocolPauseChanged, Refunded, SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded,
+        VaultClient, Vec, BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD,
+        MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS,
+        MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
 
     /// Billing engine for pull-based recurring payments.
@@ -580,7 +580,10 @@ mod contract {
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
             }
-            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+            // One registry call yields both the paused flag checked here and
+            // the plan fields the committed-revenue refresh needs below.
+            let terms = Self::read_plan_charge_terms(&env, mandate.plan_id)?;
+            if terms.charges_paused {
                 return Err(Error::PlanChargesPaused);
             }
 
@@ -682,7 +685,13 @@ mod contract {
                 .publish(&env);
             }
 
-            Self::recompute_committed_revenue(&env, mandate.plan_id);
+            Self::recompute_committed_revenue_with(
+                &env,
+                mandate.plan_id,
+                &terms.merchant,
+                &terms.token,
+                terms.period,
+            );
 
             Ok(ChargeResult {
                 merchant_amount,
@@ -2305,6 +2314,28 @@ mod contract {
             }
         }
 
+        /// Read what `charge` needs from the plan in one registry call.
+        ///
+        /// A registry deployed before `plan_charge_terms` existed fails that
+        /// call; it is then answered from `plan_charges_paused` and `get_plan`
+        /// as before, so the two contracts can be upgraded in either order.
+        fn read_plan_charge_terms(env: &Env, plan_id: u64) -> Result<PlanChargeTerms, Error> {
+            let registry: Address = Self::cfg_address(env, DataKey::PlanRegistry)?;
+            if let Ok(Ok(terms)) =
+                PlanRegistryClient::new(env, &registry).try_plan_charge_terms(&plan_id)
+            {
+                return Ok(terms);
+            }
+            let charges_paused = Self::plan_charges_paused(env, plan_id)?;
+            let plan = Self::read_plan(env, &registry, plan_id)?;
+            Ok(PlanChargeTerms {
+                merchant: plan.merchant,
+                token: plan.token,
+                period: plan.period,
+                charges_paused,
+            })
+        }
+
         /// Read a plan from the registry, turning any cross-contract failure
         /// into a typed error instead of letting the client panic.
         fn read_plan(env: &Env, registry: &Address, plan_id: u64) -> Result<Plan, Error> {
@@ -2543,7 +2574,25 @@ mod contract {
                 // that triggered the recomputation because a plan read failed.
                 return;
             };
+            Self::recompute_committed_revenue_with(
+                env,
+                plan_id,
+                &plan.merchant,
+                &plan.token,
+                plan.period,
+            );
+        }
 
+        /// [`Self::recompute_committed_revenue`] for a caller that already
+        /// holds the plan's merchant, token and period, so it does not read
+        /// the plan from the registry a second time.
+        fn recompute_committed_revenue_with(
+            env: &Env,
+            plan_id: u64,
+            merchant: &Address,
+            token: &Address,
+            period: u64,
+        ) {
             let len = Self::index_len(env, DataKey::PlanMandateCount(plan_id));
             let mut total: i128 = 0;
             let now = env.ledger().timestamp();
@@ -2555,7 +2604,7 @@ mod contract {
                 let Some(mandate) = Self::read_mandate_opt(env, mandate_id) else {
                     continue;
                 };
-                if mandate.token != plan.token
+                if mandate.token != *token
                     || !super::lifecycle::active_at(&mandate, now)
                     || mandate.period == 0
                 {
@@ -2564,12 +2613,12 @@ mod contract {
                 // Normalize to the plan's period. Equal periods need no
                 // multiplication: doing it anyway overflows for an amount near
                 // i128::MAX and silently reports zero committed revenue.
-                let contribution = if mandate.period == plan.period {
+                let contribution = if mandate.period == period {
                     mandate.amount
                 } else {
                     mandate
                         .amount
-                        .checked_mul(i128::from(plan.period))
+                        .checked_mul(i128::from(period))
                         .ok_or(Error::AmountOverflow)
                         .unwrap_or(0)
                         / i128::from(mandate.period)
@@ -2577,14 +2626,7 @@ mod contract {
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 
-            Self::write_committed_revenue(
-                env,
-                plan_id,
-                &plan.merchant,
-                &plan.token,
-                plan.period,
-                total,
-            );
+            Self::write_committed_revenue(env, plan_id, merchant, token, period, total);
         }
 
         fn index_len(env: &Env, count_key: DataKey) -> u32 {

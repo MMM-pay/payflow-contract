@@ -546,6 +546,57 @@ fn set_plan_charges_paused_toggles_without_deactivating() {
 }
 
 #[test]
+fn plan_charge_terms_agree_with_get_plan_and_charges_paused() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Pro Weekly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    let check = || {
+        let plan = client.get_plan(&id);
+        assert_eq!(
+            client.plan_charge_terms(&id),
+            PlanChargeTerms {
+                merchant: plan.merchant,
+                token: plan.token,
+                period: plan.period,
+                charges_paused: client.plan_charges_paused(&id),
+            }
+        );
+    };
+
+    check();
+    client.set_plan_charges_paused(&merchant, &id, &true);
+    check();
+    assert!(client.plan_charge_terms(&id).charges_paused);
+
+    // The merchant is read live, so a transfer shows up straight away.
+    let new_owner = Address::generate(&env);
+    client.propose_plan_owner(&merchant, &id, &new_owner);
+    client.accept_plan_owner(&new_owner, &id);
+    check();
+    assert_eq!(client.plan_charge_terms(&id).merchant, new_owner);
+
+    assert_eq!(
+        client.try_plan_charge_terms(&999),
+        Err(Ok(Error::PlanNotFound))
+    );
+}
+
+#[test]
 fn set_plan_charges_paused_rejects_a_non_owner_and_missing_plan() {
     let (env, client, _admin) = setup();
     let merchant = Address::generate(&env);

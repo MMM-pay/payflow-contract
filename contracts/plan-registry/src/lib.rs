@@ -25,6 +25,7 @@
 //! | `get_plan` | 0 | 0 | 1 (Plan) | 0 | |
 //! | `plan_charges_paused` | 0 | 0 | 2 (Plan, PlanChargesPaused) | 0 | |
 //! | `plan_grace_period` | 0 | 0 | 2 (Plan, PlanGracePeriod) | 0 | |
+//! | `plan_charge_terms` | 0 | 0 | 2 (Plan, PlanChargesPaused) | 0 | What `charge` needs in one call |
 //! | `merchant_plan_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
 //! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
@@ -65,7 +66,7 @@ pub use events::{
     PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
     PlansCreated, ProfileUpdated,
 };
-pub use types::{DataKey, Plan, PlanListing, PlanParams, Profile, UpgradeRecord};
+pub use types::{DataKey, Plan, PlanChargeTerms, PlanListing, PlanParams, Profile, UpgradeRecord};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -116,12 +117,13 @@ pub const MIN_CHARGE_AMOUNT: i128 = payflow_shared::MIN_CHARGE_AMOUNT;
 mod contract {
     use super::{
         contract, contractimpl, Address, BytesN, ContractExecutable, ContractUpgraded, DataKey,
-        Env, Error, Plan, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet, PlanListing,
-        PlanOwnershipProposed, PlanParams, PlanRenamed, PlanStatusChanged, PlanSuccessorSet,
-        PlanTransferred, PlansCreated, Profile, ProfileUpdated, String, Symbol, UpgradeRecord, Vec,
-        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS,
-        MAX_NAME_LEN, MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT,
-        MIN_PERIOD, PERSIST_BUMP, PERSIST_THRESHOLD,
+        Env, Error, Plan, PlanChargeTerms, PlanChargesPausedChanged, PlanCreated,
+        PlanGracePeriodSet, PlanListing, PlanOwnershipProposed, PlanParams, PlanRenamed,
+        PlanStatusChanged, PlanSuccessorSet, PlanTransferred, PlansCreated, Profile,
+        ProfileUpdated, String, Symbol, UpgradeRecord, Vec, INSTANCE_BUMP, INSTANCE_THRESHOLD,
+        MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS, MAX_NAME_LEN, MAX_PAGE,
+        MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT, MIN_PERIOD, PERSIST_BUMP,
+        PERSIST_THRESHOLD,
     };
 
     /// Contract implementation for publishing and managing subscription plans.
@@ -506,6 +508,27 @@ mod contract {
                 .persistent()
                 .get(&DataKey::PlanChargesPaused(plan_id))
                 .unwrap_or(false))
+        }
+
+        /// The plan fields that settling a charge needs (merchant, token,
+        /// period and the charges-paused flag), in one call. The plan entry is
+        /// loaded once, where `plan_charges_paused` followed by `get_plan`
+        /// loads it twice.
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist.
+        pub fn plan_charge_terms(env: Env, plan_id: u64) -> Result<PlanChargeTerms, Error> {
+            let plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
+            Ok(PlanChargeTerms {
+                merchant: plan.merchant,
+                token: plan.token,
+                period: plan.period,
+                charges_paused: env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PlanChargesPaused(plan_id))
+                    .unwrap_or(false),
+            })
         }
 
         /// Alias for [`PlanRegistry::plan_charges_paused`].

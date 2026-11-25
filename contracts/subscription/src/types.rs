@@ -23,7 +23,7 @@ pub struct ChargeResult {
 /// A field added to or removed from the registry's plan therefore changes the
 /// type this contract decodes, and the subscription build fails instead of
 /// silently failing to decode `get_plan` at runtime.
-pub use payflow_shared::Plan;
+pub use payflow_shared::{Plan, PlanChargeTerms};
 
 /// Lifecycle status of a subscription mandate.
 #[contracttype]
