@@ -115,6 +115,9 @@ pub enum Error {
     /// so the token is unsafe for exact-amount accounting (for example a
     /// fee-on-transfer token). The refund is rolled back.
     UnexpectedTransferAmount = 2040,
+    /// The subscriber's unreserved vault balance cannot cover one period's
+    /// charge for a new mandate.
+    InsufficientBalance = 2041,
 }
 
 impl From<Error> for ErrorCode {

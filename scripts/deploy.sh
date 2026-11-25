@@ -132,6 +132,9 @@ if [[ "$DRY_RUN" == true ]]; then
   echo '==> granting debit rights to subscription'
   print_command stellar contract invoke --id '<VAULT_ID>' --source "$SOURCE" \
     --network "$NETWORK" -- set_subscription --subscription '<SUBSCRIPTION_ID>'
+  echo '==> configuring subscription address in plan registry'
+  print_command stellar contract invoke --id '<REGISTRY_ID>' --source "$SOURCE" \
+    --network "$NETWORK" -- set_subscription_contract --subscription '<SUBSCRIPTION_ID>'
   echo '==> reading native token id'
   print_command stellar contract id asset --asset native --network "$NETWORK"
   echo "==> writing deployments/$NETWORK.env and deployments/$NETWORK.json (after successful deployment)"
@@ -181,11 +184,14 @@ echo "==> 3/3 subscription"
 SUBSCRIPTION="$(deploy payflow_subscription.wasm --admin "$ADMIN" \
   --plan_registry "$REGISTRY" --vault "$VAULT" --fee_bps "$FEE_BPS" --fee_to "$FEE_TO")"
 
-# The vault and the subscription contract each need the other's address, so
-# one side has to be wired after both exist. Only the vault admin can do it.
+# Both contracts are wired to the subscription after all three contracts exist.
 echo "==> granting debit rights to subscription"
 stellar contract invoke --id "$VAULT" --source "$SOURCE" --network "$NETWORK" \
   -- set_subscription --subscription "$SUBSCRIPTION" >/dev/null
+
+echo "==> configuring subscription address in plan registry"
+stellar contract invoke --id "$REGISTRY" --source "$SOURCE" --network "$NETWORK" \
+  -- set_subscription_contract --subscription "$SUBSCRIPTION" >/dev/null
 
 TOKEN="$(stellar contract id asset --asset native --network "$NETWORK" | tail -1)"
 

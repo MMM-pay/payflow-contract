@@ -12,8 +12,9 @@
 //! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
 //! |---|---|---|---|---|---|
 //! | `__constructor` | 0 | 2 (Admin, NextPlanId) | 0 | 0 | Extends instance TTL |
-//! | `create_plan` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
-//! | `create_plans` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 per plan | Batch ≤10; extends instance + persistent TTLs |
+//! | `set_subscription_contract` | 1 (Admin) | 1 (SubscriptionContract) | 0 | 0 | Extends instance TTL |
+//! | `create_plan` | 2 (NextPlanId, SubscriptionContract) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
+//! | `create_plans` | 2 (NextPlanId, SubscriptionContract) | 1 (NextPlanId) | 0 | 4–6 per plan | Batch ≤10; extends instance + persistent TTLs |
 //! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (PlanChargesPaused) | Extends persistent TTL |
@@ -147,6 +148,35 @@ mod contract {
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
         }
 
+        /// Configure the subscription contract whose address cannot be used as
+        /// a plan token. This is set after deployment because the registry is
+        /// deployed before the subscription contract, which depends on it.
+        ///
+        /// # Auth
+        /// Requires authorization from the contract admin.
+        ///
+        /// # Events
+        /// Emits no events.
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if the registry has no admin.
+        pub fn set_subscription_contract(env: Env, subscription: Address) -> Result<(), Error> {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(Error::NotInitialized)?;
+            admin.require_auth();
+
+            env.storage()
+                .instance()
+                .set(&DataKey::SubscriptionContract, &subscription);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+            Ok(())
+        }
+
         /// Publish a new plan. Only the merchant may publish plans in its own name.
         ///
         /// `keeper_bps` is the share of each charge paid to whoever settles it,
@@ -172,9 +202,12 @@ mod contract {
         /// if `name` exceeds [`MAX_NAME_LEN`], [`Error::DescriptionTooLong`] if `description`
         /// exceeds [`MAX_DESCRIPTION_LEN`], [`Error::InvalidPeriod`] if `period < MIN_PERIOD`,
         /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`,
+        /// [`Error::InvalidToken`] if `token` is this contract's or the
+        /// configured subscription contract's address,
         /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`],
-        /// [`Error::NotInitialized`] if the contract has not been initialized, or
-        /// [`Error::PlanIdOverflow`] if the next plan ID would exceed `u64`.
+        /// [`Error::NotInitialized`] if the contract or subscription address
+        /// has not been initialized, or [`Error::PlanIdOverflow`] if the next
+        /// plan ID would exceed `u64`.
         #[allow(clippy::too_many_arguments)]
         pub fn create_plan(
             env: Env,
@@ -208,7 +241,8 @@ mod contract {
                 payout,
                 max_subscribers,
             };
-            Self::validate_plan(&params)?;
+            let subscription = Self::read_subscription_contract(&env)?;
+            Self::validate_plan(&env, &params, &subscription)?;
 
             let id = Self::read_next_plan_id(&env)?;
             let next_id = id.checked_add(1).ok_or(Error::PlanIdOverflow)?;
@@ -256,8 +290,9 @@ mod contract {
                 return Err(Error::BatchTooLarge);
             }
 
+            let subscription = Self::read_subscription_contract(&env)?;
             for i in 0..plans.len() {
-                Self::validate_plan(&plans.get(i).unwrap())?;
+                Self::validate_plan(&env, &plans.get(i).unwrap(), &subscription)?;
             }
 
             let first_id = Self::read_next_plan_id(&env)?;
@@ -1031,7 +1066,21 @@ mod contract {
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
         }
 
-        fn validate_plan(params: &PlanParams) -> Result<(), Error> {
+        fn read_subscription_contract(env: &Env) -> Result<Address, Error> {
+            env.storage()
+                .instance()
+                .get(&DataKey::SubscriptionContract)
+                .ok_or(Error::NotInitialized)
+        }
+
+        fn validate_plan(
+            env: &Env,
+            params: &PlanParams,
+            subscription: &Address,
+        ) -> Result<(), Error> {
+            if params.token == env.current_contract_address() || &params.token == subscription {
+                return Err(Error::InvalidToken);
+            }
             if params.amount <= 0 {
                 return Err(Error::InvalidAmount);
             }

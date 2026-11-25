@@ -73,6 +73,16 @@ pub struct OperationWindow {
     pub operations: u32,
 }
 
+/// One mandate's requested reserve in a bulk reserve update.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveUpdate {
+    /// Mandate whose reserve is being replaced.
+    pub mandate_id: u64,
+    /// New reserved amount; zero releases the reserve.
+    pub amount: i128,
+}
+
 /// A single contract upgrade record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

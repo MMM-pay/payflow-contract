@@ -1,6 +1,6 @@
 # Mainnet deployment checklist
 
-A mainnet deployment is irreversible in practice: contract constructors set the initial admin and wiring, and the admin address controls protocol configuration. Use a multisig account for `ADMIN`, keep the deployer separate, and review every value before broadcasting transactions.
+A mainnet deployment is irreversible in practice: contract constructors set initial configuration, and the admin address controls protocol wiring. Use a multisig account for `ADMIN`, keep the deployer separate, and review every value before broadcasting transactions.
 
 ## Before deployment
 
@@ -11,7 +11,7 @@ A mainnet deployment is irreversible in practice: contract constructors set the 
 - [ ] Set `FEE_TO` to the approved fee recipient. It must not equal the deployer address.
 - [ ] Set `RPC_URL` to the organization's trusted mainnet Soroban RPC endpoint. Mainnet does not inherit the testnet RPC default.
 - [ ] Review `FEE_BPS` and confirm that the fee recipient and fee policy have been approved.
-- [ ] Confirm the deployment signing setup can authorize `ADMIN` for the vault's `set_subscription` call. That call requires admin authorization and runs after contract creation. The deploy script does not collect multisig approvals; if the installed CLI signing setup cannot satisfy the multisig threshold, stop and arrange the approved multisig transaction flow before deploying.
+- [ ] Confirm the deployment signing setup can authorize `ADMIN` for the vault's `set_subscription` and registry's `set_subscription_contract` calls. They require admin authorization and run after contract creation. The deploy script does not collect multisig approvals; if the installed CLI signing setup cannot satisfy the multisig threshold, stop and arrange the approved multisig transaction flow before deploying.
 - [ ] Run a dry run and inspect every printed command and address:
 
 ```bash

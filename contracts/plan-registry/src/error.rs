@@ -10,7 +10,7 @@ use soroban_sdk::contracterror;
 pub enum Error {
     /// The contract has already been initialized.
     AlreadyInitialized = 1001,
-    /// The contract has not been initialized with an admin and counter.
+    /// The contract or its subscription address has not been initialized.
     NotInitialized = 1002,
     /// The requested plan ID does not exist in storage.
     PlanNotFound = 1003,
@@ -61,6 +61,8 @@ pub enum Error {
     /// The next plan ID cannot be represented: the counter is at `u64::MAX`,
     /// or a batch would carry it past `u64::MAX`. No plan is written.
     PlanIdOverflow = 1024,
+    /// The plan token address is a reserved Payflow contract address.
+    InvalidToken = 1025,
 }
 
 impl From<Error> for ErrorCode {

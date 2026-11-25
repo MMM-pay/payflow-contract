@@ -2121,6 +2121,107 @@ fn set_reserve_replaces_rather_than_adds() {
 }
 
 #[test]
+fn set_reserves_updates_each_mandate_and_commits_the_total_once() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &200);
+    let updates = soroban_sdk::vec![
+        &h.env,
+        ReserveUpdate {
+            mandate_id: MANDATE_A,
+            amount: 300,
+        },
+        ReserveUpdate {
+            mandate_id: MANDATE_B,
+            amount: 400,
+        },
+    ];
+
+    h.vault.set_reserves(&user, &h.token, &updates);
+    let last_event = last_reserve_set(&h);
+
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 300);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_B), 400);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 700);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 300);
+    assert_eq!(last_event, Some((400, 700)));
+}
+
+#[test]
+fn set_reserves_rejects_invalid_batches_without_writing() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let empty = soroban_sdk::Vec::new(&h.env);
+    assert_eq!(
+        h.vault.try_set_reserves(&user, &h.token, &empty),
+        Err(Ok(Error::EmptyReserveBatch))
+    );
+
+    let duplicate = soroban_sdk::vec![
+        &h.env,
+        ReserveUpdate {
+            mandate_id: MANDATE_A,
+            amount: 100,
+        },
+        ReserveUpdate {
+            mandate_id: MANDATE_A,
+            amount: 200,
+        },
+    ];
+    assert_eq!(
+        h.vault.try_set_reserves(&user, &h.token, &duplicate),
+        Err(Ok(Error::DuplicateReserve))
+    );
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+
+    let too_large = {
+        let mut updates = soroban_sdk::Vec::new(&h.env);
+        for id in 0..=MAX_RESERVE_UPDATES {
+            updates.push_back(ReserveUpdate {
+                mandate_id: u64::from(id),
+                amount: 0,
+            });
+        }
+        updates
+    };
+    assert_eq!(
+        h.vault.try_set_reserves(&user, &h.token, &too_large),
+        Err(Ok(Error::ReserveBatchTooLarge))
+    );
+}
+
+#[test]
+fn set_reserves_uses_fewer_ledger_writes_than_individual_reserve_calls() {
+    let batch = setup();
+    let batch_user = depositor(&batch, 1_000);
+    let mut updates = soroban_sdk::Vec::new(&batch.env);
+    for id in 1..=10 {
+        updates.push_back(ReserveUpdate {
+            mandate_id: id,
+            amount: 10,
+        });
+    }
+    batch
+        .vault
+        .set_reserves(&batch_user, &batch.token, &updates);
+    let batched_writes = batch.env.cost_estimate().resources().write_entries;
+
+    let individual = setup();
+    let individual_user = depositor(&individual, 1_000);
+    let mut individual_writes = 0;
+    for id in 1..=10 {
+        individual
+            .vault
+            .set_reserve(&individual_user, &individual.token, &id, &10);
+        individual_writes += individual.env.cost_estimate().resources().write_entries;
+    }
+    assert!(
+        batched_writes < individual_writes,
+        "batched reserve writes were {batched_writes}; individual calls wrote {individual_writes} entries"
+    );
+}
+
+#[test]
 fn releasing_a_reserve_restores_the_unreserved_balance() {
     let h = setup();
     let user = depositor(&h, 1_000);

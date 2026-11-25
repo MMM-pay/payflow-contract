@@ -78,6 +78,9 @@ must read exactly the keys and shapes the old code wrote:
   config entries).
 - **Storage keys are stable.** Never rename a `DataKey` variant or change the
   shape of an already-used variant.
+- Upgrading the plan registry also configures the deployed subscription
+  contract address for token validation; `scripts/upgrade.sh` reads it from
+  `deployments/<network>.env` and requires the admin signer.
 - A change that cannot satisfy these needs a migration, not an upgrade.
 
 ## Tests

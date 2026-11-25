@@ -16,7 +16,7 @@
 //! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
 //! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
 //! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read and vault deposit; extends TTLs |
-//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
+//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, mutable plan pause, Vault balance) | 2–3 (Mandate, Vault balance) | Plan snapshot avoids a full plan read on non-completing charges |
 //! | `upgrade` | 4 (config) | 0 | 2–4 (Mandate, Plan, pause view) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
 //! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
 //! | `cancel_page` | 0 | 0 | ≤100 (index + Mandates) | ≤50 (Mandates) | Page ≤50, extends persistent TTLs |
@@ -90,13 +90,14 @@ pub use events::{
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
-    ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, Mandate, MandateStatus,
-    MandateSummary, Plan, UpgradeRecord,
+    ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, LegacyMandate, Mandate,
+    MandateStatus, MandateSummary, Plan, PlanSnapshot, UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
-    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, TryFromVal,
+    Val, Vec,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -156,13 +157,14 @@ mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
         ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
-        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
-        MandateEnded, MandateStatus, MandateSummary, MandateTransferred, MandateUpdated,
-        MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded,
-        SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec,
-        BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON,
-        MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
-        PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
+        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, LegacyMandate, Mandate,
+        MandateCompleted, MandateEnded, MandateStatus, MandateSummary, MandateTransferred,
+        MandateUpdated, MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, PlanSnapshot,
+        ProtocolPauseChanged, Refunded, SeatsChanged, String, Subscribed, TryFromVal,
+        UpgradeRecord, Upgraded, Val, VaultClient, Vec, BPS_DENOMINATOR, CANCEL_REASON_NONE,
+        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS,
+        MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD,
+        SECONDS_PER_LEDGER,
     };
 
     /// Billing engine for pull-based recurring payments.
@@ -399,6 +401,15 @@ mod contract {
                 return Err(Error::PlanFull);
             }
 
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            let vault = VaultClient::new(&env, &vault_addr);
+            let Ok(Ok(unreserved)) = vault.try_unreserved_balance(&subscriber, &plan.token) else {
+                return Err(Error::VaultCallFailed);
+            };
+            if unreserved < plan.amount {
+                return Err(Error::InsufficientBalance);
+            }
+
             let id: u64 = env
                 .storage()
                 .instance()
@@ -452,6 +463,11 @@ mod contract {
                 referrer: referrer.clone(),
                 referral_bps,
                 status: MandateStatus::Active,
+                plan_snapshot: PlanSnapshot {
+                    name: plan.name.clone(),
+                    amount: plan.amount,
+                    period: plan.period,
+                },
             };
 
             Self::write_mandate(&env, &mandate);
@@ -558,6 +574,7 @@ mod contract {
             Self::require_not_protocol_paused(&env)?;
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            Self::apply_plan_snapshot(&mut mandate);
 
             let now = env.ledger().timestamp();
             if !super::lifecycle::active_at(&mandate, now) {
@@ -682,7 +699,9 @@ mod contract {
                 .publish(&env);
             }
 
-            Self::recompute_committed_revenue(&env, mandate.plan_id);
+            if completed {
+                Self::recompute_committed_revenue(&env, mandate.plan_id);
+            }
 
             Ok(ChargeResult {
                 merchant_amount,
@@ -729,7 +748,8 @@ mod contract {
         /// [`Error::ChargeWouldSucceed`] if the vault covers the charge, or
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
-            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            Self::apply_plan_snapshot(&mut mandate);
 
             // The same gates `charge` applies, in the same order, so a mandate
             // that `charge` would reject for timing, status or caps is
@@ -1000,6 +1020,11 @@ mod contract {
             mandate.amount = plan.amount;
             mandate.period = plan.period;
             mandate.keeper_bps = plan.keeper_bps.min(MAX_KEEPER_BPS);
+            mandate.plan_snapshot = PlanSnapshot {
+                name: plan.name.clone(),
+                amount: plan.amount,
+                period: plan.period,
+            };
             Self::write_mandate(&env, &mandate);
 
             MandateUpdated {
@@ -2281,6 +2306,11 @@ mod contract {
     }
 
     impl Subscription {
+        fn apply_plan_snapshot(mandate: &mut Mandate) {
+            mandate.amount = mandate.plan_snapshot.amount;
+            mandate.period = mandate.plan_snapshot.period;
+        }
+
         /// Whether `charge` may treat this mandate as active at `now`. A mandate
         /// paused until a date resumes by itself once that date passes; a pause
         /// without a date (`paused_until == 0`) stays in force until `set_paused`
@@ -2348,11 +2378,52 @@ mod contract {
 
         fn read_mandate_opt(env: &Env, id: u64) -> Option<Mandate> {
             let key = DataKey::Mandate(id);
-            let mandate: Mandate = env.storage().persistent().get(&key)?;
+            let raw: Val = env.storage().persistent().get(&key)?;
+            let mandate = if let Ok(mandate) = Mandate::try_from_val(env, &raw) {
+                mandate
+            } else {
+                let legacy = LegacyMandate::try_from_val(env, &raw)
+                    .unwrap_or_else(|_| panic!("stored mandate has an unsupported schema"));
+                Self::migrate_legacy_mandate(env, legacy)
+            };
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
             Some(mandate)
+        }
+
+        fn migrate_legacy_mandate(env: &Env, legacy: LegacyMandate) -> Mandate {
+            Mandate {
+                id: legacy.id,
+                subscriber: legacy.subscriber,
+                plan_id: legacy.plan_id,
+                merchant: legacy.merchant,
+                token: legacy.token,
+                amount: legacy.amount,
+                period: legacy.period,
+                created_at: legacy.created_at,
+                next_charge: legacy.next_charge,
+                last_charge: legacy.last_charge,
+                charges_made: legacy.charges_made,
+                max_charges: legacy.max_charges,
+                fee_bps: legacy.fee_bps,
+                keeper_bps: legacy.keeper_bps,
+                paused_until: legacy.paused_until,
+                refunded: legacy.refunded,
+                seats: legacy.seats,
+                max_total: legacy.max_total,
+                total_spent: legacy.total_spent,
+                max_pause_secs: legacy.max_pause_secs,
+                payout: legacy.payout,
+                referrer: legacy.referrer,
+                referral_bps: legacy.referral_bps,
+                status: legacy.status,
+                plan_snapshot: PlanSnapshot {
+                    name: String::from_str(env, ""),
+                    amount: legacy.amount,
+                    period: legacy.period,
+                },
+            }
         }
 
         fn read_grace_period(env: &Env, id: u64) -> u64 {

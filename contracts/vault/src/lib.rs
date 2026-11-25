@@ -34,6 +34,8 @@
 //! | `subscription` | 1 (Subscription) | 0 | 0 | 0 | |
 //! | `deposit_cap` | 0 | 0 | 1 (DepositCap) | 0 | |
 //! | `set_spend_limit` | 0 | 0 | 0 | 1–2 (SpendLimit, SpendWindow) | User auth, extends persistent TTL |
+//! | `set_reserve` | 0 | 0 | 3 (Reserved, ReservedTotal, Balance) | 2 (Reserved, ReservedTotal) | Replaces one reserve |
+//! | `set_reserves` | 0 | 0 | N+2 (Reserved, ReservedTotal, Balance) | N+1 (Reserved, ReservedTotal) | One aggregate total write and one event per mandate |
 //! | `spend_limit` | 0 | 0 | 1 (SpendLimit) | 0 | |
 //! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
@@ -64,10 +66,10 @@ pub use error::Error;
 pub use events::{
     ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw, WithdrawTo,
 };
-pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow, UpgradeRecord};
+pub use types::{DataKey, OperationWindow, ReserveUpdate, SpendLimit, SpendWindow, UpgradeRecord};
 
 use soroban_sdk::{
-    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -95,14 +97,18 @@ pub const VAULT_OPERATION_WINDOW_SECS: u64 = 60;
 /// rewrite the balance entry and spam events.
 pub const MAX_VAULT_OPERATIONS_PER_WINDOW: u32 = 8;
 
+/// Maximum number of mandate reserves updated by one `set_reserves` call.
+pub const MAX_RESERVE_UPDATES: u32 = 50;
+
 #[allow(missing_docs)]
 mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractUpgraded,
         DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
-        ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw, WithdrawTo,
-        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP,
-        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
+        ReserveSet, ReserveUpdate, SpendLimit, SpendWindow, String, UpgradeRecord, Vec, Withdraw,
+        WithdrawTo, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_RESERVE_UPDATES,
+        MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
+        VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
 
     /// Custody for subscriber funds.
@@ -732,6 +738,80 @@ mod contract {
                 reserved_total: new_total,
             }
             .publish(&env);
+            Ok(())
+        }
+
+        /// Replace several mandate reserves while writing the aggregate
+        /// reserved total only once. Entries are validated before any write.
+        ///
+        /// Duplicate mandate IDs are rejected; callers should supply the final
+        /// desired amount for each mandate exactly once.
+        ///
+        /// # Auth
+        /// Requires authorization from `user`.
+        ///
+        /// # Events
+        /// Emits one [`ReserveSet`] per update, in input order.
+        ///
+        /// # Errors
+        /// Returns [`Error::EmptyReserveBatch`] for an empty batch,
+        /// [`Error::ReserveBatchTooLarge`] above [`MAX_RESERVE_UPDATES`],
+        /// [`Error::DuplicateReserve`] for repeated mandate IDs,
+        /// [`Error::InvalidAmount`] for a negative amount, or
+        /// [`Error::ReserveExceedsBalance`] if the resulting aggregate exceeds
+        /// the user's balance.
+        pub fn set_reserves(
+            env: Env,
+            user: Address,
+            token: Address,
+            updates: Vec<ReserveUpdate>,
+        ) -> Result<(), Error> {
+            user.require_auth();
+            if updates.is_empty() {
+                return Err(Error::EmptyReserveBatch);
+            }
+            if updates.len() > MAX_RESERVE_UPDATES {
+                return Err(Error::ReserveBatchTooLarge);
+            }
+
+            let mut planned: Vec<(u64, i128, i128)> = Vec::new(&env);
+            let mut seen = soroban_sdk::Map::<u64, bool>::new(&env);
+            let initial_total = Self::read_reserved_total(&env, &user, &token);
+            let mut new_total = initial_total;
+            for i in 0..updates.len() {
+                let update = updates.get(i).unwrap();
+                if update.amount < 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                if seen.contains_key(update.mandate_id) {
+                    return Err(Error::DuplicateReserve);
+                }
+                seen.set(update.mandate_id, true);
+                let old = Self::read_reserved(&env, &user, &token, update.mandate_id);
+                new_total = new_total
+                    .checked_sub(old)
+                    .and_then(|total| total.checked_add(update.amount))
+                    .ok_or(Error::ReserveExceedsBalance)?;
+                planned.push_back((update.mandate_id, old, update.amount));
+            }
+            if new_total > Self::read_balance(&env, &user, &token) {
+                return Err(Error::ReserveExceedsBalance);
+            }
+
+            let mut event_total = initial_total;
+            for (mandate_id, old, amount) in planned.iter() {
+                event_total = (event_total - old) + amount;
+                Self::write_reserved(&env, &user, &token, mandate_id, amount);
+                ReserveSet {
+                    user: user.clone(),
+                    token: token.clone(),
+                    mandate_id,
+                    amount,
+                    reserved_total: event_total,
+                }
+                .publish(&env);
+            }
+            Self::write_reserved_total(&env, &user, &token, new_total);
             Ok(())
         }
 

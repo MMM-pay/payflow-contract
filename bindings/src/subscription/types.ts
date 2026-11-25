@@ -1,5 +1,4 @@
 import {Address} from '@stellar/stellar-sdk';
-
     /**
  * Errors returned by the subscription contract.
  */
@@ -184,9 +183,19 @@ export const Error = {
    * and plan upgrades are refused until it is resumed; reads,
    * cancellations, refunds and vault withdrawals are unaffected.
    */
-  2039 : { message: "ProtocolPaused" }
+  2039 : { message: "ProtocolPaused" },
+  /**
+   * A refund transfer did not deliver exactly the recorded refund amount,
+   * so the token is unsafe for exact-amount accounting (for example a
+   * fee-on-transfer token). The refund is rolled back.
+   */
+  2040 : { message: "UnexpectedTransferAmount" },
+  /**
+   * The subscriber's unreserved vault balance cannot cover one period's
+   * charge for a new mandate.
+   */
+  2041 : { message: "InsufficientBalance" }
 }
-
 /**
  * A standing authorization from a subscriber to a merchant, bounded in
  * amount, frequency, total number of charges and total spend.
@@ -269,6 +278,10 @@ export interface Mandate {
    * ID of the plan against which this mandate was opened or upgraded.
    */
   plan_id: bigint;
+  /**
+   * Plan terms copied at sign-up.
+   */
+  plan_snapshot: PlanSnapshot;
   /**
    * Referral share in basis points of the merchant's share, frozen from the
    * plan at sign-up. Capped at `MAX_REFERRAL_BPS`.
@@ -390,6 +403,25 @@ export interface EstimatedEnd {
    * Unix seconds of the final scheduled (or, once completed, actual) charge.
    */
   timestamp: bigint;
+}
+
+/**
+ * Plan terms captured when a mandate is opened or upgraded. The registry's
+ * mutable state (such as charging pause status) remains authoritative.
+ */
+export interface PlanSnapshot {
+  /**
+   * Total charge per billing period.
+   */
+  amount: bigint;
+  /**
+   * Plan name at the time the subscriber agreed to its terms.
+   */
+  name: string;
+  /**
+   * Billing period in seconds.
+   */
+  period: bigint;
 }
 
 /**

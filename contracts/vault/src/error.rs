@@ -57,6 +57,12 @@ pub enum Error {
     /// A transfer destination is the zero/unset address: the all-zero contract
     /// or account strkey. Sending funds there would burn them (#236).
     ZeroAddress = 3017,
+    /// A bulk reserve update contains no entries.
+    EmptyReserveBatch = 3018,
+    /// A bulk reserve update exceeds `MAX_RESERVE_UPDATES`.
+    ReserveBatchTooLarge = 3019,
+    /// A bulk reserve update contains the same mandate more than once.
+    DuplicateReserve = 3020,
 }
 
 impl From<Error> for ErrorCode {
