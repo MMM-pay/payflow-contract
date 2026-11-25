@@ -88,6 +88,64 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ## Externally visible behaviour changes
 
+### Cancelled mandates are explicitly rejected by charge (#270)
+
+`charge` and `flag_failed_charge` already rejected cancelled or completed
+mandates with `MandateNotActive` (2005) through lifecycle checks. This change
+adds explicit terminal-state guards for `MandateStatus::Cancelled` and
+`MandateStatus::Completed` so a cancelled or merchant-ended mandate cannot be
+charged even if lifecycle helpers change in the future. There is no new error
+code or expected client-visible behavior change for valid callers; cancelled and
+ended mandates still fail with `MandateNotActive`.
+
+Regression tests: `cancelled_or_ended_mandate_can_never_be_charged`.
+
+### Deployment wiring rejects self-referential addresses (#282)
+
+`subscription::__constructor` now rejects invalid cross-contract wiring with
+`InvalidAddress` (2047) when `plan_registry` or `vault` is the subscription
+contract itself, or when `vault == plan_registry`. `vault::set_subscription`
+now rejects `InvalidAddress` (3022) when the configured subscription address is
+the vault contract itself. These checks fail before writing configuration, so a
+miswired deployment cannot leave a contract pointing at itself or confusing
+contract roles. Clients that previously relied on such wiring will now receive a
+typed contract error during deployment/configuration.
+
+Regression tests: `constructor_rejects_same_vault_and_plan_registry`,
+`constructor_rejects_self_referential_addresses`,
+`set_subscription_rejects_self_address`.
+
+### Admin handover is two-step (#238)
+
+`update_admin(new_admin)` has been removed from `plan-registry`, `subscription`
+and `vault`. It set the admin role in one call, so a single compromised or
+mistyped admin key could hand the contract to an address that never agreed to
+hold it, with no way to undo the mistake.
+
+Handover now takes two calls:
+
+1. `propose_admin(new_admin)` — authorized by the current admin. This records
+   `new_admin` under the new `DataKey::PendingAdmin` instance key and changes no
+   authority. Proposing again overwrites the pending address, so a wrong
+   proposal can be replaced before it is accepted.
+2. `accept_admin(new_admin)` — authorized by `new_admin`. The role moves only
+   when the proposed address itself accepts, and the pending proposal is
+   consumed. Accepting with no proposal fails with `PendingAdminNotFound`
+   (1025 / 2041 / 3020) and accepting from any other address fails with
+   `NotPendingAdmin` (1026 / 2042 / 3021).
+
+Clients that call `update_admin` must switch to the two-step flow. The admin
+returned by `admin()` is unchanged until acceptance, and every admin-gated
+entry point (`set_fee_bps`, `set_protocol_paused`, `set_subscription`,
+`upgrade_wasm`, and so on) keeps using the stored `Admin` address. A deployment
+whose `PendingAdmin` key is set but never accepted simply keeps its current
+admin; there is no timeout.
+
+Regression tests: `accept_admin_without_a_proposal_is_rejected`,
+`accept_admin_rejects_an_address_that_was_not_proposed`,
+`accept_admin_requires_the_proposed_admins_auth` and
+`a_consumed_admin_proposal_cannot_be_replayed` in all three contract suites.
+
 ### Due-date overflow now reports `ScheduleOverflow` (#290)
 
 The period and due-date arithmetic in `subscription` was reviewed for overflow
@@ -121,6 +179,23 @@ This is a hardening change: an address that cycled tiny deposits and
 withdrawals could otherwise rewrite the balance entry and emit events
 indefinitely. Normal subscribers can still deposit and withdraw several times
 a minute. A wallet that hits the limit should wait for the next window.
+
+### Withdrawals and payouts reject the zero address (#236)
+
+`vault:withdraw_to` now rejects `to` when it is the all-zero account or
+contract address, with the new typed error `ZeroAddress` (3017). `withdraw` and
+`withdraw_all` apply the same check to `user`, and every debit path (`debit`,
+`debit_split`, `debit_multi_mandate`) rejects zero-recipient legs, so a plan's
+`payout`, the fee recipient, a keeper tip or a referral share cannot be sent to
+an unset address. The check runs before any balance write, token transfer or
+event, so a rejected call leaves the ledger untouched and consumes no
+deposit/withdraw window budget.
+
+This is a behaviour change for clients: a withdrawal to the zero strkey that
+used to succeed (and burn the tokens) now fails with 3017. A charge whose
+mandate carries a zero payout fails at settlement with
+`subscription:VaultCallFailed` (2037), because the vault rejects the leg; no
+funds move and the mandate stays chargeable once the payout is corrected.
 
 ### Refund cap now accounts for referral fees and keeper tips (PR #301)
 

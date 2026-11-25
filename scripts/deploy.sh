@@ -48,6 +48,9 @@ fi
 NETWORK="${POSITIONAL[0]:-testnet}"
 SOURCE="${POSITIONAL[1]:-payflow-deployer}"
 FEE_BPS="${FEE_BPS:-100}"
+# Largest share of a subscriber's balance that may be reserved (#348), in
+# basis points. 9000 keeps 10% free and withdrawable.
+RESERVE_CAP_BPS="${RESERVE_CAP_BPS:-9000}"
 if [[ "$NETWORK" == "mainnet" ]]; then
   RPC_URL="${RPC_URL:-}"
 else
@@ -122,7 +125,8 @@ if [[ "$DRY_RUN" == true ]]; then
   echo '    result: <REGISTRY_ID>'
   echo '==> 2/3 vault'
   print_command stellar contract deploy --wasm "$WASM_DIR/payflow_vault.wasm" \
-    --source "$SOURCE" --network "$NETWORK" -- --admin "$ADMIN"
+    --source "$SOURCE" --network "$NETWORK" -- --admin "$ADMIN" \
+    --reserve_cap_bps "$RESERVE_CAP_BPS"
   echo '    result: <VAULT_ID>'
   echo '==> 3/3 subscription'
   print_command stellar contract deploy --wasm "$WASM_DIR/payflow_subscription.wasm" \
@@ -175,7 +179,7 @@ echo "==> 1/3 plan-registry"
 REGISTRY="$(deploy payflow_plan_registry.wasm --admin "$ADMIN")"
 
 echo "==> 2/3 vault"
-VAULT="$(deploy payflow_vault.wasm --admin "$ADMIN")"
+VAULT="$(deploy payflow_vault.wasm --admin "$ADMIN" --reserve_cap_bps "$RESERVE_CAP_BPS")"
 
 echo "==> 3/3 subscription"
 SUBSCRIPTION="$(deploy payflow_subscription.wasm --admin "$ADMIN" \
@@ -196,6 +200,7 @@ NETWORK=$NETWORK
 ADMIN=$ADMIN
 FEE_BPS=$FEE_BPS
 FEE_TO=$FEE_TO
+RESERVE_CAP_BPS=$RESERVE_CAP_BPS
 PLAN_REGISTRY_ID=$REGISTRY
 VAULT_ID=$VAULT
 SUBSCRIPTION_ID=$SUBSCRIPTION
@@ -208,6 +213,7 @@ jq -n \
   --arg ADMIN "$ADMIN" \
   --arg FEE_BPS "$FEE_BPS" \
   --arg FEE_TO "$FEE_TO" \
+  --arg RESERVE_CAP_BPS "$RESERVE_CAP_BPS" \
   --arg PLAN_REGISTRY_ID "$REGISTRY" \
   --arg VAULT_ID "$VAULT" \
   --arg SUBSCRIPTION_ID "$SUBSCRIPTION" \
@@ -221,6 +227,7 @@ jq -n \
     ADMIN: $ADMIN,
     FEE_BPS: $FEE_BPS,
     FEE_TO: $FEE_TO,
+    RESERVE_CAP_BPS: $RESERVE_CAP_BPS,
     PLAN_REGISTRY_ID: $PLAN_REGISTRY_ID,
     VAULT_ID: $VAULT_ID,
     SUBSCRIPTION_ID: $SUBSCRIPTION_ID,

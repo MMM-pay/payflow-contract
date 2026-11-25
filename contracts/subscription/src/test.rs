@@ -12,7 +12,7 @@ use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
+    xdr::{ContractEventBody, Limits, ReadXdr, ScMap, ScSymbol, ScVal, WriteXdr},
     Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal,
 };
 
@@ -22,12 +22,15 @@ const PRICE: i128 = 10_000;
 const FEE_BPS: u32 = 100; // 1%
 const KEEPER_BPS: u32 = 200; // 2% of the merchant share
 const REFERRAL_BPS: u32 = 1_000; // 10% of the merchant share (from #136)
+/// The all-zero contract strkey (#236).
+const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 /// A valid subscription wasm used as the `upgrade_wasm` target (#158).
 const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_subscription.wasm");
 
 struct World<'a> {
     env: Env,
     sub: SubscriptionClient<'a>,
+    sub_id: Address,
     registry: RegistryClient<'a>,
     vault: RealVaultClient<'a>,
     token: Address,
@@ -56,7 +59,7 @@ fn world() -> World<'static> {
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     let sub_id = env.register(
@@ -78,6 +81,7 @@ fn world() -> World<'static> {
         minter: StellarAssetClient::new(&env, &token),
         env,
         sub,
+        sub_id,
         registry,
         vault,
         token,
@@ -568,6 +572,42 @@ fn first_charge_is_due_immediately_and_splits_fee() {
 }
 
 #[test]
+fn fee_recipient_receives_exact_fee_for_amount_and_rate_matrix() {
+    let cases = [
+        (100_i128, 0_u32),
+        (999, 1),
+        (999, 100),
+        (10_003, 333),
+        (123_456, 999),
+        (1_000_001, MAX_FEE_BPS),
+    ];
+
+    for (amount, fee_bps) in cases {
+        let w = world();
+        w.sub.set_fee_bps(&fee_bps);
+        let plan_id = w.plan_priced(amount);
+        let user = w.subscriber(amount);
+        let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        let fee_before = w.token_client.balance(&w.fee_to);
+        let merchant_before = w.token_client.balance(&w.merchant);
+        let expected_fee = amount * i128::from(fee_bps) / BPS_DENOMINATOR;
+
+        w.sub.charge(&w.keeper, &id);
+
+        assert_eq!(
+            w.token_client.balance(&w.fee_to) - fee_before,
+            expected_fee,
+            "fee recipient amount {amount} at {fee_bps} bps"
+        );
+        assert_eq!(
+            w.token_client.balance(&w.merchant) - merchant_before,
+            amount - expected_fee,
+            "merchant amount {amount} at {fee_bps} bps"
+        );
+    }
+}
+
+#[test]
 fn charge_settles_merchant_and_fee_through_one_vault_call() {
     let w = world();
     let plan_id = w.plan();
@@ -608,6 +648,67 @@ fn a_zero_fee_charge_emits_one_debit() {
     assert_eq!(w.token_client.balance(&w.merchant), PRICE);
     assert_eq!(w.token_client.balance(&w.fee_to), 0);
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn charge_correctly_handles_zero_fee_bps() {
+    let w = world();
+    let plan_id = w.plan();
+    let min_plan_id = w.plan_priced(payflow_shared::MIN_CHARGE_AMOUNT);
+
+    // Give the fee recipient a non-zero starting balance so we prove it stays
+    // strictly untouched rather than merely remaining zero.
+    w.minter.mint(&w.fee_to, &1_000);
+    let fee_before = w.token_client.balance(&w.fee_to);
+    assert_eq!(fee_before, 1_000);
+
+    w.sub.set_fee_bps(&0);
+    assert_eq!(w.sub.fee_bps(), 0);
+
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let min_id = w
+        .sub
+        .subscribe(&user, &min_plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.get_mandate(&id).fee_bps, 0);
+    assert_eq!(w.sub.get_mandate(&min_id).fee_bps, 0);
+
+    // First charge at full plan price: single debit leg, full amount to merchant.
+    let res1 = w.sub.charge(&w.keeper, &id);
+    assert_eq!(res1.fee, 0);
+    assert_eq!(res1.merchant_amount, PRICE);
+    assert_eq!(res1.charges_made, 1);
+    assert_eq!(vault_debit_event_count(&w.env), 1);
+    assert_eq!(last_event_field_i128(&w.env, "fee"), Some(0));
+    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(PRICE));
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(w.token_client.balance(&w.merchant), PRICE);
+
+    // Minimum charge amount also settles without panics or underflow.
+    let min_res = w.sub.charge(&w.keeper, &min_id);
+    assert_eq!(min_res.fee, 0);
+    assert_eq!(min_res.merchant_amount, payflow_shared::MIN_CHARGE_AMOUNT);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        PRICE + payflow_shared::MIN_CHARGE_AMOUNT
+    );
+
+    // Second period charge behaves identically.
+    w.advance(MONTH);
+    let res2 = w.sub.charge(&w.keeper, &id);
+    assert_eq!(res2.fee, 0);
+    assert_eq!(res2.merchant_amount, PRICE);
+    assert_eq!(res2.charges_made, 2);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee_before);
+    assert_eq!(
+        w.token_client.balance(&w.merchant),
+        2 * PRICE + payflow_shared::MIN_CHARGE_AMOUNT
+    );
+    assert_eq!(
+        w.vault.balance(&user, &w.token),
+        100_000 - 2 * PRICE - payflow_shared::MIN_CHARGE_AMOUNT
+    );
 }
 
 #[test]
@@ -687,6 +788,7 @@ fn charge_requires_the_keeper_to_authorize() {
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
     assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
     assert_eq!(w.token_client.balance(&w.keeper), 0);
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
 }
 
 #[test]
@@ -859,6 +961,54 @@ fn cancel_stops_billing_permanently() {
         w.sub.try_charge(&w.keeper, &id),
         Err(Ok(Error::MandateNotActive))
     );
+}
+
+#[test]
+fn cancelled_or_ended_mandate_can_never_be_charged() {
+    let w = world();
+    let plan_id = w.plan();
+    let cancelled_user = w.subscriber(100_000);
+    let ended_user = w.subscriber(100_000);
+
+    let cancelled_id = w
+        .sub
+        .subscribe(&cancelled_user, &plan_id, &0, &0, &None::<Address>);
+    let ended_id = w
+        .sub
+        .subscribe(&ended_user, &plan_id, &0, &0, &None::<Address>);
+
+    let before_cancelled = w.sub.get_mandate(&cancelled_id);
+    let before_ended = w.sub.get_mandate(&ended_id);
+    let merchant_before = w.token_client.balance(&w.merchant);
+    let cancelled_before = w.token_client.balance(&cancelled_user);
+    let ended_before = w.token_client.balance(&ended_user);
+
+    w.sub.cancel(&cancelled_user, &cancelled_id);
+    w.sub.end_mandate(&w.merchant, &ended_id);
+    w.advance(MONTH);
+
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &cancelled_id),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &ended_id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    let after_cancelled = w.sub.get_mandate(&cancelled_id);
+    let after_ended = w.sub.get_mandate(&ended_id);
+    assert_eq!(after_cancelled.status, MandateStatus::Cancelled);
+    assert_eq!(after_ended.status, MandateStatus::Cancelled);
+    assert_eq!(after_cancelled.charges_made, before_cancelled.charges_made);
+    assert_eq!(after_ended.charges_made, before_ended.charges_made);
+    assert_eq!(after_cancelled.total_spent, before_cancelled.total_spent);
+    assert_eq!(after_ended.total_spent, before_ended.total_spent);
+    assert_eq!(after_cancelled.next_charge, before_cancelled.next_charge);
+    assert_eq!(after_ended.next_charge, before_ended.next_charge);
+    assert_eq!(w.token_client.balance(&w.merchant), merchant_before);
+    assert_eq!(w.token_client.balance(&cancelled_user), cancelled_before);
+    assert_eq!(w.token_client.balance(&ended_user), ended_before);
 }
 
 #[test]
@@ -1319,7 +1469,7 @@ fn zero_fee_pays_merchant_in_full() {
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
     let sub_id = env.register(
         Subscription,
@@ -1369,6 +1519,58 @@ fn constructor_rejects_excessive_fee() {
     env.register(
         Subscription,
         (a.clone(), a.clone(), a.clone(), MAX_FEE_BPS + 1, a.clone()),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_same_vault_and_plan_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let shared = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    env.register(
+        Subscription,
+        (admin, shared.clone(), shared, FEE_BPS, fee_to),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_self_plan_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let vault = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    let contract_id = Address::generate(&env);
+    env.register_at(
+        &contract_id,
+        Subscription,
+        (admin.clone(), contract_id.clone(), vault, FEE_BPS, fee_to),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2047)")]
+fn constructor_rejects_self_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let registry = Address::generate(&env);
+    let fee_to = Address::generate(&env);
+    let contract_id = Address::generate(&env);
+    env.register_at(
+        &contract_id,
+        Subscription,
+        (
+            admin.clone(),
+            registry,
+            contract_id.clone(),
+            FEE_BPS,
+            fee_to,
+        ),
     );
 }
 
@@ -1892,6 +2094,24 @@ fn quote_and_charge_agree_on_not_due() {
     assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
 }
 
+#[test]
+fn charge_with_a_zero_payout_address_fails_at_settlement() {
+    let w = world();
+    let zero = Address::from_str(&w.env, ZERO_CONTRACT);
+    let plan_id = w.plan_full(0, 0, Some(zero.clone()));
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert!(w.sub.quote_charge(&id).chargeable);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000);
+    assert_eq!(w.token_client.balance(&zero), 0);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
+}
+
 /// Quote chargeable=true but charge fails with `VaultCallFailed` when insufficient balance.
 #[test]
 fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
@@ -1909,6 +2129,7 @@ fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
         w.sub.try_charge(&w.keeper, &id),
         Err(Ok(Error::VaultCallFailed))
     );
+    assert_eq!(w.token_client.balance(&w.fee_to), 0);
 
     // Mandate state unchanged.
     assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
@@ -2494,7 +2715,7 @@ fn fee_paid_to_address() {
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
     vault.set_subscription(&Address::generate(&env));
 
@@ -3256,7 +3477,7 @@ fn fee_to_contract_address_receives_the_fee() {
     let token_client = TokenClient::new(&env, &token);
     let minter = StellarAssetClient::new(&env, &token);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     // fee_to = the registry contract address (a contract, not an account).
@@ -3383,7 +3604,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
     let registry = RegistryClient::new(&env, &registry_id);
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), 10_000u32));
     let vault = RealVaultClient::new(&env, &vault_id);
 
     let sub_id = env.register(
@@ -4068,23 +4289,84 @@ fn zero_means_no_total_spend_cap_and_a_negative_cap_is_rejected() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let w = world();
+    let admin = w.sub.admin();
     let next = Address::generate(&w.env);
 
-    w.sub.update_admin(&next);
+    w.sub.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(w.sub.admin(), admin);
+
+    w.sub.accept_admin(&next);
     assert_eq!(w.sub.admin(), next);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let w = world();
     let before = w.sub.admin();
     let next = Address::generate(&w.env);
 
     w.env.set_auths(&[]);
-    assert!(w.sub.try_update_admin(&next).is_err());
+    assert!(w.sub.try_propose_admin(&next).is_err());
     assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let w = world();
+    let before = w.sub.admin();
+    let next = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_accept_admin(&next).is_err());
+    assert_eq!(w.sub.admin(), before);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let w = world();
+    let before = w.sub.admin();
+    let attacker = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let w = world();
+    let before = w.sub.admin();
+    let next = Address::generate(&w.env);
+    let attacker = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let w = world();
+    let next = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+    w.sub.accept_admin(&next);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(w.sub.admin(), next);
 }
 
 #[test]
@@ -5330,6 +5612,175 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - 2 * PRICE);
 }
 
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let w = world();
+    let admin = w.sub.admin();
+    let payout = Address::generate(&w.env);
+    let referrer = Address::generate(&w.env);
+    let pending_admin = Address::generate(&w.env);
+
+    let plan_id = w.registry.create_plan(
+        &w.merchant,
+        &w.token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&w.env, "Full Plan"),
+        &String::from_str(&w.env, "All knobs"),
+        &KEEPER_BPS,
+        &Symbol::new(&w.env, "saas"),
+        &String::from_str(&w.env, "https://example.com/terms"),
+        &0u64,
+        &REFERRAL_BPS,
+        &Some(payout.clone()),
+        &10u32,
+    );
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &86_400);
+
+    let user = w.subscriber(PRICE * 10);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &5, &(PRICE * 4), &Some(referrer.clone()));
+    w.sub.charge(&w.keeper, &id);
+    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_paused(&user, &paused, &true);
+
+    // A mandate whose charge provably cannot be paid, so the failed-charge
+    // timestamp is written before the upgrade.
+    let broke = Address::generate(&w.env);
+    let failed = w.sub.subscribe(&broke, &plan_id, &0, &0, &None::<Address>);
+    assert!(w.sub.flag_failed_charge(&failed));
+    let failed_at = w.sub.first_failed_charge(&failed).unwrap();
+
+    let deleted = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &deleted);
+    w.sub.delete_mandate(&user, &deleted);
+
+    w.sub.set_protocol_paused(&true);
+    w.sub.propose_admin(&pending_admin);
+
+    let mandate_before = w.sub.get_mandate(&id);
+    let paused_before = w.sub.get_mandate(&paused);
+
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    w.sub.upgrade_wasm(&wasm_hash);
+
+    // The full mandate record still decodes with the current type.
+    let stored = w
+        .env
+        .as_contract(&w.sub.address, || {
+            w.env
+                .storage()
+                .persistent()
+                .get::<_, Mandate>(&DataKey::Mandate(id))
+        })
+        .unwrap();
+    assert_eq!(stored, mandate_before);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(
+        w.sub.get_mandate(&id).last_charge,
+        mandate_before.last_charge
+    );
+    assert_eq!(
+        w.sub.get_mandate(&id).next_charge,
+        mandate_before.next_charge
+    );
+    assert_eq!(w.sub.get_mandate(&paused).status, MandateStatus::Paused);
+    assert_eq!(w.sub.get_mandate(&paused).status, paused_before.status);
+
+    // Instance config, indexes and counters all survive.
+    assert_eq!(w.sub.admin(), admin);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+    assert_eq!(w.sub.plan_registry(), w.registry.address);
+    assert_eq!(w.sub.vault(), w.vault.address);
+    assert_eq!(w.sub.next_mandate_id(), deleted + 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 3);
+    assert_eq!(
+        w.sub.subscriber_mandates(&user, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused, deleted]
+    );
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 4);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused, failed, deleted]
+    );
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 4);
+    assert_eq!(
+        w.sub.plan_mandates(&plan_id, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused, failed, deleted]
+    );
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 3);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    w.env.as_contract(&w.sub.address, || {
+        let p = w.env.storage().persistent();
+        assert_eq!(
+            p.get::<_, u64>(&DataKey::MandateGracePeriod(id)),
+            Some(86_400)
+        );
+        assert_eq!(
+            p.get::<_, u64>(&DataKey::FirstFailedCharge(failed)),
+            Some(failed_at)
+        );
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::MandateTombstone(deleted)),
+            Some(true)
+        );
+        assert_eq!(
+            w.env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::ProtocolPaused),
+            Some(true)
+        );
+        assert_eq!(
+            w.env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still reads the preserved instance config.
+    w.sub.set_fee_bps(&(FEE_BPS + 1));
+    assert_eq!(w.sub.fee_bps(), FEE_BPS + 1);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let w = world();
+    let admin = w.sub.admin();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    let before = w.sub.get_mandate(&id);
+
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(w.sub.admin(), admin);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+    assert_eq!(w.sub.upgrade_history().len(), 0);
+}
+
 #[test]
 fn upgrade_wasm_wrong_signer_rejected() {
     let w = world();
@@ -6463,6 +6914,9 @@ fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
     assert_read_only(env, "vault", || s.vault());
     assert_read_only(env, "fee_bps", || s.fee_bps());
     assert_read_only(env, "next_mandate_id", || s.next_mandate_id());
+    assert_read_only(env, "is_mandate_tombstoned", || {
+        s.is_mandate_tombstoned(&active)
+    });
     assert_read_only(env, "upgrade_history", || s.upgrade_history());
 
     for id in [active, paused, cancelled] {
@@ -6564,6 +7018,9 @@ fn subscription_views_need_no_signature() {
     });
     assert_read_only(env, "plan_committed_revenue (unsigned)", || {
         s.plan_committed_revenue(&plan_id)
+    });
+    assert_read_only(env, "is_mandate_tombstoned (unsigned)", || {
+        s.is_mandate_tombstoned(&active)
     });
     assert_read_only(env, "admin (unsigned)", || s.admin());
 }
@@ -7380,116 +7837,65 @@ fn extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate() {
     assert!(batched < single);
 }
 
-/// Resources the last top-level call consumed: CPU, memory and ledger writes.
-struct BudgetMeasurement {
-    call: &'static str,
-    cpu_instructions: u64,
-    memory_bytes: u64,
-    write_entries: u32,
-    write_bytes: u32,
+// ---------------------------------------------------------------- #247
+// TTL refresh whenever a hot mandate key is accessed.
+
+#[test]
+fn hot_mandate_ttl_is_extended_on_view_access() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let before = w.sub.get_mandate(&id);
+
+    let seq = w.env.ledger().sequence();
+    w.env
+        .ledger()
+        .set_sequence_number(seq + 30 * DAY_IN_LEDGERS);
+    let aged = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert!(aged < PERSIST_BUMP);
+
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), PERSIST_BUMP);
 }
 
-/// Snapshot the resources the most recent call consumed. The caller resets the
-/// budget immediately before the measured call so every run starts level.
-fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
-    let budget = env.cost_estimate().budget();
-    let resources = env.cost_estimate().resources();
-    BudgetMeasurement {
-        call,
-        cpu_instructions: budget.cpu_instruction_cost(),
-        memory_bytes: budget.memory_bytes_cost(),
-        write_entries: resources.write_entries,
-        write_bytes: resources.write_bytes,
-    }
+#[test]
+fn hot_mandate_ttl_is_extended_on_failed_charge_access() {
+    let w = world();
+    let plan_id = w.plan();
+    // An unfunded subscriber gives `flag_failed_charge` a real failure to
+    // report without rewriting the mandate itself.
+    let user = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let seq = w.env.ledger().sequence();
+    w.env
+        .ledger()
+        .set_sequence_number(seq + 30 * DAY_IN_LEDGERS);
+    let aged = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert!(aged < PERSIST_BUMP);
+
+    assert!(w.sub.flag_failed_charge(&id));
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), PERSIST_BUMP);
 }
 
-/// Print the measurements, then compare them with the committed snapshot and
-/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
-/// refreshes the snapshot instead; review the CSV diff before committing it.
-fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
-    let snapshot_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+#[test]
+fn fresh_and_missing_mandates_are_untouched_by_access() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
 
-    std::println!("\n### {contract} per-call resource budgets");
-    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
-    std::println!("| --- | ---: | ---: | ---: | ---: |");
-    for measurement in measurements {
-        std::println!(
-            "| {} | {} | {} | {} | {} |",
-            measurement.call,
-            measurement.cpu_instructions,
-            measurement.memory_bytes,
-            measurement.write_entries,
-            measurement.write_bytes
-        );
-    }
+    let ttl = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert_eq!(ttl, PERSIST_BUMP);
+    w.sub.get_mandate(&id);
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), ttl);
 
-    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
-        let mut snapshot = std::string::String::from(
-            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
-        );
-        for measurement in measurements {
-            std::fmt::Write::write_fmt(
-                &mut snapshot,
-                format_args!(
-                    "{},{},{},{},{}\n",
-                    measurement.call,
-                    measurement.cpu_instructions,
-                    measurement.memory_bytes,
-                    measurement.write_entries,
-                    measurement.write_bytes
-                ),
-            )
-            .unwrap();
-        }
-        std::fs::write(&snapshot_path, snapshot).unwrap();
-        return;
-    }
-
-    let snapshot = std::fs::read_to_string(&snapshot_path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
-    for measurement in measurements {
-        let line = snapshot
-            .lines()
-            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
-            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
-        let mut fields = line.split(',');
-        let _ = fields.next();
-        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
-        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
-        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
-        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
-
-        let limit = |value: u64| value + (value / 20).max(1);
-        assert!(
-            measurement.cpu_instructions <= limit(expected_cpu),
-            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
-            measurement.call,
-            measurement.cpu_instructions,
-            limit(expected_cpu)
-        );
-        assert!(
-            measurement.memory_bytes <= limit(expected_memory),
-            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
-            measurement.call,
-            measurement.memory_bytes,
-            limit(expected_memory)
-        );
-        assert!(
-            u64::from(measurement.write_entries) <= limit(expected_write_entries),
-            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
-            measurement.call,
-            measurement.write_entries,
-            limit(expected_write_entries)
-        );
-        assert!(
-            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
-            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
-            measurement.call,
-            measurement.write_bytes,
-            limit(expected_write_bytes)
-        );
-    }
+    assert_eq!(w.sub.try_get_mandate(&999), Err(Ok(Error::MandateNotFound)));
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
 }
 
 #[test]
@@ -9127,4 +9533,372 @@ fn maximum_value_subscribe_requires_the_subscribers_auth() {
     assert_eq!(w.sub.next_mandate_id(), 1);
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
     assert_eq!(w.vault.balance(&user, &w.token), PRICE);
+}
+
+// ---------------------------------------------------------------------------
+// #363: event log ordering across several entry points in one transaction.
+// ---------------------------------------------------------------------------
+
+/// Calls three state-changing subscription entry points from one top-level
+/// invocation. `env.events().all()` only reports the most recent top-level
+/// invocation, so several calls in one transaction have to come from a
+/// contract in between rather than from the test itself.
+#[contract]
+pub struct EntryPointBatch;
+
+#[contractimpl]
+impl EntryPointBatch {
+    /// Subscribe, settle the first charge, then cancel - in that order - and
+    /// return the mandate id so the caller can check the final state.
+    pub fn subscribe_charge_cancel(
+        env: Env,
+        subscription: Address,
+        subscriber: Address,
+        plan_id: u64,
+        keeper: Address,
+    ) -> u64 {
+        let client = SubscriptionClient::new(&env, &subscription);
+        let id = client.subscribe(&subscriber, &plan_id, &0u32, &0i128, &None::<Address>);
+        let _ = client.charge(&keeper, &id);
+        client.cancel(&subscriber, &id);
+        id
+    }
+}
+
+#[test]
+fn events_follow_call_order_across_a_multi_entry_point_transaction() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    // The calls inside the batch are not the root invocation, so plain
+    // `mock_all_auths` (which only covers the root) is not enough here.
+    w.env.mock_all_auths_allowing_non_root_auth();
+    let batch_addr = w.env.register(EntryPointBatch, ());
+    let batch = EntryPointBatchClient::new(&w.env, &batch_addr);
+
+    let id = batch.subscribe_charge_cancel(&w.sub_id, &user, &plan_id, &w.keeper);
+
+    // Read the log before any further call: `events().all()` reports the most
+    // recent invocation, and a view call would replace the batch's log.
+    let events = w.env.events().all();
+    let events = events.events();
+    assert!(!events.is_empty(), "the batch emitted no events");
+
+    // Every event must be well-formed XDR that round-trips byte for byte.
+    for event in events {
+        let encoded = WriteXdr::to_xdr(event, Limits::none()).expect("event encodes as XDR");
+        let decoded = soroban_sdk::xdr::ContractEvent::from_xdr(&encoded, Limits::none())
+            .expect("event decodes as XDR");
+        assert_eq!(&decoded, event);
+    }
+
+    // Only the subscription contract's own events, in emission order. The
+    // vault's debit events and the registry's committed-revenue events are
+    // interleaved with these; they are other contracts' events and are not
+    // part of the sequence this test pins.
+    let names: std::vec::Vec<std::string::String> = events
+        .iter()
+        .filter_map(|event| {
+            let ContractEventBody::V0(body) = &event.body;
+            match body.topics.first() {
+                Some(ScVal::Symbol(ScSymbol(name))) => Some(name.to_utf8_string_lossy()),
+                _ => None,
+            }
+        })
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "mandate_updated" | "subscribed" | "charged" | "cancelled"
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        std::vec![
+            "mandate_updated",
+            "subscribed",
+            "mandate_updated",
+            "charged",
+            "mandate_updated",
+            "cancelled",
+        ],
+        "events must appear in call order with no event dropped or duplicated"
+    );
+
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+// ---------------------------------------------------------------------------
+// #368: prevent replay of a completed/deleted mandate via ID recycling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscribe_with_id_requires_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let attacker = Address::generate(&w.env);
+
+    w.env.mock_auths(&[]);
+    assert!(w
+        .sub
+        .try_subscribe_with_id(&user, &plan_id, &10, &0, &0, &None::<Address>)
+        .is_err());
+
+    let args: soroban_sdk::Vec<soroban_sdk::Val> =
+        (&user, &plan_id, &10u64, &0u32, &0i128, &None::<Address>).into_val(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_with_id",
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w
+        .sub
+        .try_subscribe_with_id(&user, &plan_id, &10, &0, &0, &None::<Address>)
+        .is_err());
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+}
+
+#[test]
+fn delete_mandate_requires_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let attacker = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id);
+
+    w.env.mock_auths(&[]);
+    assert!(w.sub.try_delete_mandate(&user, &id).is_err());
+
+    let args: soroban_sdk::Vec<soroban_sdk::Val> = (&user, &id).into_val(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "delete_mandate",
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_delete_mandate(&user, &id).is_err());
+    assert!(!w.sub.is_mandate_tombstoned(&id));
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn delete_and_recreate_with_same_id_returns_tombstoned_error() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 4);
+
+    // 1. Completed mandate: charge to completion, delete, verify tombstone, reject reuse.
+    let completed_id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let res = w.sub.charge(&w.keeper, &completed_id);
+    assert!(res.completed);
+    assert!(!w.sub.is_mandate_tombstoned(&completed_id));
+
+    w.sub.delete_mandate(&user, &completed_id);
+
+    assert!(w.sub.is_mandate_tombstoned(&completed_id));
+    assert_eq!(
+        w.sub.try_get_mandate(&completed_id),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &completed_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateIdTombstoned))
+    );
+
+    // 2. Cancelled mandate: cancel, delete, verify tombstone, reject reuse.
+    let cancelled_id = w
+        .sub
+        .subscribe_with_id(&user, &plan_id, &42, &0, &0, &None::<Address>);
+    assert_eq!(cancelled_id, 42);
+    w.sub.cancel(&user, &cancelled_id);
+    w.sub.delete_mandate(&user, &cancelled_id);
+
+    assert!(w.sub.is_mandate_tombstoned(&cancelled_id));
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &cancelled_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateIdTombstoned))
+    );
+}
+
+#[test]
+fn auto_generated_ids_skip_tombstoned_and_occupied_values() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 10);
+
+    // Pre-allocate IDs 2 and 3 explicitly while NextMandateId is still 1,
+    // delete ID 2 (so 2 is tombstoned) and leave ID 3 active (occupied),
+    // and also pre-allocate and tombstone ID 5.
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &2, &1, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &2);
+    w.sub.delete_mandate(&user, &2);
+    assert!(w.sub.is_mandate_tombstoned(&2));
+
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &3, &0, &0, &None::<Address>);
+
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &5, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &5);
+    w.sub.delete_mandate(&user, &5);
+    assert!(w.sub.is_mandate_tombstoned(&5));
+
+    // Next auto-generated ID is 1.
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    let first = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(first, 1);
+
+    // Next auto-generated ID must skip tombstoned 2 and occupied 3, landing on 4.
+    assert_eq!(w.sub.next_mandate_id(), 4);
+    let second = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(second, 4);
+
+    // Next auto-generated ID must skip tombstoned 5, landing on 6.
+    assert_eq!(w.sub.next_mandate_id(), 6);
+    let third = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(third, 6);
+    assert_eq!(w.sub.next_mandate_id(), 7);
+}
+
+#[test]
+fn subscribe_with_id_rejects_zero_and_existing_mandate_ids() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &0, &0, &0, &None::<Address>),
+        Err(Ok(Error::InvalidMandateId))
+    );
+
+    let id = w
+        .sub
+        .subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>);
+    assert_eq!(id, 1);
+    // Sequential explicit ID matching NextMandateId advances the counter.
+    assert_eq!(w.sub.next_mandate_id(), 2);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateAlreadyExists))
+    );
+
+    // Even after cancelling (before deletion), the ID is still occupied.
+    w.sub.cancel(&user, &1);
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateAlreadyExists))
+    );
+}
+
+#[test]
+fn delete_mandate_enforces_terminal_state_ownership_and_cleanup() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let user = w.subscriber(PRICE * 2);
+    let stranger = Address::generate(&w.env);
+
+    // Missing mandate cannot be deleted.
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &999),
+        Err(Ok(Error::MandateNotFound))
+    );
+
+    // Active mandate cannot be deleted.
+    let active_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateStillActive))
+    );
+
+    // Paused mandate cannot be deleted.
+    w.sub.set_paused(&user, &active_id, &true);
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateStillActive))
+    );
+
+    // Non-subscriber cannot delete a cancelled mandate.
+    w.sub.cancel(&user, &active_id);
+    assert_eq!(
+        w.sub.try_delete_mandate(&stranger, &active_id),
+        Err(Ok(Error::NotSubscriber))
+    );
+
+    // Deleting a cancelled mandate cleans up auxiliary keys and emits MandateDeleted.
+    w.sub.delete_mandate(&user, &active_id);
+    let events = w.env.events().all();
+    assert!(!events.events().is_empty());
+    w.env.as_contract(&w.sub.address, || {
+        let p = w.env.storage().persistent();
+        assert!(!p.has(&DataKey::Mandate(active_id)));
+        assert!(!p.has(&DataKey::MandateGracePeriod(active_id)));
+        assert!(!p.has(&DataKey::FirstFailedCharge(active_id)));
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::MandateTombstone(active_id)),
+            Some(true)
+        );
+    });
+
+    // Deleting a second time reports MandateNotFound and preserves the tombstone.
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert!(w.sub.is_mandate_tombstoned(&active_id));
+}
+
+#[test]
+fn delete_mandate_leaves_cancel_page_working_for_remaining_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 4);
+
+    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id1);
+    w.sub.delete_mandate(&user, &id1);
+
+    let cancelled = w.sub.cancel_page(&user, &0, &50);
+    assert_eq!(cancelled, 1);
+    assert_eq!(w.sub.get_mandate(&id2).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn subscribe_with_id_respects_protocol_paused_while_delete_mandate_works() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id);
+
+    w.sub.set_protocol_paused(&true);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &77, &0, &0, &None::<Address>),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    // Deletion of an already-closed mandate keeps working during protocol pause.
+    w.sub.delete_mandate(&user, &id);
+    assert!(w.sub.is_mandate_tombstoned(&id));
 }

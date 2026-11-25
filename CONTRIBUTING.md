@@ -1,5 +1,5 @@
 # Contributing to Payflow Contracts
-
+test
 # # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
@@ -47,8 +47,10 @@ opens an issue automatically when a new advisory affects the dependency tree.
 - **No floating point.** All proportional math is integer basis points against
   `BPS_DENOMINATOR` (10 000).
 - **No panics for control flow.** Use `Result<T, Error>` and add a variant.
-- **Storage.** Config goes in `instance` storage; per-entity records go in
-  `persistent`. Every persistent write must extend TTL.
+ - **Storage.** Config goes in `instance` storage; per-entity records go in
+   `persistent`. Every persistent write must extend TTL, and reads of hot
+   mandate/plan/reserve keys must extend it too (#247). Use the contract's
+   central `read_*` helper so the bump cannot be forgotten.
 - **Events.** Use the `#[contractevent]` macro, never the deprecated
   `env.events().publish` tuple form. Indexers depend on the typed shape.
   Follow the [event contribution guide](docs/adding-events.md) when adding or

@@ -138,3 +138,15 @@ pub struct ContractUpgraded {
     pub admin: Address,
     pub new_wasm_hash: BytesN<32>,
 }
+
+/// Emitted when the vault admin releases all per-mandate reserves for a
+/// subscriber via `emergency_withdraw` (#341).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyWithdraw {
+    /// Subscriber whose per-mandate reserves were released.
+    #[topic]
+    pub subscriber: Address,
+    /// Sum of released reserves across all mandates for the token.
+    pub amount: i128,
+}
