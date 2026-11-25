@@ -2553,13 +2553,19 @@ mod contract {
                 {
                     continue;
                 }
-                // Normalize to the plan's period
-                let contribution = mandate
-                    .amount
-                    .checked_mul(i128::from(plan.period))
-                    .ok_or(Error::AmountOverflow)
-                    .unwrap_or(0)
-                    / i128::from(mandate.period);
+                // Normalize to the plan's period. Equal periods need no
+                // multiplication: doing it anyway overflows for an amount near
+                // i128::MAX and silently reports zero committed revenue.
+                let contribution = if mandate.period == plan.period {
+                    mandate.amount
+                } else {
+                    mandate
+                        .amount
+                        .checked_mul(i128::from(plan.period))
+                        .ok_or(Error::AmountOverflow)
+                        .unwrap_or(0)
+                        / i128::from(mandate.period)
+                };
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 

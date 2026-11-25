@@ -1320,13 +1320,17 @@ mod contract {
                 _ => (now - (now % limit.window_secs), 0),
             };
 
-            if spent.saturating_add(amount) > limit.amount {
+            // `checked_add`, not `saturating_add`: a spent total at i128::MAX
+            // must fail the limit instead of passing the check and then
+            // overflowing on the write below.
+            let new_spent = spent.checked_add(amount).ok_or(Error::SpendLimitExceeded)?;
+            if new_spent > limit.amount {
                 return Err(Error::SpendLimitExceeded);
             }
 
             Ok(Some(SpendWindow {
                 start,
-                spent: spent + amount,
+                spent: new_spent,
             }))
         }
 
