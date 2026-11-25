@@ -7905,15 +7905,17 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
+    w.env.cost_estimate().budget().reset_default();
+    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    measurements.push(measure_call(&w.env, "subscribe"));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     w.sub.charge(&w.keeper, &id);
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_success",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_success"));
 
     let w = world();
     let plan_id = w.plan();
@@ -7922,12 +7924,7 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     w.env.mock_auths(&[]);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_missing_auth",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_missing_auth"));
 
     let w = world();
     let plan_id = w.plan();
@@ -7935,12 +7932,7 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_vault_failure",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_vault_failure"));
 
     let w = world();
     let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
@@ -7952,47 +7944,9 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     w.env.cost_estimate().budget().reset_default();
     let simulation = w.sub.simulate_charge(&w.keeper, &id);
     assert!(simulation.chargeable);
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "simulate_charge",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "simulate_charge"));
 
-    let snapshot_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
-    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
-        let mut snapshot = std::string::String::from("call,cpu_instructions,memory_bytes\n");
-        for (name, cpu, memory) in measurements {
-            std::fmt::Write::write_fmt(&mut snapshot, format_args!("{name},{cpu},{memory}\n"))
-                .unwrap();
-        }
-        std::fs::write(snapshot_path, snapshot).unwrap();
-        return;
-    }
-
-    let snapshot = std::fs::read_to_string(&snapshot_path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
-    for (name, cpu, memory) in measurements {
-        let line = snapshot
-            .lines()
-            .find(|line| line.starts_with(&std::format!("{name},")))
-            .unwrap_or_else(|| panic!("missing budget snapshot for {name}"));
-        let mut fields = line.split(',');
-        let _ = fields.next();
-        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
-        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
-        let cpu_limit = expected_cpu + (expected_cpu / 20).max(1);
-        let memory_limit = expected_memory + (expected_memory / 20).max(1);
-        assert!(
-            cpu <= cpu_limit,
-            "{name} CPU budget grew from {expected_cpu} to {cpu} instructions (5% tolerance: {cpu_limit})"
-        );
-        assert!(
-            memory <= memory_limit,
-            "{name} memory budget grew from {expected_memory} to {memory} bytes (5% tolerance: {memory_limit})"
-        );
-    }
+    assert_within_committed_budgets("subscription", &measurements);
 }
 
 // ---------------------------------------------------------------------------
