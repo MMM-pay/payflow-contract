@@ -87,17 +87,29 @@ not `test_charge_3`.
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
 
-The subscription suite also commits resource-budget snapshots for representative
-charge calls, including missing authorization and vault failures. CI allows at
-most a 5% increase in CPU instructions or memory bytes. To intentionally
-refresh the reviewed baselines, run:
+### Resource budgets
+
+Each contract commits per-call resource snapshots under
+`contracts/<contract>/test_snapshots/budgets.csv` for representative entry
+points: plan creation and reads in `plan-registry`, deposits, withdrawals,
+debits and spend-limit writes in `vault`, and subscription plus charge paths
+(including missing authorization and vault failures) in `subscription`.
+
+Every row records the call's CPU instructions, memory bytes and ledger storage
+footprint (write entries and write bytes) from `env.cost_estimate()`. The tests
+print the measurements as a table, and the `resource-budgets` CI job runs
+`./scripts/check_resource_budgets.sh` to put that table in the job log and the
+workflow step summary. CI fails when any metric grows by more than 5% beyond
+its committed snapshot.
+
+To intentionally refresh the reviewed baselines, run:
 
 ```bash
-UPDATE_RESOURCE_BUDGETS=1 cargo test -p payflow-subscription subscription_call_budgets_stay_within_committed_snapshots
+UPDATE_RESOURCE_BUDGETS=1 cargo test --all call_budgets
 ```
 
-Review `contracts/subscription/test_snapshots/budgets.csv` before committing a
-refreshed snapshot.
+Review every changed `contracts/*/test_snapshots/budgets.csv` in the diff before
+committing it.
 
 ### Event snapshots
 

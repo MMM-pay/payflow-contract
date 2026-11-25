@@ -7310,6 +7310,118 @@ fn extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate() {
     assert!(batched < single);
 }
 
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
 #[test]
 fn subscription_call_budgets_stay_within_committed_snapshots() {
     let mut measurements = std::vec::Vec::new();
@@ -7317,15 +7429,17 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
+    w.env.cost_estimate().budget().reset_default();
+    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    measurements.push(measure_call(&w.env, "subscribe"));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     w.sub.charge(&w.keeper, &id);
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_success",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_success"));
 
     let w = world();
     let plan_id = w.plan();
@@ -7334,12 +7448,7 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     w.env.mock_auths(&[]);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_missing_auth",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_missing_auth"));
 
     let w = world();
     let plan_id = w.plan();
@@ -7347,12 +7456,7 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "charge_vault_failure",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "charge_vault_failure"));
 
     let w = world();
     let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
@@ -7364,47 +7468,9 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     w.env.cost_estimate().budget().reset_default();
     let simulation = w.sub.simulate_charge(&w.keeper, &id);
     assert!(simulation.chargeable);
-    let budget = w.env.cost_estimate().budget();
-    measurements.push((
-        "simulate_charge",
-        budget.cpu_instruction_cost(),
-        budget.memory_bytes_cost(),
-    ));
+    measurements.push(measure_call(&w.env, "simulate_charge"));
 
-    let snapshot_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
-    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
-        let mut snapshot = std::string::String::from("call,cpu_instructions,memory_bytes\n");
-        for (name, cpu, memory) in measurements {
-            std::fmt::Write::write_fmt(&mut snapshot, format_args!("{name},{cpu},{memory}\n"))
-                .unwrap();
-        }
-        std::fs::write(snapshot_path, snapshot).unwrap();
-        return;
-    }
-
-    let snapshot = std::fs::read_to_string(&snapshot_path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
-    for (name, cpu, memory) in measurements {
-        let line = snapshot
-            .lines()
-            .find(|line| line.starts_with(&std::format!("{name},")))
-            .unwrap_or_else(|| panic!("missing budget snapshot for {name}"));
-        let mut fields = line.split(',');
-        let _ = fields.next();
-        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
-        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
-        let cpu_limit = expected_cpu + (expected_cpu / 20).max(1);
-        let memory_limit = expected_memory + (expected_memory / 20).max(1);
-        assert!(
-            cpu <= cpu_limit,
-            "{name} CPU budget grew from {expected_cpu} to {cpu} instructions (5% tolerance: {cpu_limit})"
-        );
-        assert!(
-            memory <= memory_limit,
-            "{name} memory budget grew from {expected_memory} to {memory} bytes (5% tolerance: {memory_limit})"
-        );
-    }
+    assert_within_committed_budgets("subscription", &measurements);
 }
 
 // ---------------------------------------------------------------------------

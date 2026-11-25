@@ -1,4 +1,5 @@
 #![cfg(test)]
+extern crate std;
 
 use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
@@ -2837,4 +2838,159 @@ fn deposit_for_signed_by_the_subscriber_instead_of_the_payer_is_rejected() {
         .is_err());
     assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
     assert_eq!(h.token_client.balance(&stranger), 10_000);
+}
+
+// ---------------------------------------------------------------------------
+// Per-call resource budgets (#250)
+// ---------------------------------------------------------------------------
+
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
+#[test]
+fn vault_call_budgets_stay_within_committed_snapshots() {
+    let mut measurements = std::vec::Vec::new();
+
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.deposit(&user, &h.token, &10_000);
+    measurements.push(measure_call(&h.env, "deposit"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.withdraw(&user, &h.token, &1_000);
+    measurements.push(measure_call(&h.env, "withdraw"));
+
+    let merchant = Address::generate(&h.env);
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.debit_multi_mandate(
+        &user,
+        &h.token,
+        &1,
+        &soroban_sdk::vec![
+            &h.env,
+            (merchant, 700i128),
+            (h.subscription.clone(), 50i128),
+        ],
+    );
+    measurements.push(measure_call(&h.env, "debit_multi_mandate"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.set_spend_limit(&user, &h.token, &5_000, &86_400);
+    measurements.push(measure_call(&h.env, "set_spend_limit"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.withdraw_all(&user, &h.token);
+    measurements.push(measure_call(&h.env, "withdraw_all"));
+
+    assert_within_committed_budgets("vault", &measurements);
 }

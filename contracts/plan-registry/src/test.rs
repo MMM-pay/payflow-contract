@@ -4056,3 +4056,180 @@ fn plan_listings_follow_paging_and_reflect_status() {
     assert!(!rows.get(0).unwrap().active);
     assert!(rows.get(1).unwrap().active);
 }
+
+// ---------------------------------------------------------------------------
+// Per-call resource budgets (#250)
+// ---------------------------------------------------------------------------
+
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
+#[test]
+fn plan_registry_call_budgets_stay_within_committed_snapshots() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let mut measurements = std::vec::Vec::new();
+
+    let name = String::from_str(&env, "Budget Plan");
+    let description = String::from_str(&env, "");
+    let category = Symbol::new(&env, "");
+    let terms_uri = String::from_str(&env, "");
+    env.cost_estimate().budget().reset_default();
+    let plan_id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &name,
+        &description,
+        &0,
+        &category,
+        &terms_uri,
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    measurements.push(measure_call(&env, "create_plan"));
+
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 1_000, "Batch 1"),
+        batch_plan(&env, &token, 1_100, "Batch 2"),
+        batch_plan(&env, &token, 1_200, "Batch 3"),
+        batch_plan(&env, &token, 1_300, "Batch 4"),
+        batch_plan(&env, &token, 1_400, "Batch 5"),
+        batch_plan(&env, &token, 1_500, "Batch 6"),
+        batch_plan(&env, &token, 1_600, "Batch 7"),
+        batch_plan(&env, &token, 1_700, "Batch 8"),
+        batch_plan(&env, &token, 1_800, "Batch 9"),
+        batch_plan(&env, &token, 1_900, "Batch 10"),
+    ];
+    env.cost_estimate().budget().reset_default();
+    client.create_plans(&merchant, &plans);
+    measurements.push(measure_call(&env, "create_plans_batch_10"));
+
+    env.cost_estimate().budget().reset_default();
+    let _ = client.get_plan(&plan_id);
+    measurements.push(measure_call(&env, "get_plan"));
+
+    env.cost_estimate().budget().reset_default();
+    let _ = client.merchant_plans(&merchant, &0, &10);
+    measurements.push(measure_call(&env, "merchant_plans_page_10"));
+
+    env.cost_estimate().budget().reset_default();
+    client.set_plan_active(&merchant, &plan_id, &false);
+    measurements.push(measure_call(&env, "set_plan_active"));
+
+    assert_within_committed_budgets("plan-registry", &measurements);
+}

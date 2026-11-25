@@ -40,6 +40,15 @@ jobs:
       - name: Check auth test coverage
         run: ./scripts/check_auth_tests.sh
 
+  resource-budgets:
+    name: resource-budgets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure per-call contract resources
+        run: ./scripts/check_resource_budgets.sh
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
