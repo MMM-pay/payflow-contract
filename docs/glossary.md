@@ -24,7 +24,7 @@ These are the terms the docs glossary defines, in the same order.
 
 | Docs term | Contract | On chain | Notes |
 |-----------|----------|----------|-------|
-| **Mandate** | subscription | `Mandate` struct, stored at `DataKey::Mandate(id)`; opened by `subscribe`, `subscribe_at`, `subscribe_with_deposit` | Ids come from `NextMandateId`, start at 1 and are never reused, even after the mandate ends. |
+| **Mandate** | subscription | `Mandate` struct, stored at `DataKey::Mandate(id)`; opened by `subscribe`, `subscribe_with_id`, `subscribe_at`, `subscribe_with_deposit`; closed records may be deleted by `delete_mandate` | Ids come from `NextMandateId` (or explicit `subscribe_with_id`), start at 1, and deleted ids are recorded in `MandateTombstone(id)` so ids are never reused. |
 | **Charge** | subscription | `charge(keeper, mandate_id)` returning `ChargeResult`; previewed by `quote_charge` returning `ChargeQuote` | At most one per period. Refused with `PlanChargesPaused` while the plan's charging is paused. |
 | **Plan** | plan-registry | `Plan` struct (defined once in `payflow-shared`), stored at `DataKey::Plan(id)`; created by `create_plan` / `create_plans` | Price, period and token are copied into the mandate at subscribe time. Ids come from `NextPlanId` and are never reused, even after the plan is retired. |
 | **Plan registry** | plan-registry | The `PlanRegistry` contract | See [drift](#where-the-docs-site-and-the-contracts-differ): it is no longer "immutable except for an on/off switch". |

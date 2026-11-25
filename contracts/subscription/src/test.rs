@@ -5456,6 +5456,10 @@ fn upgrade_preserves_every_stored_value() {
     assert!(w.sub.flag_failed_charge(&failed));
     let failed_at = w.sub.first_failed_charge(&failed).unwrap();
 
+    let deleted = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &deleted);
+    w.sub.delete_mandate(&user, &deleted);
+
     w.sub.set_protocol_paused(&true);
     w.sub.propose_admin(&pending_admin);
 
@@ -5493,21 +5497,21 @@ fn upgrade_preserves_every_stored_value() {
     assert_eq!(w.sub.fee_bps(), FEE_BPS);
     assert_eq!(w.sub.plan_registry(), w.registry.address);
     assert_eq!(w.sub.vault(), w.vault.address);
-    assert_eq!(w.sub.next_mandate_id(), failed + 1);
-    assert_eq!(w.sub.subscriber_mandate_count(&user), 2);
+    assert_eq!(w.sub.next_mandate_id(), deleted + 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 3);
     assert_eq!(
         w.sub.subscriber_mandates(&user, &0, &50),
-        soroban_sdk::vec![&w.env, id, paused]
+        soroban_sdk::vec![&w.env, id, paused, deleted]
     );
-    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 3);
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 4);
     assert_eq!(
         w.sub.merchant_mandates(&w.merchant, &0, &50),
-        soroban_sdk::vec![&w.env, id, paused, failed]
+        soroban_sdk::vec![&w.env, id, paused, failed, deleted]
     );
-    assert_eq!(w.sub.plan_mandate_count(&plan_id), 3);
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 4);
     assert_eq!(
         w.sub.plan_mandates(&plan_id, &0, &50),
-        soroban_sdk::vec![&w.env, id, paused, failed]
+        soroban_sdk::vec![&w.env, id, paused, failed, deleted]
     );
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 3);
 
@@ -5522,6 +5526,10 @@ fn upgrade_preserves_every_stored_value() {
         assert_eq!(
             p.get::<_, u64>(&DataKey::FirstFailedCharge(failed)),
             Some(failed_at)
+        );
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::MandateTombstone(deleted)),
+            Some(true)
         );
         assert_eq!(
             w.env
@@ -6707,6 +6715,9 @@ fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
     assert_read_only(env, "vault", || s.vault());
     assert_read_only(env, "fee_bps", || s.fee_bps());
     assert_read_only(env, "next_mandate_id", || s.next_mandate_id());
+    assert_read_only(env, "is_mandate_tombstoned", || {
+        s.is_mandate_tombstoned(&active)
+    });
     assert_read_only(env, "upgrade_history", || s.upgrade_history());
 
     for id in [active, paused, cancelled] {
@@ -6808,6 +6819,9 @@ fn subscription_views_need_no_signature() {
     });
     assert_read_only(env, "plan_committed_revenue (unsigned)", || {
         s.plan_committed_revenue(&plan_id)
+    });
+    assert_read_only(env, "is_mandate_tombstoned (unsigned)", || {
+        s.is_mandate_tombstoned(&active)
     });
     assert_read_only(env, "admin (unsigned)", || s.admin());
 }
@@ -9460,4 +9474,278 @@ fn events_follow_call_order_across_a_multi_entry_point_transaction() {
     );
 
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+// ---------------------------------------------------------------------------
+// #368: prevent replay of a completed/deleted mandate via ID recycling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscribe_with_id_requires_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let attacker = Address::generate(&w.env);
+
+    w.env.mock_auths(&[]);
+    assert!(w
+        .sub
+        .try_subscribe_with_id(&user, &plan_id, &10, &0, &0, &None::<Address>)
+        .is_err());
+
+    let args: soroban_sdk::Vec<soroban_sdk::Val> =
+        (&user, &plan_id, &10u64, &0u32, &0i128, &None::<Address>).into_val(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe_with_id",
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w
+        .sub
+        .try_subscribe_with_id(&user, &plan_id, &10, &0, &0, &None::<Address>)
+        .is_err());
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+}
+
+#[test]
+fn delete_mandate_requires_subscriber_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let attacker = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id);
+
+    w.env.mock_auths(&[]);
+    assert!(w.sub.try_delete_mandate(&user, &id).is_err());
+
+    let args: soroban_sdk::Vec<soroban_sdk::Val> = (&user, &id).into_val(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "delete_mandate",
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_delete_mandate(&user, &id).is_err());
+    assert!(!w.sub.is_mandate_tombstoned(&id));
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn delete_and_recreate_with_same_id_returns_tombstoned_error() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 4);
+
+    // 1. Completed mandate: charge to completion, delete, verify tombstone, reject reuse.
+    let completed_id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let res = w.sub.charge(&w.keeper, &completed_id);
+    assert!(res.completed);
+    assert!(!w.sub.is_mandate_tombstoned(&completed_id));
+
+    w.sub.delete_mandate(&user, &completed_id);
+
+    assert!(w.sub.is_mandate_tombstoned(&completed_id));
+    assert_eq!(
+        w.sub.try_get_mandate(&completed_id),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &completed_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateIdTombstoned))
+    );
+
+    // 2. Cancelled mandate: cancel, delete, verify tombstone, reject reuse.
+    let cancelled_id = w
+        .sub
+        .subscribe_with_id(&user, &plan_id, &42, &0, &0, &None::<Address>);
+    assert_eq!(cancelled_id, 42);
+    w.sub.cancel(&user, &cancelled_id);
+    w.sub.delete_mandate(&user, &cancelled_id);
+
+    assert!(w.sub.is_mandate_tombstoned(&cancelled_id));
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &cancelled_id, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateIdTombstoned))
+    );
+}
+
+#[test]
+fn auto_generated_ids_skip_tombstoned_and_occupied_values() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 10);
+
+    // Pre-allocate IDs 2 and 3 explicitly while NextMandateId is still 1,
+    // delete ID 2 (so 2 is tombstoned) and leave ID 3 active (occupied),
+    // and also pre-allocate and tombstone ID 5.
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &2, &1, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &2);
+    w.sub.delete_mandate(&user, &2);
+    assert!(w.sub.is_mandate_tombstoned(&2));
+
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &3, &0, &0, &None::<Address>);
+
+    w.sub
+        .subscribe_with_id(&user, &plan_id, &5, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &5);
+    w.sub.delete_mandate(&user, &5);
+    assert!(w.sub.is_mandate_tombstoned(&5));
+
+    // Next auto-generated ID is 1.
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    let first = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(first, 1);
+
+    // Next auto-generated ID must skip tombstoned 2 and occupied 3, landing on 4.
+    assert_eq!(w.sub.next_mandate_id(), 4);
+    let second = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(second, 4);
+
+    // Next auto-generated ID must skip tombstoned 5, landing on 6.
+    assert_eq!(w.sub.next_mandate_id(), 6);
+    let third = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(third, 6);
+    assert_eq!(w.sub.next_mandate_id(), 7);
+}
+
+#[test]
+fn subscribe_with_id_rejects_zero_and_existing_mandate_ids() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &0, &0, &0, &None::<Address>),
+        Err(Ok(Error::InvalidMandateId))
+    );
+
+    let id = w
+        .sub
+        .subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>);
+    assert_eq!(id, 1);
+    // Sequential explicit ID matching NextMandateId advances the counter.
+    assert_eq!(w.sub.next_mandate_id(), 2);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateAlreadyExists))
+    );
+
+    // Even after cancelling (before deletion), the ID is still occupied.
+    w.sub.cancel(&user, &1);
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &1, &0, &0, &None::<Address>),
+        Err(Ok(Error::MandateAlreadyExists))
+    );
+}
+
+#[test]
+fn delete_mandate_enforces_terminal_state_ownership_and_cleanup() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
+    let user = w.subscriber(PRICE * 2);
+    let stranger = Address::generate(&w.env);
+
+    // Missing mandate cannot be deleted.
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &999),
+        Err(Ok(Error::MandateNotFound))
+    );
+
+    // Active mandate cannot be deleted.
+    let active_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateStillActive))
+    );
+
+    // Paused mandate cannot be deleted.
+    w.sub.set_paused(&user, &active_id, &true);
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateStillActive))
+    );
+
+    // Non-subscriber cannot delete a cancelled mandate.
+    w.sub.cancel(&user, &active_id);
+    assert_eq!(
+        w.sub.try_delete_mandate(&stranger, &active_id),
+        Err(Ok(Error::NotSubscriber))
+    );
+
+    // Deleting a cancelled mandate cleans up auxiliary keys and emits MandateDeleted.
+    w.sub.delete_mandate(&user, &active_id);
+    let events = w.env.events().all();
+    assert!(!events.events().is_empty());
+    w.env.as_contract(&w.sub.address, || {
+        let p = w.env.storage().persistent();
+        assert!(!p.has(&DataKey::Mandate(active_id)));
+        assert!(!p.has(&DataKey::MandateGracePeriod(active_id)));
+        assert!(!p.has(&DataKey::FirstFailedCharge(active_id)));
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::MandateTombstone(active_id)),
+            Some(true)
+        );
+    });
+
+    // Deleting a second time reports MandateNotFound and preserves the tombstone.
+    assert_eq!(
+        w.sub.try_delete_mandate(&user, &active_id),
+        Err(Ok(Error::MandateNotFound))
+    );
+    assert!(w.sub.is_mandate_tombstoned(&active_id));
+}
+
+#[test]
+fn delete_mandate_leaves_cancel_page_working_for_remaining_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 4);
+
+    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id1);
+    w.sub.delete_mandate(&user, &id1);
+
+    let cancelled = w.sub.cancel_page(&user, &0, &50);
+    assert_eq!(cancelled, 1);
+    assert_eq!(w.sub.get_mandate(&id2).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn subscribe_with_id_respects_protocol_paused_while_delete_mandate_works() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.cancel(&user, &id);
+
+    w.sub.set_protocol_paused(&true);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe_with_id(&user, &plan_id, &77, &0, &0, &None::<Address>),
+        Err(Ok(Error::ProtocolPaused))
+    );
+    // Deletion of an already-closed mandate keeps working during protocol pause.
+    w.sub.delete_mandate(&user, &id);
+    assert!(w.sub.is_mandate_tombstoned(&id));
 }

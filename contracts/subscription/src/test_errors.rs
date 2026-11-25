@@ -49,6 +49,10 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::UnexpectedTransferAmount, 40),
         (Error::PendingAdminNotFound, 41),
         (Error::NotPendingAdmin, 42),
+        (Error::MandateIdTombstoned, 43),
+        (Error::MandateAlreadyExists, 44),
+        (Error::InvalidMandateId, 45),
+        (Error::MandateStillActive, 46),
     ];
 
     let mut seen = std::vec::Vec::new();

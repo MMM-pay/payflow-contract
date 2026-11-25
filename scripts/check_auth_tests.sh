@@ -40,6 +40,7 @@ declare -A allowlist_subscription=(
     [first_failed_charge]=1
     [is_in_grace_period]=1
     [mandate_grace_period]=1
+    [is_mandate_tombstoned]=1
     [version]=1
     [version]=1
     [__constructor]=1  # constructors don't require auth tests

@@ -39,7 +39,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1025 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 1026 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
-## Subscription (2001–2042)
+## Subscription (2001–2046)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -85,6 +85,10 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
 | 2041 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 2042 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
+| 2043 | `MandateIdTombstoned` | The requested mandate ID has been tombstoned after deletion and cannot be reused. |
+| 2044 | `MandateAlreadyExists` | The requested mandate ID is already assigned to an existing mandate. |
+| 2045 | `InvalidMandateId` | The requested mandate ID is invalid (mandate IDs start at 1). |
+| 2046 | `MandateStillActive` | An active or paused mandate cannot be deleted until it is cancelled or completed. |
 
 ## Vault (3001–3021)
 
