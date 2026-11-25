@@ -54,6 +54,9 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::InvalidMandateId, 45),
         (Error::MandateStillActive, 46),
         (Error::InvalidAddress, 47),
+        (Error::ExtraChargeNotAuthorized, 41),
+        (Error::ExtraChargeExceedsCap, 42),
+        (Error::ExtraChargeAlreadyUsed, 43),
     ];
 
     let mut seen = std::vec::Vec::new();

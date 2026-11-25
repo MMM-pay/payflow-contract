@@ -20,6 +20,7 @@ declare -A contracts=(
 # Allowlisted functions per contract (views, permissionless, and constructors)
 declare -A allowlist_subscription=(
     [get_mandate]=1
+    [mandate_terms]=1
     [is_due]=1
     [committed_per_period]=1
     [subscriber_mandate_count]=1

@@ -299,6 +299,51 @@ pub struct MaxChargesChanged {
     pub max_charges: u32,
 }
 
+/// Emitted when a subscriber sets, changes or revokes the one-off charge cap.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtraChargeCapChanged {
+    /// ID of the mandate whose one-off authorization changed.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber who authorized the one-off charge.
+    #[topic]
+    pub subscriber: Address,
+    /// Maximum amount authorized, or 0 when revoked.
+    pub cap: i128,
+}
+
+/// Emitted when a mandate's one-time additional charge settles successfully.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtraCharged {
+    /// ID of the charged mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber debited.
+    #[topic]
+    pub subscriber: Address,
+    /// Account of the merchant credited.
+    #[topic]
+    pub merchant: Address,
+    /// Token used for the one-off charge.
+    pub token: Address,
+    /// Total additional amount debited from the subscriber.
+    pub amount: i128,
+    /// Merchant's net share after fees, keeper tip and referral.
+    pub merchant_amount: i128,
+    /// Protocol fee deducted.
+    pub fee: i128,
+    /// Keeper tip paid out of the merchant's share.
+    pub tip: i128,
+    /// Keeper who settled the one-off charge.
+    pub keeper: Address,
+    /// Referral share paid out of the merchant's share.
+    pub referral: i128,
+    /// Account paid the referral share, if any.
+    pub referrer: Option<Address>,
+}
+
 /// Emitted when the admin changes the protocol fee. Applies to mandates opened
 /// after this point only; existing mandates keep the fee they were opened with.
 #[contractevent]
