@@ -92,6 +92,7 @@ pub use types::{
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
+use payflow_common::{estimated_last_due, next_due_at, prorated_upgrade, split_mandate_fee};
 use soroban_sdk::{
     contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
 };
@@ -588,8 +589,7 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             // A next due date past u64::MAX is a schedule overflow, not an
             // amount overflow (#290).
-            let next_charge = now
-                .checked_add(mandate.period)
+            let next_charge = next_due_at(now, mandate.period)
                 .ok_or(Error::ScheduleOverflow)?;
             let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
                 || (mandate.max_total != 0 && next_total >= mandate.max_total);
@@ -928,22 +928,9 @@ mod contract {
             // that was never charged has `next_charge` in the past, so nothing is
             // left of the current period and nothing is prorated: the old price
             // was never collected.
-            let remaining = mandate.next_charge.saturating_sub(now).min(old_period);
-
-            // The prorated price difference, truncated towards zero. Truncation
-            // is what rounds in the subscriber's favour: the subscriber pays at
-            // most the exact difference for the time that is left.
-            let difference = plan.amount - old_amount;
-            let charged: i128 = if difference > 0 && old_period > 0 {
-                difference
-                    .checked_mul(i128::from(remaining))
-                    .ok_or(Error::AmountOverflow)?
-                    / i128::from(old_period)
-            } else {
-                // A downgrade collects nothing now: it takes effect at the next
-                // charge and never refunds the difference already paid.
-                0
-            };
+            let charged = prorated_upgrade(
+                old_amount, plan.amount, old_period, mandate.next_charge, now,
+            ).ok_or(Error::AmountOverflow)?;
 
             if charged > 0 {
                 // The protocol fee on the difference, at the rate frozen into the
@@ -1693,14 +1680,9 @@ mod contract {
                 return Ok(Some(mandate.last_charge));
             }
 
-            let remaining_periods = u64::from(remaining_charges - 1);
-            let offset = remaining_periods
-                .checked_mul(mandate.period)
-                .ok_or(Error::ScheduleOverflow)?;
-            let estimated_end = mandate
-                .next_charge
-                .checked_add(offset)
-                .ok_or(Error::ScheduleOverflow)?;
+            let estimated_end = estimated_last_due(
+                mandate.next_charge, mandate.period, remaining_charges,
+            ).ok_or(Error::ScheduleOverflow)?;
 
             Ok(Some(estimated_end))
         }
@@ -2234,36 +2216,10 @@ mod contract {
         /// fee is never touched by either. `merchant_amount` is what is left for
         /// the merchant's payout after the tip and the referral.
         fn fee_split(m: &Mandate) -> Result<(i128, i128, i128, i128), Error> {
-            let fee = m
-                .amount
-                .checked_mul(i128::from(m.fee_bps))
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-            let merchant_gross = m.amount - fee;
-
-            // Tip is a share of the merchant's own money, capped again here so
-            // a mandate can never pay out more than MAX_KEEPER_BPS of it.
-            let tip_bps = m.keeper_bps.min(MAX_KEEPER_BPS);
-            let tip = merchant_gross
-                .checked_mul(i128::from(tip_bps))
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-
-            // Referral is a second share of the merchant's own money, capped at
-            // MAX_REFERRAL_BPS and paid only when the mandate has a referrer.
-            // A plan that advertises a referral rate but opens a mandate with no
-            // referrer therefore burns none of the merchant's money.
-            let referral = if m.referrer.is_some() {
-                let referral_bps = m.referral_bps.min(MAX_REFERRAL_BPS);
-                merchant_gross
-                    .checked_mul(i128::from(referral_bps))
-                    .ok_or(Error::AmountOverflow)?
-                    / BPS_DENOMINATOR
-            } else {
-                0
-            };
-
-            Ok((fee, tip, referral, merchant_gross - tip - referral))
+            split_mandate_fee(
+                m.amount, m.fee_bps, m.keeper_bps, m.referral_bps,
+                m.referrer.is_some(), MAX_KEEPER_BPS, MAX_REFERRAL_BPS,
+            ).ok_or(Error::AmountOverflow)
         }
 
         /// Whether the plan's merchant has paused charging for it (#315).
@@ -2319,28 +2275,8 @@ mod contract {
         /// times the number of settled charges. This is the hard ceiling on
         /// `refund`.
         fn merchant_received(m: &Mandate) -> Result<i128, Error> {
-            let fee = m
-                .amount
-                .checked_mul(i128::from(m.fee_bps))
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-            let merchant_gross = m.amount - fee;
-
-            let tip = merchant_gross
-                .checked_mul(i128::from(m.keeper_bps.min(MAX_KEEPER_BPS)))
-                .ok_or(Error::AmountOverflow)?
-                / BPS_DENOMINATOR;
-
-            let referral = if m.referrer.is_some() {
-                merchant_gross
-                    .checked_mul(i128::from(m.referral_bps.min(MAX_REFERRAL_BPS)))
-                    .ok_or(Error::AmountOverflow)?
-                    / BPS_DENOMINATOR
-            } else {
-                0
-            };
-
-            (merchant_gross - tip - referral)
+            let (_, _, _, merchant_amount) = Self::fee_split(m)?;
+            merchant_amount
                 .checked_mul(i128::from(m.charges_made))
                 .ok_or(Error::AmountOverflow)
         }
