@@ -4296,3 +4296,50 @@ fn batch_plan_id_overflow_writes_nothing() {
     assert_eq!(client.next_plan_id(), u64::MAX);
     assert_eq!(client.merchant_plan_count(&merchant), 0);
 }
+
+
+/// #280: v0.2.0 used the same instance counter and merchant index keys.
+/// Seed those entries directly, as an older deployed contract would have done,
+/// rather than creating them through today's create_plan implementation.
+#[test]
+fn legacy_registry_counter_and_index_remain_readable() {
+    let (env, client, admin) = setup();
+    let merchant = Address::generate(&env);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::NextPlanId, &17u64);
+        let p = env.storage().persistent();
+        p.set(&DataKey::MerchantPlanCount(merchant.clone()), &2u32);
+        p.set(&DataKey::MerchantPlan(merchant.clone(), 0), &3u64);
+        p.set(&DataKey::MerchantPlan(merchant.clone(), 1), &9u64);
+    });
+
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.next_plan_id(), 17);
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+    assert_eq!(
+        client.merchant_plans(&merchant, &0, &50),
+        soroban_sdk::vec![&env, 3u64, 9u64]
+    );
+    // A missing legacy index must not invent a record.
+    assert_eq!(client.merchant_plan_count(&Address::generate(&env)), 0);
+
+    // Unauthorized upgrade attempts must leave legacy entries untouched.
+    let hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "upgrade_wasm",
+            args: (&hash,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_upgrade_wasm(&hash).is_err());
+    assert_eq!(client.next_plan_id(), 17);
+    assert_eq!(
+        client.merchant_plans(&merchant, &0, &50),
+        soroban_sdk::vec![&env, 3u64, 9u64]
+    );
+}
