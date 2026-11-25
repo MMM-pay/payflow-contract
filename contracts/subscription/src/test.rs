@@ -9143,3 +9143,45 @@ fn maximum_value_subscribe_requires_the_subscribers_auth() {
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
     assert_eq!(w.vault.balance(&user, &w.token), PRICE);
 }
+
+
+/// #280: the v0.2.0 subscription schema stored its sequential mandate
+/// counter and fee configuration in instance storage. Seed the historical
+/// primitive values directly and verify today's views can decode them.
+#[test]
+fn legacy_subscription_configuration_remains_readable() {
+    let w = world();
+    let admin = w.sub.admin();
+    let registry = w.registry.address.clone();
+    let vault = w.vault.address.clone();
+    w.env.as_contract(&w.sub_id, || {
+        let instance = w.env.storage().instance();
+        instance.set(&DataKey::Admin, &admin);
+        instance.set(&DataKey::PlanRegistry, &registry);
+        instance.set(&DataKey::Vault, &vault);
+        instance.set(&DataKey::FeeBps, &125u32);
+        instance.set(&DataKey::FeeTo, &w.fee_to);
+        instance.set(&DataKey::NextMandateId, &23u64);
+    });
+
+    assert_eq!(w.sub.admin(), admin);
+    assert_eq!(w.sub.plan_registry(), registry);
+    assert_eq!(w.sub.vault(), vault);
+    assert_eq!(w.sub.fee_bps(), 125);
+    assert_eq!(w.sub.next_mandate_id(), 23);
+
+    let hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub_id,
+            fn_name: "upgrade_wasm",
+            args: (&hash,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_upgrade_wasm(&hash).is_err());
+    assert_eq!(w.sub.fee_bps(), 125);
+    assert_eq!(w.sub.next_mandate_id(), 23);
+}
