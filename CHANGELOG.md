@@ -7,6 +7,13 @@ change the contract interface.
 
 ## Unreleased
 
+### Changed
+
+- **#271: lean committed-revenue events.** Omit the previous committed amount
+  from `CommittedRevenueChanged`; indexers derive it from their preceding
+  projection. No contract state transitions or transfer amounts change.
+  Event decoders must regenerate bindings; see `docs/event-payload-audit-271.md`.
+
 ### Added
 
 - **#285: protocol-wide pause.** New admin-only
