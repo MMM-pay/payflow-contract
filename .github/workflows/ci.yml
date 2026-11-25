@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - name: Measure per-call contract resources
-        run: ./scripts/check_resource_budgets.sh
+        run: bash scripts/check_resource_budgets.sh
 
   coverage:
     name: coverage

@@ -98,7 +98,7 @@ debits and spend-limit writes in `vault`, and subscription plus charge paths
 Every row records the call's CPU instructions, memory bytes and ledger storage
 footprint (write entries and write bytes) from `env.cost_estimate()`. The tests
 print the measurements as a table, and the `resource-budgets` CI job runs
-`./scripts/check_resource_budgets.sh` to put that table in the job log and the
+`bash scripts/check_resource_budgets.sh` to put that table in the job log and the
 workflow step summary. CI fails when any metric grows by more than 5% beyond
 its committed snapshot.
 
