@@ -19,6 +19,7 @@ pub struct ChargeResult {
     pub completed: bool,
 }
 
+pub use payflow_shared::ContractHealth;
 /// The registry's `Plan`, imported from the shared crate rather than copied.
 /// A field added to or removed from the registry's plan therefore changes the
 /// type this contract decodes, and the subscription build fails instead of
@@ -159,6 +160,9 @@ pub struct MandateTerms {
     pub paused: bool,
     /// Unix seconds when the next scheduled charge falls due.
     pub next_charge: u64,
+    /// Minimum number of billing periods to complete before subscriber
+    /// cancellation. Mandates opened before this field existed decode to 0.
+    pub minimum_commitment: u32,
 }
 
 /// Read-only preview of what `charge` would pay right now.

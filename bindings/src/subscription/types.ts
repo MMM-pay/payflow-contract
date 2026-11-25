@@ -203,6 +203,10 @@ export const Error = {
    * The mandate's one-time extra-charge authorization has already been used.
    */
   2043 : { message: "ExtraChargeAlreadyUsed" }
+   * Cancellation, an upgrade, or a mandate cap would prevent the mandate
+   * from completing its frozen minimum number of billing periods.
+   */
+  2040 : { message: "MinimumCommitmentNotMet" }
 }
 
 /**
@@ -277,6 +281,11 @@ export interface Mandate {
    * Merchant receiving payment under this mandate.
    */
   merchant: string;
+  /**
+   * Minimum number of billing periods to complete before subscriber
+   * cancellation. Mandates opened before this field existed decode to 0.
+   */
+  minimum_commitment: number;
   /**
    * Unix seconds. Chargeable once the ledger timestamp reaches this.
    */
@@ -869,6 +878,10 @@ export interface SubscribedEvent {
      * merchant's share.
      */
     referral_bps?: number;
+    /**
+     * Minimum number of billing periods frozen into this mandate.
+     */
+    minimum_commitment?: number;
   };
 }
 
@@ -1224,3 +1237,30 @@ export interface CommittedRevenueChangedEvent {
   };
 }
     export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | ExtraChargedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | ExtraChargeCapChangedEvent | CommittedRevenueChangedEvent;
+
+/**
+ * Read-only deployment identity and wiring information.
+ */
+export interface ContractHealth {
+  /**
+   * Linked plan registry contract, if this contract knows one.
+   */
+  registry: string | null;
+  /**
+   * Linked subscription contract, if this contract knows one.
+   */
+  subscription: string | null;
+  /**
+   * Linked token contract, if the deployment has a single global token.
+   */
+  token: string | null;
+  /**
+   * Linked vault contract, if this contract knows one.
+   */
+  vault: string | null;
+  /**
+   * Contract semantic version.
+   */
+  version: string;
+}
+    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;

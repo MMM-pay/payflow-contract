@@ -166,10 +166,10 @@ impl From<ErrorCode> for u32 {
 mod plan {
     use super::{contracttype, Address, String, Symbol};
 
-    /// A merchant-published charge template. A `Plan` is immutable except for its
-    /// `active` flag and its `successor_id` pointer: changing price, period or
-    /// keeper tip requires publishing a new plan so existing mandates can never be
-    /// repriced under a subscriber.
+    /// A merchant-published charge template. Its billing terms are immutable:
+    /// changing price, period or keeper tip requires publishing a new plan so
+    /// existing mandates can never be repriced under a subscriber. The merchant
+    /// may rename the plan or update its `active` flag and `successor_id`.
     #[contracttype]
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Plan {
@@ -257,6 +257,28 @@ mod plan {
     }
 }
 pub use plan::{Plan, PlanChargeTerms};
+
+#[allow(missing_docs)]
+mod health {
+    use super::{contracttype, Address, String};
+
+    /// Read-only deployment identity and wiring information.
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractHealth {
+        /// Contract semantic version.
+        pub version: String,
+        /// Linked plan registry contract, if this contract knows one.
+        pub registry: Option<Address>,
+        /// Linked vault contract, if this contract knows one.
+        pub vault: Option<Address>,
+        /// Linked subscription contract, if this contract knows one.
+        pub subscription: Option<Address>,
+        /// Linked token contract, if the deployment has a single global token.
+        pub token: Option<Address>,
+    }
+}
+pub use health::ContractHealth;
 
 #[cfg(test)]
 mod test {

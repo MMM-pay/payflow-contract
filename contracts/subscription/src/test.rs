@@ -277,6 +277,98 @@ fn simulate_billing_period(w: &World, mandate_id: u64) {
 /// version string must be non-empty so the CI spec job has something to pin.
 #[test]
 fn interface_surface_is_callable_without_auth() {
+fn health_reports_version_and_configured_contracts() {
+    let w = world();
+    let health = w.sub.health();
+
+    assert_eq!(
+        health.version,
+        String::from_str(&w.env, env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(health.registry, Some(w.sub.plan_registry()));
+    assert_eq!(health.vault, Some(w.sub.vault()));
+    assert_eq!(health.subscription, None);
+    assert_eq!(health.token, None);
+}
+
+#[test]
+fn subscribe_copies_plan_terms_into_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let m = w.sub.get_mandate(&id);
+
+    assert_eq!(m.subscriber, user);
+    assert_eq!(m.merchant, w.merchant);
+    assert_eq!(m.amount, PRICE);
+    assert_eq!(m.period, MONTH);
+    assert_eq!(m.created_at, w.env.ledger().timestamp());
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.status, MandateStatus::Active);
+    assert_eq!(m.next_charge, w.env.ledger().timestamp());
+}
+
+/// Acceptance check for the auth-tree issue: `subscribe` must require exactly
+/// the subscriber's authorization for `subscribe(subscriber, plan_id,
+/// max_charges, max_total, referrer)`,
+/// and nothing else.
+#[test]
+fn subscribe_auth_tree_is_exactly_the_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+
+    w.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "subscribe",
+            args: (&user, &plan_id, &0u32, &0i128, &None::<Address>).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    // env.auths() reports the last invocation only, so read it before get_mandate.
+    let auths = w.env.auths();
+    assert_eq!(w.sub.get_mandate(&id).subscriber, user);
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+}
+
+#[test]
+fn estimated_end_tracks_the_schedule_after_a_late_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+
+    assert_eq!(w.sub.estimated_end(&id), Some(1_000_000 + 3 * MONTH));
+
+    w.sub.charge(&w.keeper, &id);
+    let first_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(first_next_charge + 2 * MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.next_charge, w.env.ledger().timestamp() + MONTH);
+    assert_eq!(w.sub.estimated_end(&id), Some(mandate.next_charge + MONTH));
+
+    w.env.ledger().set_timestamp(mandate.next_charge);
+    w.sub.charge(&w.keeper, &id);
+    let final_next_charge = w.sub.get_mandate(&id).next_charge;
+    w.env.ledger().set_timestamp(final_next_charge);
+    w.sub.charge(&w.keeper, &id);
+
+    let completed = w.sub.get_mandate(&id);
+    assert_eq!(completed.status, MandateStatus::Completed);
+    assert_eq!(w.sub.estimated_end(&id), Some(completed.last_charge));
+}
+
+#[test]
+fn estimated_end_is_none_for_open_ended_mandates() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
@@ -1115,6 +1207,141 @@ fn cancelled_or_ended_mandate_can_never_be_charged() {
         w.sub.try_charge(&w.keeper, &cancelled_id),
         Err(Ok(Error::MandateNotActive))
     );
+}
+
+#[test]
+fn minimum_commitment_is_frozen_and_blocks_early_cancellation() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let existing = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(w.sub.mandate_minimum_commitment(&existing), 0);
+
+    w.registry
+        .set_plan_minimum_commitment(&w.merchant, &plan_id, &2);
+    let committed = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(event_field_u32(&w.env, "minimum_commitment"), Some(2));
+    assert_eq!(w.sub.mandate_minimum_commitment(&committed), 2);
+
+    assert_eq!(
+        w.sub.try_cancel(&user, &committed),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    assert_eq!(
+        w.sub
+            .try_cancel_with_reason(&user, &committed, &CANCEL_REASON_TOO_EXPENSIVE),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    assert_eq!(w.sub.get_mandate(&committed).status, MandateStatus::Active);
+
+    w.sub.charge(&w.keeper, &committed);
+    assert_eq!(
+        w.sub.try_cancel(&user, &committed),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &committed);
+    w.sub.cancel(&user, &committed);
+
+    assert_eq!(
+        w.sub.get_mandate(&committed).status,
+        MandateStatus::Cancelled
+    );
+    assert_eq!(w.sub.get_mandate(&existing).status, MandateStatus::Active);
+}
+
+#[test]
+fn bulk_cancel_skips_mandates_that_have_not_met_the_commitment() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_minimum_commitment(&w.merchant, &plan_id, &1);
+    let user = w.subscriber(1_000_000);
+    let unpaid = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paid = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.charge(&w.keeper, &paid);
+    assert_eq!(w.sub.cancel_page(&user, &0, &u32::MAX), 1);
+    assert_eq!(w.sub.get_mandate(&unpaid).status, MandateStatus::Active);
+    assert_eq!(w.sub.get_mandate(&paid).status, MandateStatus::Cancelled);
+}
+
+#[test]
+fn subscription_caps_cannot_end_a_committed_mandate_early() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_minimum_commitment(&w.merchant, &plan_id, &3);
+    let user = w.subscriber(1_000_000);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &2, &0, &None::<Address>),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &0, &(PRICE * 2), &None::<Address>),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    assert_eq!(
+        w.sub.try_set_max_charges(&user, &id, &2),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    assert_eq!(w.sub.get_mandate(&id).max_charges, 0);
+    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+}
+
+#[test]
+fn upgrade_cannot_make_a_spend_capped_commitment_impossible() {
+    let w = world();
+    let plan_id = w.plan();
+    w.registry
+        .set_plan_minimum_commitment(&w.merchant, &plan_id, &3);
+    let user = w.subscriber(1_000_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &(PRICE * 3), &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    let expensive_amount = PRICE * 2;
+    let expensive_plan = w.registry.create_plan(
+        &w.merchant,
+        &w.token,
+        &expensive_amount,
+        &MONTH,
+        &String::from_str(&w.env, "More Expensive"),
+        &String::from_str(&w.env, ""),
+        &0,
+        &soroban_sdk::Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    assert_eq!(
+        w.sub.try_upgrade(&user, &id, &expensive_plan),
+        Err(Ok(Error::MinimumCommitmentNotMet))
+    );
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.plan_id, plan_id);
+    assert_eq!(mandate.amount, PRICE);
+    assert_eq!(mandate.charges_made, 1);
+    assert_eq!(mandate.total_spent, PRICE);
+}
+
+#[test]
+fn cancel_rejects_non_subscriber() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let attacker = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
     assert_eq!(
         w.sub.try_charge(&w.keeper, &ended_id),
         Err(Ok(Error::MandateNotActive))
@@ -7246,6 +7473,9 @@ fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
     assert_read_only(env, "plan_committed_revenue", || {
         s.plan_committed_revenue(&plan_id)
     });
+    assert_read_only(env, "plan_committed_per_period", || {
+        s.plan_committed_per_period(&plan_id)
+    });
 
     // Pages past the end and unknown keys read nothing and write nothing.
     let stranger = Address::generate(env);
@@ -7309,6 +7539,8 @@ fn subscription_views_need_no_signature() {
     });
     assert_read_only(env, "is_mandate_tombstoned (unsigned)", || {
         s.is_mandate_tombstoned(&active)
+    assert_read_only(env, "plan_committed_per_period (unsigned)", || {
+        s.plan_committed_per_period(&plan_id)
     });
     assert_read_only(env, "admin (unsigned)", || s.admin());
 }
@@ -7382,6 +7614,7 @@ fn lowering_a_bounded_cap_to_charges_made_ends_the_mandate() {
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.plan_committed_revenue(&plan_id), PRICE);
+    assert_eq!(w.sub.plan_committed_per_period(&plan_id), PRICE);
 
     // Five months agreed, two paid: "make that two" ends it on the spot.
     w.sub.set_max_charges(&user, &id, &2);
@@ -7395,6 +7628,7 @@ fn lowering_a_bounded_cap_to_charges_made_ends_the_mandate() {
     // A completed mandate no longer counts towards the merchant's revenue,
     // nor is it offered to keepers.
     assert_eq!(w.sub.plan_committed_revenue(&plan_id), 0);
+    assert_eq!(w.sub.plan_committed_per_period(&plan_id), 0);
     w.advance(MONTH);
     assert!(!w.sub.is_due(&id));
     assert!(w.sub.due_mandates(&w.merchant, &0, &10).is_empty());

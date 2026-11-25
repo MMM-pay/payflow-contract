@@ -94,9 +94,52 @@ fn subscribed_layout() {
             keeper_bps: 100,
             referrer: None,
             referral_bps: 0,
+            minimum_commitment: 3,
         },
     );
 }
+
+#[test]
+fn mandate_updated_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "mandate_updated",
+        super::MandateUpdated::spec_xdr(),
+        &super::MandateUpdated {
+            mandate_id: 11,
+            mandate: super::Mandate {
+                id: 11,
+                subscriber: a.clone(),
+                plan_id: 3,
+                merchant: a.clone(),
+                token: a.clone(),
+                amount: 4_500,
+                period: 86_400,
+                created_at: 1_700_000_000,
+                next_charge: 1_700_000_000,
+                last_charge: 0,
+                charges_made: 0,
+                max_charges: 24,
+                fee_bps: 250,
+                keeper_bps: 100,
+                paused_until: 0,
+                refunded: 0,
+                seats: 1,
+                max_total: 108_000,
+                total_spent: 0,
+                max_pause_secs: 0,
+                payout: a.clone(),
+                referrer: None,
+                referral_bps: 0,
+                minimum_commitment: 3,
+                status: super::MandateStatus::Active,
+            },
+        },
+    );
+}
+
 #[test]
 fn charged_layout() {
     let env = Env::default();
@@ -302,6 +345,7 @@ fn extra_charge_cap_changed_layout() {
 
 #[test]
 fn extra_charged_layout() {
+fn committed_revenue_changed_layout() {
     let env = Env::default();
     let a = address(&env);
     snapshot(
@@ -320,6 +364,15 @@ fn extra_charged_layout() {
             keeper: a.clone(),
             referral: 25,
             referrer: Some(a),
+        "committed_revenue_changed",
+        super::CommittedRevenueChanged::spec_xdr(),
+        &super::CommittedRevenueChanged {
+            plan_id: 3,
+            merchant: a.clone(),
+            token: a,
+            old_committed: 0,
+            new_committed: 4_500,
+            period: 86_400,
         },
     );
 }

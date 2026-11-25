@@ -162,6 +162,9 @@ pub enum Error {
     ExtraChargeExceedsCap = 2042,
     /// The mandate's one-time extra-charge authorization has already been used.
     ExtraChargeAlreadyUsed = 2043,
+    /// Cancellation, an upgrade, or a mandate cap would prevent the mandate
+    /// from completing its frozen minimum number of billing periods.
+    MinimumCommitmentNotMet = 2040,
 }
 
 impl From<Error> for ErrorCode {

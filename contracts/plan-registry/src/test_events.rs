@@ -162,6 +162,36 @@ fn plan_grace_period_set_layout() {
 
 // ProfileUpdated events
 #[test]
+fn plan_renamed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_renamed",
+        super::PlanRenamed::spec_xdr(),
+        &super::PlanRenamed {
+            merchant: address(&env),
+            plan_id: 7,
+            name: String::from_str(&env, "Renamed plan"),
+        },
+    );
+}
+
+#[test]
+fn plan_minimum_commitment_set_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_minimum_commitment_set",
+        super::PlanMinimumCommitmentSet::spec_xdr(),
+        &super::PlanMinimumCommitmentSet {
+            merchant: address(&env),
+            plan_id: 7,
+            minimum_periods: 3,
+        },
+    );
+}
+
+#[test]
 fn profile_updated_layout() {
     let env = Env::default();
     snapshot(
