@@ -9,6 +9,12 @@ change the contract interface.
 
 ### Added
 
+- **#247: TTL refresh on access for hot mandate and plan keys.** Reading a
+  mandate (`subscription`) or plan (`plan-registry`) now extends its persistent
+  TTL when it is within a day of expiry, so entries that are used often but
+  rarely written cannot expire mid-life. Vault mandate reserves are refreshed
+  the same way. A fresh entry is untouched, so views remain side-effect free
+  and no events or interface changes are involved.
 - **#293: `subscription:simulate_charge(keeper, mandate_id)`.** A read-only
   preview returns the exact token, subscriber, payout, fee, keeper-tip and
   referral recipients and amounts, plus whether timing, caps, mandate status

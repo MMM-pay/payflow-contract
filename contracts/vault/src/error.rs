@@ -50,6 +50,20 @@ pub enum Error {
     /// repeatedly rewrites balances and emits events; it resets when the
     /// window rolls over.
     RateLimitExceeded = 3015,
+    /// A token transfer did not move exactly the requested amount, so the
+    /// token is not safe for the vault's exact-amount accounting (for example
+    /// a fee-on-transfer token). The whole operation is rolled back.
+    UnexpectedTransferAmount = 3016,
+    /// A transfer destination is the zero/unset address: the all-zero contract
+    /// or account strkey. Sending funds there would burn them (#236).
+    ZeroAddress = 3017,
+    /// The reserve would take the subscriber's total reserve above the cap the
+    /// vault was deployed with (#348). A minimum free balance therefore stays
+    /// withdrawable no matter how many mandates the subscriber reserves for.
+    ReserveCapExceeded = 3018,
+    /// `__constructor` was given a reserve cap above 10,000 basis points
+    /// (100% of the balance), which is not a meaningful cap (#348).
+    InvalidReserveCap = 3019,
 }
 
 impl From<Error> for ErrorCode {

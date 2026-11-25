@@ -154,6 +154,8 @@ consequences) in [`docs/adr/`](docs/adr/index.md):
 - [0003: Constructors instead of `initialize`](docs/adr/0003-constructors-not-initialize.md)
 - [0004: Per-position indexes](docs/adr/0004-per-position-indexes.md)
 - [0005: Permissionless `charge`](docs/adr/0005-permissionless-charge.md)
+- [0006: Prorated upgrade charging](docs/adr/0006-prorated-upgrade-charging.md)
+- [0007: TTL refresh on access for hot keys](docs/adr/0007-ttl-refresh-on-access.md)
 
 Add a new ADR whenever a design choice changes.
 
@@ -320,6 +322,34 @@ a test-only token fixture with minting and failure injection, documented in
 | [payflow-backend](https://github.com/MMM-pay/payflow-backend) | Event indexer + keeper that settles due mandates |
 | [payflow-frontend](https://github.com/MMM-pay/payflow-frontend) | Merchant dashboard and subscriber portal |
 | [payflow-docs](https://github.com/MMM-pay/payflow-docs) | Protocol documentation |
+
+## Local CI checks
+
+Install [just](https://github.com/casey/just), the Rust toolchain specified in
+[`rust-toolchain.toml`](rust-toolchain.toml) (including `rustfmt`, `clippy`
+and the `wasm32v1-none` target), and the [Stellar CLI](https://developers.stellar.org/docs/tools/cli)
+used by CI (`stellar/stellar-cli@v30.0.1`). The auth-coverage script
+requires a POSIX-compatible shell.
+
+From the repository root, run:
+
+```sh
+just check
+# or: just ci
+```
+
+This runs the core CI checks **sequentially**, stopping on the first failure:
+
+1. `cargo fmt --all -- --check`
+2. `cargo clippy --all-targets -- -D warnings`
+3. `cargo test --all` and `./scripts/check_auth_tests.sh`
+4. `stellar contract build` (Wasm artifacts in `target/wasm32v1-none/release/`)
+
+You can run an individual stage with `just fmt`, `just clippy`,
+`just test`, or `just build`. These recipes match CI's **core** fmt,
+clippy, test and Wasm build jobs. The separate CI coverage, dependency-audit,
+minimum-supported-Rust-version, and reproducible-Wasm-build jobs are **not**
+part of this local command; the pull-request workflow remains authoritative.
 
 ## Contributing
 

@@ -54,6 +54,7 @@ declare -A allowlist_vault=(
     [can_deposit]=1
     [reserved]=1
     [reserved_total]=1
+    [reserve_cap_bps]=1
     [unreserved_balance]=1
     [can_debit]=1
     [subscription]=1

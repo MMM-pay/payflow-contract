@@ -164,6 +164,7 @@ mod contract {
         MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
         PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -399,11 +400,8 @@ mod contract {
                 return Err(Error::PlanFull);
             }
 
-            let id: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)?;
+            let id: u64 =
+                load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)?;
 
             // Freeze the plan's current grace window into this mandate. The
             // registry is the source of truth, and existing mandates never
@@ -411,11 +409,7 @@ mod contract {
             // mandate was promised (#312).
             let grace_period_secs = Self::read_plan_grace_period(&env, &registry, plan_id)?;
 
-            let fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let fee_bps: u32 = load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             // The registry already caps this, but clamp again here: the mandate's
             // tip must never exceed MAX_KEEPER_BPS even if the registry contract
@@ -1176,19 +1170,19 @@ mod contract {
                 return Err(Error::MandateNotActive);
             }
 
-            let pending_owner: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingMandateOwner(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let pending_owner: Address = load_or_err(
+                &env,
+                &DataKey::PendingMandateOwner(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
             if pending_owner != new_subscriber {
                 return Err(Error::NotProposedOwner);
             }
-            let subscriber_position: u32 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingSubscriberPosition(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let subscriber_position: u32 = load_or_err(
+                &env,
+                &DataKey::PendingSubscriberPosition(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
 
             let old_subscriber = mandate.subscriber.clone();
             Self::index_len(
@@ -1448,11 +1442,16 @@ mod contract {
                 return Err(Error::RefundExceedsReceived);
             }
 
-            token::TokenClient::new(&env, &mandate.token).transfer(
-                &merchant,
-                &mandate.subscriber,
-                &amount,
-            );
+            let token_client = token::TokenClient::new(&env, &mandate.token);
+            let received_before = token_client.balance(&mandate.subscriber);
+            token_client.transfer(&merchant, &mandate.subscriber, &amount);
+            let received = token_client
+                .balance(&mandate.subscriber)
+                .checked_sub(received_before)
+                .ok_or(Error::UnexpectedTransferAmount)?;
+            if received != amount {
+                return Err(Error::UnexpectedTransferAmount);
+            }
 
             mandate.refunded += amount;
             Self::write_mandate(&env, &mandate);
@@ -1560,11 +1559,8 @@ mod contract {
                 return Err(Error::FeeTooHigh);
             }
 
-            let old_fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let old_fee_bps: u32 =
+                load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
             env.storage()
@@ -1952,7 +1948,7 @@ mod contract {
                 else {
                     continue;
                 };
-                let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(id)) else {
+                let Some(mandate) = Self::read_mandate_opt(&env, id) else {
                     continue;
                 };
                 if super::views::mandate_is_due(&mandate, now) {
@@ -1986,11 +1982,7 @@ mod contract {
 
             let mut total: i128 = 0;
             for id in ids.iter() {
-                let Some(m) = env
-                    .storage()
-                    .persistent()
-                    .get::<_, Mandate>(&DataKey::Mandate(id))
-                else {
+                let Some(m) = Self::read_mandate_opt(&env, id) else {
                     continue;
                 };
                 if m.token != token || !super::lifecycle::active_at(&m, now) || m.period == 0 {
@@ -2047,8 +2039,7 @@ mod contract {
             for i in start..end {
                 let slot_key = DataKey::SubscriberMandate(subscriber.clone(), i);
                 if let Some(mandate_id) = storage.get::<_, u64>(&slot_key) {
-                    if let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(mandate_id))
-                    {
+                    if let Some(mandate) = Self::read_mandate_opt(&env, mandate_id) {
                         out.push_back(MandateSummary {
                             id: mandate.id,
                             merchant: mandate.merchant.clone(),
@@ -2231,18 +2222,12 @@ mod contract {
         /// The id the next opened mandate will get. Mandates are numbered from 1,
         /// so `next_mandate_id() - 1` is the number of mandates opened so far.
         pub fn next_mandate_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)
         }
 
         /// Current protocol fee rate in basis points.
         pub fn fee_bps(env: Env) -> Result<u32, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)
         }
 
         /// Hand the admin role to another address. Only the current admin may
@@ -2330,17 +2315,26 @@ mod contract {
         }
 
         fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&key)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &key, Error::NotInitialized)
         }
 
+        /// Read a mandate and refresh its TTL when it is close to expiry (#247).
+        /// A mandate can be accessed many times without being rewritten: a
+        /// keeper polling a not-yet-due charge, a failed debit, or a wallet
+        /// reading its status. Those accesses must keep the entry alive. The
+        /// bump is conditional, so an entry with plenty of rent left is
+        /// untouched and views remain side-effect free in the common case.
         fn read_mandate(env: &Env, id: u64) -> Result<Mandate, Error> {
+            Self::read_mandate_opt(env, id).ok_or(Error::MandateNotFound)
+        }
+
+        fn read_mandate_opt(env: &Env, id: u64) -> Option<Mandate> {
+            let key = DataKey::Mandate(id);
+            let mandate: Mandate = env.storage().persistent().get(&key)?;
             env.storage()
                 .persistent()
-                .get(&DataKey::Mandate(id))
-                .ok_or(Error::MandateNotFound)
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Some(mandate)
         }
 
         fn read_grace_period(env: &Env, id: u64) -> u64 {
@@ -2397,9 +2391,7 @@ mod contract {
             let storage = env.storage().persistent();
 
             if position != last_position {
-                let moved_id: u64 = storage
-                    .get(&last_key)
-                    .ok_or(Error::InvalidSubscriberIndex)?;
+                let moved_id: u64 = load_or_err(env, &last_key, Error::InvalidSubscriberIndex)?;
                 if moved_id == mandate_id {
                     return Err(Error::InvalidSubscriberIndex);
                 }
@@ -2540,11 +2532,7 @@ mod contract {
                 let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot_key) else {
                     continue;
                 };
-                let Some(mandate) = env
-                    .storage()
-                    .persistent()
-                    .get::<_, Mandate>(&DataKey::Mandate(mandate_id))
-                else {
+                let Some(mandate) = Self::read_mandate_opt(env, mandate_id) else {
                     continue;
                 };
                 if mandate.token != plan.token
@@ -2553,13 +2541,19 @@ mod contract {
                 {
                     continue;
                 }
-                // Normalize to the plan's period
-                let contribution = mandate
-                    .amount
-                    .checked_mul(i128::from(plan.period))
-                    .ok_or(Error::AmountOverflow)
-                    .unwrap_or(0)
-                    / i128::from(mandate.period);
+                // Normalize to the plan's period. Equal periods need no
+                // multiplication: doing it anyway overflows for an amount near
+                // i128::MAX and silently reports zero committed revenue.
+                let contribution = if mandate.period == plan.period {
+                    mandate.amount
+                } else {
+                    mandate
+                        .amount
+                        .checked_mul(i128::from(plan.period))
+                        .ok_or(Error::AmountOverflow)
+                        .unwrap_or(0)
+                        / i128::from(mandate.period)
+                };
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 

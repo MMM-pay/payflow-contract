@@ -122,6 +122,23 @@ withdrawals could otherwise rewrite the balance entry and emit events
 indefinitely. Normal subscribers can still deposit and withdraw several times
 a minute. A wallet that hits the limit should wait for the next window.
 
+### Withdrawals and payouts reject the zero address (#236)
+
+`vault:withdraw_to` now rejects `to` when it is the all-zero account or
+contract address, with the new typed error `ZeroAddress` (3017). `withdraw` and
+`withdraw_all` apply the same check to `user`, and every debit path (`debit`,
+`debit_split`, `debit_multi_mandate`) rejects zero-recipient legs, so a plan's
+`payout`, the fee recipient, a keeper tip or a referral share cannot be sent to
+an unset address. The check runs before any balance write, token transfer or
+event, so a rejected call leaves the ledger untouched and consumes no
+deposit/withdraw window budget.
+
+This is a behaviour change for clients: a withdrawal to the zero strkey that
+used to succeed (and burn the tokens) now fails with 3017. A charge whose
+mandate carries a zero payout fails at settlement with
+`subscription:VaultCallFailed` (2037), because the vault rejects the leg; no
+funds move and the mandate stays chargeable once the payout is corrected.
+
 ### Refund cap now accounts for referral fees and keeper tips (PR #301)
 
 Previously, the refund cap (`merchant_received`) only subtracted the protocol fee

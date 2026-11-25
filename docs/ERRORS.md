@@ -8,7 +8,7 @@ This page is the integration reference for the errors returned by the contracts 
 
 The Rust enums remain the source of truth: [plan-registry errors](../contracts/plan-registry/src/error.rs), [subscription errors](../contracts/subscription/src/error.rs), and [vault errors](../contracts/vault/src/error.rs). Error variants are append-only so existing client mappings remain stable.
 
-## Plan registry (1001–1023)
+## Plan registry (1001–1024)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -35,8 +35,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1021 | `NotPendingOwner` | The caller is not the pending owner. |
 | 1022 | `EmptyBatch` | A batch operation was submitted without items. |
 | 1023 | `BatchTooLarge` | A batch exceeds the contract's maximum size. |
+| 1024 | `PlanIdOverflow` | The next plan ID would exceed `u64`; no plan is written. |
 
-## Subscription (2001–2039)
+## Subscription (2001–2040)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -79,8 +80,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2037 | `VaultCallFailed` | A call to the vault contract failed. |
 | 2038 | `PlanChargesPaused` | Charges are paused for the referenced plan. |
 | 2039 | `ProtocolPaused` | Protocol-wide operations are paused. |
+| 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
 
-## Vault (3001–3015)
+## Vault (3001–3017)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -99,5 +101,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3013 | `InvalidWindow` | The supplied rate-limit window is invalid. |
 | 3014 | `ReserveExceedsBalance` | The requested reserve is greater than the available balance. |
 | 3015 | `RateLimitExceeded` | The operation exceeds the configured rate limit. |
+| 3016 | `UnexpectedTransferAmount` | A token transfer did not move the exact amount (for example a fee-on-transfer token); the operation is rolled back. |
+| 3017 | `ZeroAddress` | A withdrawal or payout destination is the zero/unset account or contract address. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.
