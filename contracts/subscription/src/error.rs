@@ -115,6 +115,12 @@ pub enum Error {
     /// so the token is unsafe for exact-amount accounting (for example a
     /// fee-on-transfer token). The refund is rolled back.
     UnexpectedTransferAmount = 2040,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 2041,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 2042,
 }
 
 impl From<Error> for ErrorCode {

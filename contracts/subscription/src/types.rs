@@ -277,4 +277,7 @@ pub enum DataKey {
     /// cancellations, refunds and vault withdrawals keep working. Missing
     /// means `false`.
     ProtocolPaused,
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
+    PendingAdmin,
 }

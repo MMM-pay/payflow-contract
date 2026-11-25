@@ -184,7 +184,23 @@ export const Error = {
    * and plan upgrades are refused until it is resumed; reads,
    * cancellations, refunds and vault withdrawals are unaffected.
    */
-  2039 : { message: "ProtocolPaused" }
+  2039 : { message: "ProtocolPaused" },
+  /**
+   * A refund transfer did not deliver exactly the recorded refund amount,
+   * so the token is unsafe for exact-amount accounting (for example a
+   * fee-on-transfer token). The refund is rolled back.
+   */
+  2040 : { message: "UnexpectedTransferAmount" },
+  /**
+   * `accept_admin` was called with no pending admin handover, or after the
+   * proposal was already accepted (#238).
+   */
+  2041 : { message: "PendingAdminNotFound" },
+  /**
+   * The address accepting the admin role is not the one the current admin
+   * proposed in `propose_admin` (#238).
+   */
+  2042 : { message: "NotPendingAdmin" }
 }
 
 /**
@@ -1076,3 +1092,4 @@ export interface CommittedRevenueChangedEvent {
   };
 }
     export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;
+    

@@ -46,6 +46,9 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::VaultCallFailed, 37),
         (Error::PlanChargesPaused, 38),
         (Error::ProtocolPaused, 39),
+        (Error::UnexpectedTransferAmount, 40),
+        (Error::PendingAdminNotFound, 41),
+        (Error::NotPendingAdmin, 42),
     ];
 
     let mut seen = std::vec::Vec::new();

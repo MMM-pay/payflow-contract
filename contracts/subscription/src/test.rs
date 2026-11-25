@@ -4088,23 +4088,84 @@ fn zero_means_no_total_spend_cap_and_a_negative_cap_is_rejected() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let w = world();
+    let admin = w.sub.admin();
     let next = Address::generate(&w.env);
 
-    w.sub.update_admin(&next);
+    w.sub.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(w.sub.admin(), admin);
+
+    w.sub.accept_admin(&next);
     assert_eq!(w.sub.admin(), next);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let w = world();
     let before = w.sub.admin();
     let next = Address::generate(&w.env);
 
     w.env.set_auths(&[]);
-    assert!(w.sub.try_update_admin(&next).is_err());
+    assert!(w.sub.try_propose_admin(&next).is_err());
     assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let w = world();
+    let before = w.sub.admin();
+    let next = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+
+    w.env.set_auths(&[]);
+    assert!(w.sub.try_accept_admin(&next).is_err());
+    assert_eq!(w.sub.admin(), before);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let w = world();
+    let before = w.sub.admin();
+    let attacker = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let w = world();
+    let before = w.sub.admin();
+    let next = Address::generate(&w.env);
+    let attacker = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(w.sub.admin(), before);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let w = world();
+    let next = Address::generate(&w.env);
+    w.sub.propose_admin(&next);
+    w.sub.accept_admin(&next);
+
+    assert_eq!(
+        w.sub.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(w.sub.admin(), next);
 }
 
 #[test]
@@ -5348,6 +5409,167 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).charges_made, 2);
     assert_eq!(w.vault.balance(&user, &w.token), 100_000 - 2 * PRICE);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let w = world();
+    let admin = w.sub.admin();
+    let payout = Address::generate(&w.env);
+    let referrer = Address::generate(&w.env);
+    let pending_admin = Address::generate(&w.env);
+
+    let plan_id = w.registry.create_plan(
+        &w.merchant,
+        &w.token,
+        &PRICE,
+        &MONTH,
+        &String::from_str(&w.env, "Full Plan"),
+        &String::from_str(&w.env, "All knobs"),
+        &KEEPER_BPS,
+        &Symbol::new(&w.env, "saas"),
+        &String::from_str(&w.env, "https://example.com/terms"),
+        &0u64,
+        &REFERRAL_BPS,
+        &Some(payout.clone()),
+        &10u32,
+    );
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &86_400);
+
+    let user = w.subscriber(PRICE * 10);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &5, &(PRICE * 4), &Some(referrer.clone()));
+    w.sub.charge(&w.keeper, &id);
+    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.set_paused(&user, &paused, &true);
+
+    // A mandate whose charge provably cannot be paid, so the failed-charge
+    // timestamp is written before the upgrade.
+    let broke = Address::generate(&w.env);
+    let failed = w.sub.subscribe(&broke, &plan_id, &0, &0, &None::<Address>);
+    assert!(w.sub.flag_failed_charge(&failed));
+    let failed_at = w.sub.first_failed_charge(&failed).unwrap();
+
+    w.sub.set_protocol_paused(&true);
+    w.sub.propose_admin(&pending_admin);
+
+    let mandate_before = w.sub.get_mandate(&id);
+    let paused_before = w.sub.get_mandate(&paused);
+
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    w.sub.upgrade_wasm(&wasm_hash);
+
+    // The full mandate record still decodes with the current type.
+    let stored = w
+        .env
+        .as_contract(&w.sub.address, || {
+            w.env
+                .storage()
+                .persistent()
+                .get::<_, Mandate>(&DataKey::Mandate(id))
+        })
+        .unwrap();
+    assert_eq!(stored, mandate_before);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
+    assert_eq!(
+        w.sub.get_mandate(&id).last_charge,
+        mandate_before.last_charge
+    );
+    assert_eq!(
+        w.sub.get_mandate(&id).next_charge,
+        mandate_before.next_charge
+    );
+    assert_eq!(w.sub.get_mandate(&paused).status, MandateStatus::Paused);
+    assert_eq!(w.sub.get_mandate(&paused).status, paused_before.status);
+
+    // Instance config, indexes and counters all survive.
+    assert_eq!(w.sub.admin(), admin);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+    assert_eq!(w.sub.plan_registry(), w.registry.address);
+    assert_eq!(w.sub.vault(), w.vault.address);
+    assert_eq!(w.sub.next_mandate_id(), failed + 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 2);
+    assert_eq!(
+        w.sub.subscriber_mandates(&user, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused]
+    );
+    assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 3);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused, failed]
+    );
+    assert_eq!(w.sub.plan_mandate_count(&plan_id), 3);
+    assert_eq!(
+        w.sub.plan_mandates(&plan_id, &0, &50),
+        soroban_sdk::vec![&w.env, id, paused, failed]
+    );
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 3);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    w.env.as_contract(&w.sub.address, || {
+        let p = w.env.storage().persistent();
+        assert_eq!(
+            p.get::<_, u64>(&DataKey::MandateGracePeriod(id)),
+            Some(86_400)
+        );
+        assert_eq!(
+            p.get::<_, u64>(&DataKey::FirstFailedCharge(failed)),
+            Some(failed_at)
+        );
+        assert_eq!(
+            w.env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::ProtocolPaused),
+            Some(true)
+        );
+        assert_eq!(
+            w.env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still reads the preserved instance config.
+    w.sub.set_fee_bps(&(FEE_BPS + 1));
+    assert_eq!(w.sub.fee_bps(), FEE_BPS + 1);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let w = world();
+    let admin = w.sub.admin();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    let before = w.sub.get_mandate(&id);
+
+    let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&w.env);
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &w.sub.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(w.sub.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(w.sub.admin(), admin);
+    assert_eq!(w.sub.fee_bps(), FEE_BPS);
+    assert_eq!(w.sub.upgrade_history().len(), 0);
 }
 
 #[test]

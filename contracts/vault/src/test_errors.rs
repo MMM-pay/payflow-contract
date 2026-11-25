@@ -24,6 +24,8 @@ fn every_error_code_is_in_the_vault_range() {
         (Error::RateLimitExceeded, 15),
         (Error::UnexpectedTransferAmount, 16),
         (Error::ZeroAddress, 17),
+        (Error::PendingAdminNotFound, 18),
+        (Error::NotPendingAdmin, 19),
     ];
 
     let mut seen = std::vec::Vec::new();

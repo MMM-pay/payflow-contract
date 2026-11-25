@@ -57,6 +57,12 @@ pub enum Error {
     /// A transfer destination is the zero/unset address: the all-zero contract
     /// or account strkey. Sending funds there would burn them (#236).
     ZeroAddress = 3017,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 3018,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 3019,
 }
 
 impl From<Error> for ErrorCode {

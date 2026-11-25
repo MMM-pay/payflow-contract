@@ -1466,23 +1466,84 @@ fn debits_stop_after_subscription_contract_is_replaced() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let h = setup();
+    let admin = h.vault.admin();
     let next = Address::generate(&h.env);
 
-    h.vault.update_admin(&next);
+    h.vault.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(h.vault.admin(), admin);
+
+    h.vault.accept_admin(&next);
     assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let h = setup();
     let before = h.vault.admin();
     let next = Address::generate(&h.env);
 
     h.env.set_auths(&[]);
-    assert!(h.vault.try_update_admin(&next).is_err());
+    assert!(h.vault.try_propose_admin(&next).is_err());
     assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_accept_admin(&next).is_err());
+    assert_eq!(h.vault.admin(), before);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let h = setup();
+    let before = h.vault.admin();
+    let attacker = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    let attacker = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let h = setup();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+    h.vault.accept_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
@@ -1879,6 +1940,96 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     // And the new code still runs: deposits continue where they left off.
     h.vault.deposit(&user, &h.token, &1_000);
     assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    let pending_admin = Address::generate(&h.env);
+
+    h.vault.deposit(&user, &h.token, &4_000);
+    h.vault.set_deposit_cap(&user, &h.token, &8_000);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_spend_limit(&user, &h.token, &5_000, &3_600);
+    h.vault.set_reserve(&user, &h.token, &1, &1_500);
+    h.vault.propose_admin(&pending_admin);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 8_000);
+    assert!(h.vault.token_allowed(&h.token));
+    assert!(h.vault.allowlist_enabled());
+    assert_eq!(h.vault.subscription(), h.subscription);
+    assert_eq!(
+        h.vault.spend_limit(&user, &h.token),
+        SpendLimit {
+            amount: 5_000,
+            window_secs: 3_600,
+        }
+    );
+    assert_eq!(h.vault.admin(), admin);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    h.env.as_contract(&h.vault_id, || {
+        let p = h.env.storage().persistent();
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::Reserved(user.clone(), h.token.clone(), 1)),
+            Some(1_500)
+        );
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::ReservedTotal(user.clone(), h.token.clone())),
+            Some(1_500)
+        );
+        let window = p
+            .get::<_, OperationWindow>(&DataKey::OperationWindow(user.clone(), h.token.clone()))
+            .unwrap();
+        assert!(window.operations >= 1);
+        assert_eq!(
+            h.env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still moves funds against the preserved balance entry.
+    h.vault.withdraw(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.admin(), admin);
+    assert_eq!(h.vault.upgrade_history().len(), 0);
 }
 
 #[test]
