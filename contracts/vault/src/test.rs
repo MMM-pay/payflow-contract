@@ -4,13 +4,18 @@ use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
 use soroban_sdk::{testutils::AuthorizedFunction, Symbol};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
+    testutils::{
+        storage::Persistent as _, Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
+    },
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, ScMap, ScSymbol, ScVal},
     Address, Env, IntoVal, String,
 };
 
 const THIRTY_DAYS: u64 = 2_592_000;
+/// The all-zero account and contract strkeys (#236).
+const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 /// A valid vault wasm used as the target for `upgrade_wasm` tests (#158); the
 /// contract upgrades to a copy of itself, exercising the upgrade mechanism.
 const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_vault.wasm");
@@ -186,6 +191,62 @@ fn withdraw_to_rejects_non_positive_and_excess_amounts() {
     );
     assert_eq!(h.vault.balance(&user, &h.token), 1_000);
     assert_eq!(h.token_client.balance(&destination), 0);
+}
+
+#[test]
+fn withdraw_to_rejects_the_zero_address() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &1_000);
+
+    for zero in [
+        Address::from_str(&h.env, ZERO_ACCOUNT),
+        Address::from_str(&h.env, ZERO_CONTRACT),
+    ] {
+        assert_eq!(
+            h.vault.try_withdraw_to(&user, &h.token, &zero, &100),
+            Err(Ok(Error::ZeroAddress))
+        );
+    }
+
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 1_000);
+    // A rejected destination consumes no rate-limit budget: a real withdrawal
+    // still succeeds immediately afterwards.
+    let destination = Address::generate(&h.env);
+    h.vault.withdraw_to(&user, &h.token, &destination, &100);
+    assert_eq!(h.token_client.balance(&destination), 100);
+}
+
+#[test]
+fn payouts_to_the_zero_address_are_rejected_without_spending() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    let zero = Address::from_str(&h.env, ZERO_CONTRACT);
+    let good = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &zero, &100),
+        Err(Ok(Error::ZeroAddress))
+    );
+    assert_eq!(
+        h.vault
+            .try_debit_split(&user, &h.token, &good, &100, &zero, &50),
+        Err(Ok(Error::ZeroAddress))
+    );
+    let mut legs = soroban_sdk::Vec::new(&h.env);
+    legs.push_back((good.clone(), 100_i128));
+    legs.push_back((zero.clone(), 50_i128));
+    assert_eq!(
+        h.vault
+            .try_debit_multi_mandate(&user, &h.token, &MANDATE_A, &legs),
+        Err(Ok(Error::ZeroAddress))
+    );
+
+    assert_eq!(h.vault.balance(&user, &h.token), 1_000);
+    assert_eq!(h.token_client.balance(&good), 0);
+    assert_eq!(h.token_client.balance(&zero), 0);
+    assert_eq!(h.token_client.balance(&h.vault_id), 1_000);
 }
 
 #[test]
@@ -994,6 +1055,7 @@ struct FailingTokenHarness<'a> {
     vault: VaultClient<'a>,
     vault_id: Address,
     token: Address,
+    token_admin: Address,
     test_token: TestTokenClient<'a>,
 }
 
@@ -1005,7 +1067,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
     let token_admin = Address::generate(&env);
     let subscription = Address::generate(&env);
 
-    let token = env.register(TestToken, (token_admin,));
+    let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
     let vault_id = env.register(Vault, (admin,));
@@ -1017,6 +1079,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
         vault,
         vault_id,
         token,
+        token_admin,
         test_token,
     }
 }
@@ -1113,6 +1176,99 @@ fn failing_transfer_reverts_debit_and_leaves_balances_unchanged() {
     h.test_token.set_fail_transfers(&false);
     h.vault.debit(&user, &h.token, &merchant, &1_200);
 
+    assert_eq!(h.vault.balance(&user, &h.token), 3_800);
+    assert_eq!(h.test_token.balance(&merchant), 1_200);
+    assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
+}
+
+#[test]
+fn fee_on_transfer_deposit_is_rejected_and_moves_nothing() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.test_token.set_transfer_fee_bps(&100);
+
+    // The vault would receive 9_900 but credit 10_000: reject before writing.
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &10_000),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+    assert_eq!(h.test_token.balance(&h.token_admin), 0);
+
+    // Without the fee the same deposit is exact and succeeds.
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.deposit(&user, &h.token, &10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 10_000);
+    assert_eq!(h.test_token.balance(&user), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 10_000);
+}
+
+#[test]
+fn fee_on_transfer_deposit_without_user_auth_moves_nothing() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.test_token.set_transfer_fee_bps(&100);
+
+    h.env.mock_auths(&[]);
+    assert!(h.vault.try_deposit(&user, &h.token, &4_000).is_err());
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn fee_on_transfer_withdraw_is_rejected_and_state_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    h.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &1_500),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    // The user would receive 1_485 while the vault burned 1_500 of their
+    // balance: the whole withdrawal is rolled back.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.withdraw(&user, &h.token, &1_500);
+    assert_eq!(h.vault.balance(&user, &h.token), 2_500);
+    assert_eq!(h.test_token.balance(&user), 7_500);
+    assert_eq!(h.test_token.balance(&h.vault_id), 2_500);
+}
+
+#[test]
+fn fee_on_transfer_debit_is_rejected_and_state_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    let merchant = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    h.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &merchant, &1_200),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    // The merchant would receive 1_188 for a 1_200 charge: reject and roll back.
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.debit(&user, &h.token, &merchant, &1_200);
     assert_eq!(h.vault.balance(&user, &h.token), 3_800);
     assert_eq!(h.test_token.balance(&merchant), 1_200);
     assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
@@ -2400,6 +2556,43 @@ fn reserved_internal_balances_still_add_up_to_holdings() {
     assert!(h.vault.reserved_total(&bob, &h.token) <= h.vault.balance(&bob, &h.token));
 }
 
+// ---------------------------------------------------------------- #247
+// TTL refresh whenever a mandate's reserve is accessed.
+
+fn reserve_ttl(h: &Harness, key: &DataKey) -> u32 {
+    h.env
+        .as_contract(&h.vault_id, || h.env.storage().persistent().get_ttl(key))
+}
+
+#[test]
+fn hot_reserve_ttl_is_extended_on_view_access() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &300);
+    let key = DataKey::Reserved(user.clone(), h.token.clone(), MANDATE_A);
+    let total_key = DataKey::ReservedTotal(user.clone(), h.token.clone());
+
+    let seq = h.env.ledger().sequence();
+    h.env
+        .ledger()
+        .set_sequence_number(seq + 30 * DAY_IN_LEDGERS);
+    assert!(reserve_ttl(&h, &key) < PERSIST_BUMP);
+    assert!(reserve_ttl(&h, &total_key) < PERSIST_BUMP);
+
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 300);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 300);
+    assert_eq!(reserve_ttl(&h, &key), PERSIST_BUMP);
+    assert_eq!(reserve_ttl(&h, &total_key), PERSIST_BUMP);
+}
+
+#[test]
+fn missing_reserves_have_no_ttl_to_extend() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    assert_eq!(h.vault.reserved(&user, &h.token, &MANDATE_A), 0);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Panic safety (#308): extreme amounts must be rejected with typed errors, not
 // overflow traps.
@@ -2837,4 +3030,87 @@ fn deposit_for_signed_by_the_subscriber_instead_of_the_payer_is_rejected() {
         .is_err());
     assert_eq!(h.vault.balance(&subscriber, &h.token), 0);
     assert_eq!(h.token_client.balance(&stranger), 10_000);
+}
+
+// ---------------------------------------------------------------------------
+// Numeric maximum values (#242)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deposit_and_withdraw_i128_max_round_trip() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.vault.set_deposit_cap(&user, &h.token, &i128::MAX);
+
+    h.vault.deposit(&user, &h.token, &i128::MAX);
+    assert_eq!(h.vault.balance(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), i128::MAX);
+    assert_eq!(h.token_client.balance(&user), 0);
+    assert_eq!(h.token_client.balance(&h.vault_id), i128::MAX);
+
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), i128::MAX);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn reserve_and_spend_limit_at_i128_max_do_not_wrap() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    let recipient = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.vault.deposit(&user, &h.token, &i128::MAX);
+
+    h.vault.set_reserve(&user, &h.token, &1, &i128::MAX);
+    assert_eq!(h.vault.reserved(&user, &h.token, &1), i128::MAX);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), i128::MAX);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &1),
+        Err(Ok(Error::InsufficientBalance))
+    );
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 0);
+    h.vault.set_reserve(&user, &h.token, &1, &0);
+
+    h.vault
+        .set_spend_limit(&user, &h.token, &i128::MAX, &u64::MAX);
+    let limit = h.vault.spend_limit(&user, &h.token);
+    assert_eq!(limit.amount, i128::MAX);
+    assert_eq!(limit.window_secs, u64::MAX);
+
+    // Put the current window at its largest representable spent total while
+    // the balance still has room, which a replenished account can reach.
+    h.env.as_contract(&h.vault_id, || {
+        h.env.storage().persistent().set(
+            &DataKey::SpendWindow(user.clone(), h.token.clone()),
+            &SpendWindow {
+                start: h.env.ledger().timestamp(),
+                spent: i128::MAX,
+            },
+        );
+    });
+
+    // spent == i128::MAX would make `spent + amount` overflow. It must be a
+    // typed SpendLimitExceeded error and leave the balance untouched.
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &recipient, &1),
+        Err(Ok(Error::SpendLimitExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), i128::MAX);
+    assert_eq!(h.token_client.balance(&recipient), 0);
+}
+
+#[test]
+fn maximum_deposit_requires_the_users_auth() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.token_admin.mint(&user, &i128::MAX);
+    h.env.set_auths(&[]);
+
+    assert!(h.vault.try_deposit(&user, &h.token, &i128::MAX).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), i128::MAX);
+    assert_eq!(h.token_client.balance(&h.vault_id), 0);
 }

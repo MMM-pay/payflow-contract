@@ -1,5 +1,5 @@
 # Contributing to Payflow Contracts
-
+test
 # # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
@@ -47,10 +47,14 @@ opens an issue automatically when a new advisory affects the dependency tree.
 - **No floating point.** All proportional math is integer basis points against
   `BPS_DENOMINATOR` (10 000).
 - **No panics for control flow.** Use `Result<T, Error>` and add a variant.
-- **Storage.** Config goes in `instance` storage; per-entity records go in
-  `persistent`. Every persistent write must extend TTL.
+ - **Storage.** Config goes in `instance` storage; per-entity records go in
+   `persistent`. Every persistent write must extend TTL, and reads of hot
+   mandate/plan/reserve keys must extend it too (#247). Use the contract's
+   central `read_*` helper so the bump cannot be forgotten.
 - **Events.** Use the `#[contractevent]` macro, never the deprecated
   `env.events().publish` tuple form. Indexers depend on the typed shape.
+  Follow the [event contribution guide](docs/adding-events.md) when adding or
+  changing an event.
 - **Auth.** State exactly whose `require_auth()` is required in the doc comment
   of any function that mutates state.
 - **Doc comments.** Every `pub fn` in `#[contractimpl]` must have a `///` doc
@@ -85,11 +89,27 @@ not `test_charge_3`.
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
 
+The subscription suite also commits resource-budget snapshots for representative
+charge calls, including missing authorization and vault failures. CI allows at
+most a 5% increase in CPU instructions or memory bytes. To intentionally
+refresh the reviewed baselines, run:
+
+```bash
+UPDATE_RESOURCE_BUDGETS=1 cargo test -p payflow-subscription subscription_call_budgets_stay_within_committed_snapshots
+```
+
+Review `contracts/subscription/test_snapshots/budgets.csv` before committing a
+refreshed snapshot.
+
 ### Event snapshots
 
 Each contract event has a committed XDR snapshot under
 `contracts/<contract>/test_snapshots/events/`. To update snapshots after an
 intentional event layout change, run:
+
+See the [event contribution guide](docs/adding-events.md) for the full sequence
+of defining, emitting, testing, documenting and regenerating bindings for an
+event.
 
 ```bash
 UPDATE_SNAPSHOTS=1 cargo test --all

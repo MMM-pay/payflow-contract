@@ -63,14 +63,17 @@
 // still fails the build on any unsafe block written in this crate.
 #![deny(unsafe_code)]
 
+mod charge;
 #[allow(missing_docs)]
 mod error;
 #[allow(missing_docs)]
 mod events;
 #[allow(missing_docs)]
 mod interfaces;
+mod lifecycle;
 #[allow(missing_docs)]
 mod types;
+mod views;
 
 #[cfg(test)]
 mod test;
@@ -87,8 +90,8 @@ pub use events::{
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
-    ChargeQuote, ChargeResult, DataKey, EstimatedEnd, Mandate, MandateStatus, MandateSummary, Plan,
-    UpgradeRecord,
+    ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, Mandate, MandateStatus,
+    MandateSummary, Plan, UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
@@ -153,13 +156,13 @@ pub const SECONDS_PER_LEDGER: u64 = 5;
 mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
-        ChargeResult, Charged, CommittedRevenueChanged, ContractExecutable, ContractUpgraded,
-        DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted, MandateEnded,
-        MandateStatus, MandateSummary, MandateTransferred, MandateUpdated, MaxChargesChanged,
-        PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded, SeatsChanged,
-        String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec, BPS_DENOMINATOR,
-        CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON, MAX_FEE_BPS,
-        MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
+        ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
+        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
+        MandateEnded, MandateStatus, MandateSummary, MandateTransferred, MandateUpdated,
+        MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded,
+        SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec,
+        BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON,
+        MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
         PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
 
@@ -558,7 +561,7 @@ mod contract {
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
 
             let now = env.ledger().timestamp();
-            if !Self::active_at(&mandate, now) {
+            if !super::lifecycle::active_at(&mandate, now) {
                 return Err(Error::MandateNotActive);
             }
 
@@ -582,7 +585,7 @@ mod contract {
                 return Err(Error::PlanChargesPaused);
             }
 
-            let (fee, tip, referral, merchant_amount) = Self::fee_split(&mandate)?;
+            let (fee, tip, referral, merchant_amount) = super::charge::split(&mandate)?;
             let charges_made = mandate
                 .charges_made
                 .checked_add(1)
@@ -732,7 +735,7 @@ mod contract {
             // that `charge` would reject for timing, status or caps is
             // rejected here for the same reason, not flagged as unpaid.
             let now = env.ledger().timestamp();
-            if !Self::active_at(&mandate, now) {
+            if !super::lifecycle::active_at(&mandate, now) {
                 return Err(Error::MandateNotActive);
             }
             if now < mandate.next_charge {
@@ -834,7 +837,11 @@ mod contract {
             let mandate = Self::read_mandate(&env, mandate_id)?;
             let grace_period_secs = Self::read_grace_period(&env, mandate_id);
             let now = env.ledger().timestamp();
-            Ok(Self::in_grace_period_at(&mandate, grace_period_secs, now))
+            Ok(super::lifecycle::in_grace_period_at(
+                &mandate,
+                grace_period_secs,
+                now,
+            ))
         }
 
         /// Move a mandate onto a different plan.
@@ -892,7 +899,7 @@ mod contract {
             }
 
             let now = env.ledger().timestamp();
-            if !Self::active_at(&mandate, now) {
+            if !super::lifecycle::active_at(&mandate, now) {
                 return Err(Error::MandateNotActive);
             }
 
@@ -1421,16 +1428,21 @@ mod contract {
                 return Err(Error::InvalidAmount);
             }
 
-            let remaining = Self::merchant_received(&mandate)? - mandate.refunded;
+            let remaining = super::charge::merchant_received(&mandate)? - mandate.refunded;
             if amount > remaining {
                 return Err(Error::RefundExceedsReceived);
             }
 
-            token::TokenClient::new(&env, &mandate.token).transfer(
-                &merchant,
-                &mandate.subscriber,
-                &amount,
-            );
+            let token_client = token::TokenClient::new(&env, &mandate.token);
+            let received_before = token_client.balance(&mandate.subscriber);
+            token_client.transfer(&merchant, &mandate.subscriber, &amount);
+            let received = token_client
+                .balance(&mandate.subscriber)
+                .checked_sub(received_before)
+                .ok_or(Error::UnexpectedTransferAmount)?;
+            if received != amount {
+                return Err(Error::UnexpectedTransferAmount);
+            }
 
             mandate.refunded += amount;
             Self::write_mandate(&env, &mandate);
@@ -1730,7 +1742,7 @@ mod contract {
         /// check vault balance; a funded-ness check is the caller's job.
         pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
-            if !Self::mandate_is_due(&m, env.ledger().timestamp()) {
+            if !super::views::mandate_is_due(&m, env.ledger().timestamp()) {
                 return Ok(false);
             }
             Ok(!Self::plan_charges_paused(&env, m.plan_id)?)
@@ -1751,9 +1763,9 @@ mod contract {
         /// than reimplementing the rounding.
         pub fn quote_charge(env: Env, mandate_id: u64) -> Result<ChargeQuote, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
-            let (fee, _tip, _referral, merchant_amount) = Self::fee_split(&m)?;
+            let (fee, _tip, _referral, merchant_amount) = super::charge::split(&m)?;
             let now = env.ledger().timestamp();
-            let chargeable = Self::active_at(&m, now)
+            let chargeable = super::lifecycle::active_at(&m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)
                 && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
                 && now >= m.next_charge
@@ -1764,6 +1776,61 @@ mod contract {
                 fee,
                 merchant_amount,
                 due_at: m.next_charge,
+                chargeable,
+            })
+        }
+
+        /// Preview the exact recipients and amounts the next `charge` would
+        /// transfer, without requiring authorization or changing state.
+        ///
+        /// `chargeable` covers protocol and plan pauses, timing, mandate status
+        /// and spend caps. Like [`quote_charge`](Self::quote_charge), it does
+        /// not check authorization or vault funds. `keeper` is the proposed
+        /// charge caller and receives the tip if one is due.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::PlanNotFound`] if the registry cannot provide its pause
+        /// state,
+        /// [`Error::NotInitialized`] if configuration is missing, or
+        /// [`Error::AmountOverflow`] if the split calculation overflows.
+        pub fn simulate_charge(
+            env: Env,
+            keeper: Address,
+            mandate_id: u64,
+        ) -> Result<ChargeSimulation, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let (fee, tip, referral, merchant_amount) = super::charge::split(&mandate)?;
+            let fee_to = Self::cfg_address(&env, DataKey::FeeTo)?;
+            let now = env.ledger().timestamp();
+            let next_total = mandate
+                .total_spent
+                .checked_add(mandate.amount)
+                .ok_or(Error::AmountOverflow)?;
+            let within_cap = mandate.max_total == 0 || next_total <= mandate.max_total;
+            let locally_chargeable = super::lifecycle::active_at(&mandate, now)
+                && (mandate.max_charges == 0 || mandate.charges_made < mandate.max_charges)
+                && within_cap
+                && now >= mandate.next_charge;
+            let chargeable = if locally_chargeable && !Self::protocol_paused(env.clone()) {
+                !Self::plan_charges_paused(&env, mandate.plan_id)?
+            } else {
+                false
+            };
+
+            Ok(ChargeSimulation {
+                subscriber: mandate.subscriber,
+                token: mandate.token,
+                amount: mandate.amount,
+                payout: mandate.payout,
+                merchant_amount,
+                fee_to,
+                fee,
+                keeper,
+                tip,
+                referrer: mandate.referrer,
+                referral,
+                due_at: mandate.next_charge,
                 chargeable,
             })
         }
@@ -1870,10 +1937,10 @@ mod contract {
                 else {
                     continue;
                 };
-                let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(id)) else {
+                let Some(mandate) = Self::read_mandate_opt(&env, id) else {
                     continue;
                 };
-                if Self::mandate_is_due(&mandate, now) {
+                if super::views::mandate_is_due(&mandate, now) {
                     due.push_back(id);
                 }
             }
@@ -1904,14 +1971,10 @@ mod contract {
 
             let mut total: i128 = 0;
             for id in ids.iter() {
-                let Some(m) = env
-                    .storage()
-                    .persistent()
-                    .get::<_, Mandate>(&DataKey::Mandate(id))
-                else {
+                let Some(m) = Self::read_mandate_opt(&env, id) else {
                     continue;
                 };
-                if m.token != token || !Self::active_at(&m, now) || m.period == 0 {
+                if m.token != token || !super::lifecycle::active_at(&m, now) || m.period == 0 {
                     continue;
                 }
                 // Integer math only, truncated downwards: a subscriber who plans
@@ -1965,8 +2028,7 @@ mod contract {
             for i in start..end {
                 let slot_key = DataKey::SubscriberMandate(subscriber.clone(), i);
                 if let Some(mandate_id) = storage.get::<_, u64>(&slot_key) {
-                    if let Some(mandate) = storage.get::<_, Mandate>(&DataKey::Mandate(mandate_id))
-                    {
+                    if let Some(mandate) = Self::read_mandate_opt(&env, mandate_id) {
                         out.push_back(MandateSummary {
                             id: mandate.id,
                             merchant: mandate.merchant.clone(),
@@ -2203,23 +2265,6 @@ mod contract {
         /// paused until a date resumes by itself once that date passes; a pause
         /// without a date (`paused_until == 0`) stays in force until `set_paused`
         /// resumes it manually.
-        /// The protocol fee, the keeper tip and the merchant's net share for
-        /// one charge of `m`, all from the rates frozen into the mandate when
-        /// the subscriber opened it. `charge` and `quote_charge` both call
-        /// this, so a quote can never round differently from settlement.
-        /// Splits a charge into `(fee, tip, referral, merchant_amount)`. The
-        /// fee is a share of the full amount; the tip and the referral are both
-        /// shares of the merchant's own money (`merchant_gross = amount - fee`),
-        /// so the subscriber is always debited exactly `amount` and the protocol
-        /// fee is never touched by either. `merchant_amount` is what is left for
-        /// the merchant's payout after the tip and the referral.
-        fn fee_split(m: &Mandate) -> Result<(i128, i128, i128, i128), Error> {
-            split_mandate_fee(
-                m.amount, m.fee_bps, m.keeper_bps, m.referral_bps,
-                m.referrer.is_some(), MAX_KEEPER_BPS, MAX_REFERRAL_BPS,
-            ).ok_or(Error::AmountOverflow)
-        }
-
         /// Whether the plan's merchant has paused charging for it (#315).
         fn plan_charges_paused(env: &Env, plan_id: u64) -> Result<bool, Error> {
             let registry: Address = Self::cfg_address(env, DataKey::PlanRegistry)?;
@@ -2238,45 +2283,6 @@ mod contract {
                 Ok(Ok(seconds)) => Ok(seconds),
                 _ => Err(Error::PlanNotFound),
             }
-        }
-
-        /// Grace state at `now`, using the window frozen into the mandate.
-        fn in_grace_period_at(m: &Mandate, grace_period_secs: u64, now: u64) -> bool {
-            if grace_period_secs == 0 || !Self::active_at(m, now) || now < m.next_charge {
-                return false;
-            }
-            now < m.next_charge.saturating_add(grace_period_secs)
-        }
-
-        /// Whether `charge` would settle this mandate at `now` from its own
-        /// terms: active, inside both caps and past its next charge date.
-        /// `is_due` adds the plan-pause check on top; `due_mandates` cannot
-        /// afford that cross-contract read and answers from these local terms.
-        fn mandate_is_due(m: &Mandate, now: u64) -> bool {
-            Self::active_at(m, now)
-                && (m.max_charges == 0 || m.charges_made < m.max_charges)
-                && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
-                && now >= m.next_charge
-        }
-
-        fn active_at(m: &Mandate, now: u64) -> bool {
-            match m.status {
-                MandateStatus::Active => true,
-                MandateStatus::Paused => m.paused_until != 0 && now >= m.paused_until,
-                _ => false,
-            }
-        }
-
-        /// What the merchant has actually collected for this mandate so far: the
-        /// per-charge share (price minus the protocol fee minus the keeper tip
-        /// minus the referral, all frozen into the mandate at subscribe time)
-        /// times the number of settled charges. This is the hard ceiling on
-        /// `refund`.
-        fn merchant_received(m: &Mandate) -> Result<i128, Error> {
-            let (_, _, _, merchant_amount) = Self::fee_split(m)?;
-            merchant_amount
-                .checked_mul(i128::from(m.charges_made))
-                .ok_or(Error::AmountOverflow)
         }
 
         /// Read a plan from the registry, turning any cross-contract failure
@@ -2310,11 +2316,23 @@ mod contract {
                 .ok_or(Error::NotInitialized)
         }
 
+        /// Read a mandate and refresh its TTL when it is close to expiry (#247).
+        /// A mandate can be accessed many times without being rewritten: a
+        /// keeper polling a not-yet-due charge, a failed debit, or a wallet
+        /// reading its status. Those accesses must keep the entry alive. The
+        /// bump is conditional, so an entry with plenty of rent left is
+        /// untouched and views remain side-effect free in the common case.
         fn read_mandate(env: &Env, id: u64) -> Result<Mandate, Error> {
+            Self::read_mandate_opt(env, id).ok_or(Error::MandateNotFound)
+        }
+
+        fn read_mandate_opt(env: &Env, id: u64) -> Option<Mandate> {
+            let key = DataKey::Mandate(id);
+            let mandate: Mandate = env.storage().persistent().get(&key)?;
             env.storage()
                 .persistent()
-                .get(&DataKey::Mandate(id))
-                .ok_or(Error::MandateNotFound)
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Some(mandate)
         }
 
         fn read_grace_period(env: &Env, id: u64) -> u64 {
@@ -2514,26 +2532,28 @@ mod contract {
                 let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot_key) else {
                     continue;
                 };
-                let Some(mandate) = env
-                    .storage()
-                    .persistent()
-                    .get::<_, Mandate>(&DataKey::Mandate(mandate_id))
-                else {
+                let Some(mandate) = Self::read_mandate_opt(env, mandate_id) else {
                     continue;
                 };
                 if mandate.token != plan.token
-                    || !Self::active_at(&mandate, now)
+                    || !super::lifecycle::active_at(&mandate, now)
                     || mandate.period == 0
                 {
                     continue;
                 }
-                // Normalize to the plan's period
-                let contribution = mandate
-                    .amount
-                    .checked_mul(i128::from(plan.period))
-                    .ok_or(Error::AmountOverflow)
-                    .unwrap_or(0)
-                    / i128::from(mandate.period);
+                // Normalize to the plan's period. Equal periods need no
+                // multiplication: doing it anyway overflows for an amount near
+                // i128::MAX and silently reports zero committed revenue.
+                let contribution = if mandate.period == plan.period {
+                    mandate.amount
+                } else {
+                    mandate
+                        .amount
+                        .checked_mul(i128::from(plan.period))
+                        .ok_or(Error::AmountOverflow)
+                        .unwrap_or(0)
+                        / i128::from(mandate.period)
+                };
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 

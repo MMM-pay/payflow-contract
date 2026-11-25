@@ -9,6 +9,27 @@ change the contract interface.
 
 ### Added
 
+- **#247: TTL refresh on access for hot mandate and plan keys.** Reading a
+  mandate (`subscription`) or plan (`plan-registry`) now extends its persistent
+  TTL when it is within a day of expiry, so entries that are used often but
+  rarely written cannot expire mid-life. Vault mandate reserves are refreshed
+  the same way. A fresh entry is untouched, so views remain side-effect free
+  and no events or interface changes are involved.
+- **#293: `subscription:simulate_charge(keeper, mandate_id)`.** A read-only
+  preview returns the exact token, subscriber, payout, fee, keeper-tip and
+  referral recipients and amounts, plus whether timing, caps, mandate status
+  and configured pauses permit settlement. It does not require authorization
+  or inspect vault funding.
+- **#294: subscription resource-budget regression test.** A committed snapshot
+  records CPU instructions and memory bytes for successful charge, missing
+  keeper authorization, vault failure and charge simulation. CI fails when a
+  measurement exceeds its baseline by more than 5%.
+- **#292: contract event contribution guide.** New
+  [`docs/adding-events.md`](docs/adding-events.md) documents defining and
+  emitting typed events, snapshotting their layouts, updating event references
+  and regenerating bindings; it is linked from the README and contribution
+  guide.
+
 - **#285: protocol-wide pause.** New admin-only
   `subscription:set_protocol_paused(paused)` and view `protocol_paused()`.
   While paused, `subscribe`, `subscribe_at`, `subscribe_with_deposit`,
@@ -143,6 +164,11 @@ change the contract interface.
   error `ChargeWouldSucceed=35`.
 
 ### Changed
+
+- **#291: subscription module organization.** Charge splitting and merchant
+  proceeds calculations, mandate lifecycle/grace rules, and due-state
+  calculations now live in focused `charge`, `lifecycle` and `views` modules.
+  Public contract methods and behavior are unchanged.
 
 - **#286: clippy pedantic across the workspace.** `[workspace.lints.clippy]`
   sets `pedantic = "warn"` and every crate inherits it, so the existing

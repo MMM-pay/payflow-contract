@@ -76,6 +76,12 @@ const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
 const PERSIST_BUMP: u32 = 90 * DAY_IN_LEDGERS;
 const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 
+/// The all-zero account and contract strkeys (#236). Both are well-formed
+/// Stellar addresses, but neither can ever sign or hold a deployed contract,
+/// so tokens sent there are irretrievable.
+const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+
 /// Length of the fixed window that bounds repeated deposit/withdraw cycling
 /// (#314). Windows are aligned to the Unix epoch, so every caller sees the
 /// same boundaries and a fresh window cannot be opened by waiting less than
@@ -96,7 +102,7 @@ mod contract {
         DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
         ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw, WithdrawTo,
         INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP,
-        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS,
+        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
 
     /// Custody for subscriber funds.
@@ -292,8 +298,7 @@ mod contract {
 
             Self::record_operation(&env, &user, &token)?;
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&user, &vault, &amount);
+            Self::transfer_in(&env, &token, &user, amount)?;
 
             Self::write_balance(&env, &user, &token, new_balance);
 
@@ -341,8 +346,7 @@ mod contract {
 
             Self::record_operation(&env, &user, &token)?;
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&from, &vault, &amount);
+            Self::transfer_in(&env, &token, &from, amount)?;
 
             Self::write_balance(&env, &user, &token, new_balance);
 
@@ -374,7 +378,8 @@ mod contract {
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// unreserved balance, [`Error::ZeroAddress`] if `user` is the zero
+        /// address (#236), or [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw(
@@ -384,10 +389,10 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             user.require_auth();
+            Self::require_recipient(&env, &user)?;
             let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&vault, &user, &amount);
+            Self::transfer_out(&env, &token, &user, amount)?;
 
             Withdraw {
                 user,
@@ -420,7 +425,8 @@ mod contract {
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// unreserved balance, [`Error::ZeroAddress`] if `to` is the zero
+        /// address (#236), or [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw_to(
@@ -431,10 +437,10 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             user.require_auth();
+            Self::require_recipient(&env, &to)?;
             let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&vault, &to, &amount);
+            Self::transfer_out(&env, &token, &to, amount)?;
 
             WithdrawTo {
                 user,
@@ -468,11 +474,13 @@ mod contract {
         ///
         /// # Errors
         /// Never fails on the balance itself: an empty balance returns `0`
-        /// without a token transfer. Returns [`Error::RateLimitExceeded`] if the
+        /// without a token transfer. Returns [`Error::ZeroAddress`] if `user`
+        /// is the zero address (#236), and [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw_all(env: Env, user: Address, token: Address) -> Result<i128, Error> {
             user.require_auth();
+            Self::require_recipient(&env, &user)?;
 
             let balance = Self::read_balance(&env, &user, &token);
             let reserved = Self::read_reserved_total(&env, &user, &token);
@@ -486,8 +494,7 @@ mod contract {
 
             Self::write_balance(&env, &user, &token, reserved);
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(&env, &token).transfer(&vault, &user, &amount);
+            Self::transfer_out(&env, &token, &user, amount)?;
 
             Withdraw {
                 user,
@@ -954,6 +961,65 @@ mod contract {
     }
 
     impl Vault {
+        /// Reject an unset transfer destination before any balance is written
+        /// or any token is moved (#236).
+        fn require_recipient(env: &Env, to: &Address) -> Result<(), Error> {
+            if to == &Address::from_str(env, ZERO_ACCOUNT)
+                || to == &Address::from_str(env, ZERO_CONTRACT)
+            {
+                return Err(Error::ZeroAddress);
+            }
+            Ok(())
+        }
+
+        /// Move `amount` from `from` into the vault only if the vault's token
+        /// balance grows by exactly `amount`. Returns
+        /// [`Error::UnexpectedTransferAmount`] otherwise (a fee-on-transfer
+        /// token, for example), which rolls the invocation back.
+        fn transfer_in(
+            env: &Env,
+            token: &Address,
+            from: &Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            let client = token::TokenClient::new(env, token);
+            let vault = env.current_contract_address();
+            let before = client.balance(&vault);
+            client.transfer(from, &vault, &amount);
+            let received = client
+                .balance(&vault)
+                .checked_sub(before)
+                .ok_or(Error::UnexpectedTransferAmount)?;
+            if received != amount {
+                return Err(Error::UnexpectedTransferAmount);
+            }
+            Ok(())
+        }
+
+        /// Pay `amount` to `to` only if `to`'s token balance grows by exactly
+        /// `amount`. A fee-on-transfer token shortchanges the recipient, so the
+        /// transfer is rolled back rather than settling a charge or withdrawal
+        /// that delivered less than the contract recorded.
+        fn transfer_out(
+            env: &Env,
+            token: &Address,
+            to: &Address,
+            amount: i128,
+        ) -> Result<(), Error> {
+            let client = token::TokenClient::new(env, token);
+            let vault = env.current_contract_address();
+            let before = client.balance(to);
+            client.transfer(&vault, to, &amount);
+            let received = client
+                .balance(to)
+                .checked_sub(before)
+                .ok_or(Error::UnexpectedTransferAmount)?;
+            if received != amount {
+                return Err(Error::UnexpectedTransferAmount);
+            }
+            Ok(())
+        }
+
         fn do_debit(
             env: &Env,
             user: &Address,
@@ -963,6 +1029,7 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             Self::require_subscription(env)?;
+            Self::require_recipient(env, to)?;
 
             if amount <= 0 {
                 return Err(Error::InvalidAmount);
@@ -970,8 +1037,7 @@ mod contract {
 
             let new_balance = Self::spend(env, user, token, mandate_id, amount)?;
 
-            let vault = env.current_contract_address();
-            token::TokenClient::new(env, token).transfer(&vault, to, &amount);
+            Self::transfer_out(env, token, to, amount)?;
 
             Debit {
                 user: user.clone(),
@@ -996,6 +1062,8 @@ mod contract {
             amount_b: i128,
         ) -> Result<(), Error> {
             Self::require_subscription(env)?;
+            Self::require_recipient(env, to_a)?;
+            Self::require_recipient(env, to_b)?;
 
             if amount_a <= 0 || amount_b < 0 {
                 return Err(Error::InvalidAmount);
@@ -1015,10 +1083,7 @@ mod contract {
             let after_both = Self::spend(env, user, token, mandate_id, total)?;
             let after_a = after_both + amount_b;
 
-            let vault = env.current_contract_address();
-            let token_client = token::TokenClient::new(env, token);
-
-            token_client.transfer(&vault, to_a, &amount_a);
+            Self::transfer_out(env, token, to_a, amount_a)?;
             Debit {
                 user: user.clone(),
                 token: token.clone(),
@@ -1029,7 +1094,7 @@ mod contract {
             .publish(env);
 
             if amount_b > 0 {
-                token_client.transfer(&vault, to_b, &amount_b);
+                Self::transfer_out(env, token, to_b, amount_b)?;
                 Debit {
                     user: user.clone(),
                     token: token.clone(),
@@ -1062,11 +1127,12 @@ mod contract {
                 return Err(Error::InvalidAmount);
             }
 
-            for i in 1..legs.len() {
+            for i in 0..legs.len() {
                 let leg = legs.get_unchecked(i);
                 if leg.1 < 0 {
                     return Err(Error::InvalidAmount);
                 }
+                Self::require_recipient(env, &leg.0)?;
             }
 
             // Sum all amounts and check against spendable balance and spend limit once.
@@ -1078,9 +1144,6 @@ mod contract {
 
             // The whole total counts against the spend limit once.
             let after_all = Self::spend(env, user, token, mandate_id, total)?;
-
-            let vault = env.current_contract_address();
-            let token_client = token::TokenClient::new(env, token);
 
             // Track running balance for events: start from after_all and add back
             // each leg's amount as we go backwards, or track forward.
@@ -1099,7 +1162,7 @@ mod contract {
                 let amount = leg.1;
 
                 if amount > 0 {
-                    token_client.transfer(&vault, to, &amount);
+                    Self::transfer_out(env, token, to, amount)?;
 
                     Debit {
                         user: user.clone(),
@@ -1195,10 +1258,16 @@ mod contract {
         }
 
         fn read_reserved(env: &Env, user: &Address, token: &Address, mandate_id: u64) -> i128 {
-            env.storage()
-                .persistent()
-                .get(&DataKey::Reserved(user.clone(), token.clone(), mandate_id))
-                .unwrap_or(0)
+            let key = DataKey::Reserved(user.clone(), token.clone(), mandate_id);
+            let p = env.storage().persistent();
+            let Some(amount) = p.get::<_, i128>(&key) else {
+                return 0;
+            };
+            // A reserve belongs to a live mandate (#247): refreshing it on
+            // access keeps the reservation from expiring while the mandate is
+            // still being charged. A missing reserve is a no-op.
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            amount
         }
 
         /// Store a mandate's reserve; 0 removes the entry so an unreserved
@@ -1221,10 +1290,13 @@ mod contract {
         }
 
         fn read_reserved_total(env: &Env, user: &Address, token: &Address) -> i128 {
-            env.storage()
-                .persistent()
-                .get(&DataKey::ReservedTotal(user.clone(), token.clone()))
-                .unwrap_or(0)
+            let key = DataKey::ReservedTotal(user.clone(), token.clone());
+            let p = env.storage().persistent();
+            let Some(amount) = p.get::<_, i128>(&key) else {
+                return 0;
+            };
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            amount
         }
 
         fn write_reserved_total(env: &Env, user: &Address, token: &Address, amount: i128) {
@@ -1320,13 +1392,17 @@ mod contract {
                 _ => (now - (now % limit.window_secs), 0),
             };
 
-            if spent.saturating_add(amount) > limit.amount {
+            // `checked_add`, not `saturating_add`: a spent total at i128::MAX
+            // must fail the limit instead of passing the check and then
+            // overflowing on the write below.
+            let new_spent = spent.checked_add(amount).ok_or(Error::SpendLimitExceeded)?;
+            if new_spent > limit.amount {
                 return Err(Error::SpendLimitExceeded);
             }
 
             Ok(Some(SpendWindow {
                 start,
-                spent: spent + amount,
+                spent: new_spent,
             }))
         }
 

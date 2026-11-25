@@ -22,6 +22,8 @@ const PRICE: i128 = 10_000;
 const FEE_BPS: u32 = 100; // 1%
 const KEEPER_BPS: u32 = 200; // 2% of the merchant share
 const REFERRAL_BPS: u32 = 1_000; // 10% of the merchant share (from #136)
+/// The all-zero contract strkey (#236).
+const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 /// A valid subscription wasm used as the `upgrade_wasm` target (#158).
 const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_subscription.wasm");
 
@@ -1548,6 +1550,101 @@ fn quote_needs_no_authorization() {
     assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
 }
 
+#[test]
+fn simulate_charge_reports_exact_recipients_without_authorization_or_writes() {
+    let w = world();
+    let referrer = Address::generate(&w.env);
+    let payout = Address::generate(&w.env);
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, Some(payout.clone()));
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+    let mandate_before = w.sub.get_mandate(&id);
+    let vault_before = w.vault.balance(&user, &w.token);
+
+    w.env.mock_auths(&[]);
+    let simulation = w.sub.simulate_charge(&w.keeper, &id);
+
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let merchant_gross = PRICE - fee;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
+    let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
+    let merchant_amount = merchant_gross - tip - referral;
+    assert_eq!(simulation.subscriber, user);
+    assert_eq!(simulation.token, w.token);
+    assert_eq!(simulation.amount, PRICE);
+    assert_eq!(simulation.payout, payout);
+    assert_eq!(simulation.merchant_amount, merchant_amount);
+    assert_eq!(simulation.fee_to, w.fee_to);
+    assert_eq!(simulation.fee, fee);
+    assert_eq!(simulation.keeper, w.keeper);
+    assert_eq!(simulation.tip, tip);
+    assert_eq!(simulation.referrer, Some(referrer.clone()));
+    assert_eq!(simulation.referral, referral);
+    assert_eq!(simulation.due_at, mandate_before.next_charge);
+    assert!(simulation.chargeable);
+    assert_eq!(w.sub.get_mandate(&id), mandate_before);
+    assert_eq!(w.vault.balance(&user, &w.token), vault_before);
+
+    w.env.mock_all_auths();
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.token_client.balance(&payout), merchant_amount);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&referrer), referral);
+    assert_eq!(
+        vault_before - w.vault.balance(&user, &w.token),
+        simulation.amount
+    );
+}
+
+#[test]
+fn simulate_charge_reports_paused_and_missing_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_protocol_paused(&true);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+    assert_eq!(
+        w.sub.try_simulate_charge(&w.keeper, &99),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn simulate_charge_reports_plan_pause_and_cap_without_moving_funds() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &false);
+    w.sub.charge(&w.keeper, &id);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn simulate_charge_reports_amount_overflow() {
+    let w = world();
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = w.subscriber(1_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(
+        w.sub.try_simulate_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+}
+
 /// A price large enough to overflow the fee multiplication is reported as
 /// `AmountOverflow` by both quote and charge instead of panicking.
 #[test]
@@ -1795,6 +1892,24 @@ fn quote_and_charge_agree_on_not_due() {
     assert_eq!(quote.due_at, w.env.ledger().timestamp() + MONTH);
 
     assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
+}
+
+#[test]
+fn charge_with_a_zero_payout_address_fails_at_settlement() {
+    let w = world();
+    let zero = Address::from_str(&w.env, ZERO_CONTRACT);
+    let plan_id = w.plan_full(0, 0, Some(zero.clone()));
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert!(w.sub.quote_charge(&id).chargeable);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::VaultCallFailed))
+    );
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000);
+    assert_eq!(w.token_client.balance(&zero), 0);
+    assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
 }
 
 /// Quote chargeable=true but charge fails with `VaultCallFailed` when insufficient balance.
@@ -3264,6 +3379,7 @@ struct FailingTokenWorld<'a> {
     registry: RegistryClient<'a>,
     vault: RealVaultClient<'a>,
     token: Address,
+    token_admin: Address,
     test_token: TestTokenClient<'a>,
     merchant: Address,
     fee_to: Address,
@@ -3281,7 +3397,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
     let fee_to = Address::generate(&env);
     let keeper = Address::generate(&env);
 
-    let token = env.register(TestToken, (token_admin,));
+    let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
@@ -3310,6 +3426,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
         registry,
         vault,
         token,
+        token_admin,
         test_token,
         merchant,
         fee_to,
@@ -3448,6 +3565,74 @@ fn charge_reverts_completely_when_keeper_tip_transfer_fails() {
     assert_eq!(w.test_token.balance(&w.fee_to), 0);
     assert_eq!(w.test_token.balance(&w.keeper), 0);
     assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+}
+
+#[test]
+fn charge_with_fee_on_transfer_reverts_completely() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // The merchant would receive 9_900 for a 10_000 charge (the 1% fee is
+    // deducted on transfer), so the vault rejects the debit and rolls the
+    // whole charge back.
+    w.test_token.set_transfer_fee_bps(&100);
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.last_charge, 0);
+    assert_eq!(m.next_charge, 1_000_000);
+    assert_eq!(m.status, MandateStatus::Active);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+    assert_eq!(w.test_token.balance(&w.token_admin), 0);
+
+    // With exact transfers the same charge settles normally.
+    w.test_token.set_transfer_fee_bps(&0);
+    w.sub.charge(&w.keeper, &id);
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    assert_eq!(w.test_token.balance(&w.merchant), PRICE - fee);
+    assert_eq!(w.test_token.balance(&w.fee_to), fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000 - PRICE);
+}
+
+#[test]
+fn refund_with_fee_on_transfer_reverts_and_leaves_the_mandate_unchanged() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let merchant_balance = w.test_token.balance(&w.merchant);
+    assert_eq!(merchant_balance, PRICE - fee);
+
+    // The subscriber would receive 990 for a 1_000 refund: reject instead of
+    // recording a refund that did not deliver.
+    w.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &1_000),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    assert_eq!(w.sub.get_mandate(&id).refunded, 0);
+    assert_eq!(w.test_token.balance(&w.merchant), merchant_balance);
+    // The subscriber's wallet still holds the 50_000 not deposited in the vault.
+    assert_eq!(w.test_token.balance(&user), 50_000);
+    assert_eq!(w.test_token.balance(&w.token_admin), 0);
+
+    // Turning the fee off lets the merchant refund normally.
+    w.test_token.set_transfer_fee_bps(&0);
+    w.sub.refund(&w.merchant, &id, &1_000);
+    assert_eq!(w.sub.get_mandate(&id).refunded, 1_000);
+    assert_eq!(w.test_token.balance(&user), 51_000);
+    assert_eq!(w.test_token.balance(&w.merchant), merchant_balance - 1_000);
 }
 
 // ----- upgrading a mandate to another plan (#94) -----
@@ -7213,4 +7398,1748 @@ fn extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate() {
     }
     std::println!("#284 TTL extension for {N} mandates: batched {batched} CPU instructions, one call each {single}");
     assert!(batched < single);
+}
+
+// ---------------------------------------------------------------- #247
+// TTL refresh whenever a hot mandate key is accessed.
+
+#[test]
+fn hot_mandate_ttl_is_extended_on_view_access() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let before = w.sub.get_mandate(&id);
+
+    let seq = w.env.ledger().sequence();
+    w.env
+        .ledger()
+        .set_sequence_number(seq + 30 * DAY_IN_LEDGERS);
+    let aged = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert!(aged < PERSIST_BUMP);
+
+    assert_eq!(w.sub.get_mandate(&id), before);
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), PERSIST_BUMP);
+}
+
+#[test]
+fn hot_mandate_ttl_is_extended_on_failed_charge_access() {
+    let w = world();
+    let plan_id = w.plan();
+    // An unfunded subscriber gives `flag_failed_charge` a real failure to
+    // report without rewriting the mandate itself.
+    let user = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let seq = w.env.ledger().sequence();
+    w.env
+        .ledger()
+        .set_sequence_number(seq + 30 * DAY_IN_LEDGERS);
+    let aged = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert!(aged < PERSIST_BUMP);
+
+    assert!(w.sub.flag_failed_charge(&id));
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), PERSIST_BUMP);
+}
+
+#[test]
+fn fresh_and_missing_mandates_are_untouched_by_access() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1_000_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let ttl = persistent_ttl(&w, &DataKey::Mandate(id));
+    assert_eq!(ttl, PERSIST_BUMP);
+    w.sub.get_mandate(&id);
+    assert_eq!(persistent_ttl(&w, &DataKey::Mandate(id)), ttl);
+
+    assert_eq!(w.sub.try_get_mandate(&999), Err(Ok(Error::MandateNotFound)));
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&999),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn subscription_call_budgets_stay_within_committed_snapshots() {
+    let mut measurements = std::vec::Vec::new();
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.cost_estimate().budget().reset_default();
+    w.sub.charge(&w.keeper, &id);
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_success",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.mock_auths(&[]);
+    w.env.cost_estimate().budget().reset_default();
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_missing_auth",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.cost_estimate().budget().reset_default();
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_vault_failure",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(w.keeper.clone()));
+    w.env.mock_auths(&[]);
+    w.env.cost_estimate().budget().reset_default();
+    let simulation = w.sub.simulate_charge(&w.keeper, &id);
+    assert!(simulation.chargeable);
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "simulate_charge",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from("call,cpu_instructions,memory_bytes\n");
+        for (name, cpu, memory) in measurements {
+            std::fmt::Write::write_fmt(&mut snapshot, format_args!("{name},{cpu},{memory}\n"))
+                .unwrap();
+        }
+        std::fs::write(snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for (name, cpu, memory) in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{name},")))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {name}"));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let cpu_limit = expected_cpu + (expected_cpu / 20).max(1);
+        let memory_limit = expected_memory + (expected_memory / 20).max(1);
+        assert!(
+            cpu <= cpu_limit,
+            "{name} CPU budget grew from {expected_cpu} to {cpu} instructions (5% tolerance: {cpu_limit})"
+        );
+        assert!(
+            memory <= memory_limit,
+            "{name} memory budget grew from {expected_memory} to {memory} bytes (5% tolerance: {memory_limit})"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #245: two active mandates interleaving debits against one subscriber
+// balance can never double-spend it
+// ---------------------------------------------------------------------------
+
+/// One subscriber, two merchants, and two active mandates drawing on the same
+/// vault balance.
+///
+/// Soroban runs each invocation to completion before the next one starts, so
+/// "interleaving" here means alternating `charge` calls for mandate A and
+/// mandate B against that one balance, with the ledger clock set to an
+/// absolute timestamp for every billing period. Every settled step checks the
+/// exact token movement, and every rejected step checks that nothing moved at
+/// all. After every step the conservation invariant is checked against totals
+/// the test tracks itself rather than reads back from the contracts.
+mod interleaved_mandates {
+    use super::*;
+    use core::cell::Cell;
+    use payflow_plan_registry::Error as RegistryError;
+    use payflow_vault::Error as VaultError;
+    use soroban_sdk::testutils::{AuthorizedFunction, AuthorizedInvocation};
+
+    /// The subscriber's opening vault balance: enough for some of the combined
+    /// debits, never all of them.
+    const START: i128 = 100_000;
+    /// A larger opening balance for the lifecycle tests, so mandate B can keep
+    /// billing for several periods after mandate A stops.
+    const ROOMY: i128 = 200_000;
+    /// Mandate A's price, paid to merchant A.
+    const AMOUNT_A: i128 = 30_000;
+    /// Mandate B's price, paid to merchant B.
+    const AMOUNT_B: i128 = 40_000;
+    /// Ledger timestamp of billing period 0. Each period is set as the
+    /// absolute timestamp `T0 + n * MONTH`; nothing relies on the default
+    /// ledger or on wall-clock time.
+    const T0: u64 = 1_000_000;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Which {
+        A,
+        B,
+    }
+
+    /// Every balance a charge could touch, read from the vault's ledger and
+    /// from the token contract itself.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Balances {
+        /// The subscriber's balance in the vault's internal ledger.
+        vault_ledger: i128,
+        /// Tokens the vault contract actually holds.
+        vault_tokens: i128,
+        /// The subscriber's own wallet, outside the vault.
+        wallet: i128,
+        merchant_a: i128,
+        merchant_b: i128,
+        fee_to: i128,
+        keeper: i128,
+    }
+
+    struct Pair {
+        w: World<'static>,
+        user: Address,
+        merchant_a: Address,
+        merchant_b: Address,
+        plan_a: u64,
+        a: u64,
+        b: u64,
+        /// Net amount the subscriber put into the vault (deposits minus
+        /// withdrawals), tracked by the test, not read from the vault.
+        deposited: Cell<i128>,
+        /// Sum of every charge that settled, tracked by the test.
+        debited: Cell<i128>,
+    }
+
+    fn fee(amount: i128) -> i128 {
+        amount * i128::from(FEE_BPS) / BPS_DENOMINATOR
+    }
+
+    fn price(which: Which) -> i128 {
+        match which {
+            Which::A => AMOUNT_A,
+            Which::B => AMOUNT_B,
+        }
+    }
+
+    /// Two merchants with one monthly plan each, and one subscriber holding
+    /// `funding` in the vault with an active mandate on both plans. Both
+    /// mandates are due at `T0`. The subscriber's wallet keeps another
+    /// `funding` outside the vault for top-ups.
+    fn pair(funding: i128) -> Pair {
+        let w = world();
+        w.env.ledger().set_timestamp(T0);
+
+        let merchant_a = w.merchant.clone();
+        let merchant_b = Address::generate(&w.env);
+        let plan_a = w.plan_amount(AMOUNT_A, MONTH);
+        let plan_b = w.registry.create_plan(
+            &merchant_b,
+            &w.token,
+            &AMOUNT_B,
+            &MONTH,
+            &String::from_str(&w.env, "Plan B"),
+            &String::from_str(&w.env, ""),
+            &0,
+            &Symbol::new(&w.env, ""),
+            &String::from_str(&w.env, ""),
+            &0u64,
+            &0u32,
+            &None::<Address>,
+            &0u32,
+        );
+
+        let user = w.subscriber(funding);
+        let a = w.sub.subscribe(&user, &plan_a, &0, &0, &None::<Address>);
+        let b = w.sub.subscribe(&user, &plan_b, &0, &0, &None::<Address>);
+
+        let p = Pair {
+            w,
+            user,
+            merchant_a,
+            merchant_b,
+            plan_a,
+            a,
+            b,
+            deposited: Cell::new(funding),
+            debited: Cell::new(0),
+        };
+        p.assert_invariants();
+        p
+    }
+
+    impl Pair {
+        fn id(&self, which: Which) -> u64 {
+            match which {
+                Which::A => self.a,
+                Which::B => self.b,
+            }
+        }
+
+        /// Move the ledger clock to the start of billing period `n`.
+        fn period(&self, n: u64) {
+            self.w.env.ledger().set_timestamp(T0 + n * MONTH);
+        }
+
+        fn balances(&self) -> Balances {
+            let t = &self.w.token_client;
+            Balances {
+                vault_ledger: self.w.vault.balance(&self.user, &self.w.token),
+                vault_tokens: t.balance(&self.w.vault.address),
+                wallet: t.balance(&self.user),
+                merchant_a: t.balance(&self.merchant_a),
+                merchant_b: t.balance(&self.merchant_b),
+                fee_to: t.balance(&self.w.fee_to),
+                keeper: t.balance(&self.w.keeper),
+            }
+        }
+
+        /// The invariants that make a double-spend impossible to miss.
+        fn assert_invariants(&self) {
+            let b = self.balances();
+            let deposited = self.deposited.get();
+            let debited = self.debited.get();
+
+            assert!(
+                b.vault_ledger >= 0,
+                "subscriber balance went negative: {b:?}"
+            );
+            assert!(
+                debited <= deposited,
+                "charged {debited} against only {deposited} deposited"
+            );
+            // Conservation: what went in is exactly what is left plus what
+            // was charged.
+            assert_eq!(
+                deposited,
+                b.vault_ledger + debited,
+                "conservation broken: {b:?}"
+            );
+            // Every charged unit reached a payee; none was created or lost.
+            assert_eq!(
+                b.merchant_a + b.merchant_b + b.fee_to + b.keeper,
+                debited,
+                "payees received a different total than was charged: {b:?}"
+            );
+            // The vault's ledger is backed one for one by tokens it holds.
+            assert_eq!(b.vault_tokens, b.vault_ledger, "vault ledger unbacked");
+            assert!(
+                self.w.vault.reserved_total(&self.user, &self.w.token) <= b.vault_ledger,
+                "reserves exceed the balance"
+            );
+        }
+
+        /// Settle `which` with `caller` as the keeper and check it moved
+        /// exactly its own price: the subscriber down by the price, its own
+        /// merchant up by the price less the fee, the fee recipient up by the
+        /// fee, and nobody else touched. Returns the auths the charge used.
+        fn settles_by(
+            &self,
+            which: Which,
+            caller: &Address,
+        ) -> std::vec::Vec<(Address, AuthorizedInvocation)> {
+            let id = self.id(which);
+            let amount = price(which);
+            let now = self.w.env.ledger().timestamp();
+            let before = self.balances();
+            let mandate = self.w.sub.get_mandate(&id);
+
+            let result = self.w.sub.charge(caller, &id);
+            // `env.auths()` only covers the most recent invocation, so read it
+            // before any balance query.
+            let auths = self.w.env.auths();
+
+            let mut expected = before;
+            expected.vault_ledger -= amount;
+            expected.vault_tokens -= amount;
+            expected.fee_to += fee(amount);
+            match which {
+                Which::A => expected.merchant_a += amount - fee(amount),
+                Which::B => expected.merchant_b += amount - fee(amount),
+            }
+            assert_eq!(
+                self.balances(),
+                expected,
+                "charge of {which:?} at {now} did not move exactly {amount}"
+            );
+            assert_eq!(result.merchant_amount + result.fee, amount);
+
+            let after = self.w.sub.get_mandate(&id);
+            assert_eq!(after.charges_made, mandate.charges_made + 1);
+            assert_eq!(after.total_spent, mandate.total_spent + amount);
+            assert_eq!(after.last_charge, now);
+            assert_eq!(after.next_charge, now + MONTH);
+
+            self.debited.set(self.debited.get() + amount);
+            self.assert_invariants();
+            auths
+        }
+
+        fn settles(&self, which: Which) {
+            self.settles_by(which, &self.w.keeper);
+        }
+
+        /// Charge `which`, expect exactly `error`, and check that no balance
+        /// and neither mandate changed.
+        fn rejected(&self, which: Which, error: Error) {
+            let id = self.id(which);
+            let now = self.w.env.ledger().timestamp();
+            let before = self.balances();
+            let mandate_a = self.w.sub.get_mandate(&self.a);
+            let mandate_b = self.w.sub.get_mandate(&self.b);
+
+            assert_eq!(
+                self.w.sub.try_charge(&self.w.keeper, &id),
+                Err(Ok(error)),
+                "charge of {which:?} at {now}"
+            );
+
+            assert_eq!(
+                self.balances(),
+                before,
+                "rejected charge of {which:?} at {now} moved funds"
+            );
+            assert_eq!(self.w.sub.get_mandate(&self.a), mandate_a);
+            assert_eq!(self.w.sub.get_mandate(&self.b), mandate_b);
+            self.assert_invariants();
+        }
+
+        /// A due charge the remaining balance cannot cover: the vault refuses
+        /// the debit, the subscription contract surfaces `VaultCallFailed`,
+        /// and nothing moves.
+        fn unaffordable(&self, which: Which) {
+            assert!(
+                !self
+                    .w
+                    .vault
+                    .can_debit(&self.user, &self.w.token, &self.id(which), &price(which)),
+                "{which:?} should not be affordable here"
+            );
+            self.rejected(which, Error::VaultCallFailed);
+        }
+
+        fn top_up(&self, amount: i128) {
+            self.w.vault.deposit(&self.user, &self.w.token, &amount);
+            self.deposited.set(self.deposited.get() + amount);
+            self.assert_invariants();
+        }
+
+        fn withdraw(&self, amount: i128) {
+            let wallet = self.balances().wallet;
+            self.w.vault.withdraw(&self.user, &self.w.token, &amount);
+            self.deposited.set(self.deposited.get() - amount);
+            assert_eq!(self.balances().wallet, wallet + amount);
+            self.assert_invariants();
+        }
+    }
+
+    // ---- happy path / no double-spend ----
+
+    /// A, B, A, B, ... across billing periods on a balance that covers only
+    /// three of the six debits. Every settled debit moves exactly its price,
+    /// and once the balance runs dry every further debit fails without
+    /// moving anything.
+    #[test]
+    fn alternating_debits_never_spend_more_than_the_shared_balance() {
+        let p = pair(START);
+        // (period, mandate, settles?) — a hard-coded interleaving.
+        let schedule = [
+            (0, Which::A, true),  // 100_000 -> 70_000
+            (0, Which::B, true),  //  70_000 -> 30_000
+            (1, Which::A, true),  //  30_000 ->      0
+            (1, Which::B, false), // 0 cannot cover 40_000
+            (2, Which::A, false),
+            (2, Which::B, false),
+            (3, Which::A, false),
+            (3, Which::B, false),
+        ];
+
+        for (period, which, settles) in schedule {
+            p.period(period);
+            if settles {
+                p.settles(which);
+            } else {
+                p.unaffordable(which);
+            }
+        }
+
+        assert_eq!(p.debited.get(), START);
+        assert_eq!(p.w.vault.balance(&p.user, &p.w.token), 0);
+        assert_eq!(p.w.sub.get_mandate(&p.a).charges_made, 2);
+        assert_eq!(p.w.sub.get_mandate(&p.b).charges_made, 1);
+        let b = p.balances();
+        assert_eq!(b.merchant_a, 2 * (AMOUNT_A - fee(AMOUNT_A)));
+        assert_eq!(b.merchant_b, AMOUNT_B - fee(AMOUNT_B));
+        assert_eq!(b.fee_to, 2 * fee(AMOUNT_A) + fee(AMOUNT_B));
+    }
+
+    /// When the larger debit no longer fits, it fails and moves nothing, and
+    /// the smaller one can still use the remainder in the same period.
+    #[test]
+    fn a_debit_the_balance_cannot_cover_moves_nothing_and_the_smaller_one_still_settles() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.settles(Which::B); // 30_000
+
+        p.period(1);
+        p.unaffordable(Which::B); // 30_000 < 40_000
+        p.settles(Which::A); // exactly 30_000 -> 0
+
+        // The failed attempt did not advance B's schedule: B is still due,
+        // still unaffordable, and A is now not due.
+        assert!(p.w.sub.is_due(&p.b));
+        p.unaffordable(Which::B);
+        p.rejected(Which::A, Error::NotDue);
+
+        p.period(2);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    // ---- double-charge protection ----
+
+    /// Neither mandate can be charged twice in one period, however the calls
+    /// are interleaved, and each rejected repeat leaves every balance as it
+    /// was.
+    #[test]
+    fn neither_mandate_can_be_debited_twice_in_one_period() {
+        let p = pair(START);
+
+        p.settles(Which::A);
+        p.rejected(Which::A, Error::NotDue);
+        p.settles(Which::B);
+        p.rejected(Which::B, Error::NotDue);
+        p.rejected(Which::A, Error::NotDue);
+
+        // One second before the next period, both are still not due.
+        p.w.env.ledger().set_timestamp(T0 + MONTH - 1);
+        p.rejected(Which::B, Error::NotDue);
+        p.rejected(Which::A, Error::NotDue);
+
+        // At the period boundary each is due again, once.
+        p.period(1);
+        p.settles(Which::A); // 30_000 -> 0
+        p.rejected(Which::A, Error::NotDue);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Two debits in the same ledger on a balance that covers either one but
+    /// not both: whichever runs first settles, and the second cannot reach
+    /// the funds the first already consumed.
+    #[test]
+    fn back_to_back_debits_in_one_ledger_cannot_share_funds() {
+        const EITHER: i128 = 50_000;
+        for (first, second) in [(Which::A, Which::B), (Which::B, Which::A)] {
+            let p = pair(EITHER);
+            p.settles(first);
+            p.unaffordable(second);
+            assert_eq!(p.debited.get(), price(first));
+            assert_eq!(
+                p.w.vault.balance(&p.user, &p.w.token),
+                EITHER - price(first)
+            );
+        }
+    }
+
+    /// Funds the subscriber reserved for mandate B are out of mandate A's
+    /// reach even when the total balance would cover A, so A cannot spend
+    /// what B is owed; B then draws its reserve down.
+    #[test]
+    fn a_reserve_for_one_mandate_cannot_be_spent_by_the_other() {
+        let p = pair(START);
+        p.w.vault.set_reserve(&p.user, &p.w.token, &p.b, &AMOUNT_B);
+
+        p.settles(Which::A); // unreserved 60_000 -> 30_000
+        p.period(1);
+        p.settles(Which::A); // unreserved 30_000 -> 0
+
+        p.period(2);
+        // 40_000 is left, all of it B's reserve: enough for A on paper, but
+        // not A's to spend.
+        assert_eq!(p.w.vault.balance(&p.user, &p.w.token), AMOUNT_B);
+        p.unaffordable(Which::A);
+        // Nor can the subscriber pull B's reserve out from under it.
+        assert_eq!(
+            p.w.vault.try_withdraw(&p.user, &p.w.token, &1),
+            Err(Ok(VaultError::InsufficientBalance))
+        );
+        p.assert_invariants();
+
+        p.settles(Which::B); // draws the reserve down to 0
+        assert_eq!(p.w.vault.reserved(&p.user, &p.w.token, &p.b), 0);
+        assert_eq!(p.w.vault.reserved_total(&p.user, &p.w.token), 0);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    // ---- authorization ----
+
+    /// With no signatures at all, neither mandate's charge settles and no
+    /// funds move; restoring the keeper's signature lets the interleaving
+    /// resume where it was.
+    #[test]
+    fn charges_without_the_keepers_signature_move_nothing() {
+        let p = pair(START);
+        p.settles(Which::A);
+
+        p.w.env.mock_auths(&[]);
+        for which in [Which::B, Which::A] {
+            let before = p.balances();
+            let mandate = p.w.sub.get_mandate(&p.id(which));
+            let result = p.w.sub.try_charge(&p.w.keeper, &p.id(which));
+            assert!(
+                matches!(result, Err(Err(_))),
+                "unsigned charge of {which:?} was not rejected by the host: {result:?}"
+            );
+            assert_eq!(p.balances(), before);
+            assert_eq!(p.w.sub.get_mandate(&p.id(which)), mandate);
+        }
+        p.assert_invariants();
+
+        p.w.env.mock_all_auths();
+        p.settles(Which::B);
+        p.period(1);
+        p.settles(Which::A);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Merchant B may settle mandate A, since `charge` is permissionless, but
+    /// it signs only for itself and A's money still goes to merchant A. The
+    /// vault debit is authorized by the subscription contract being its
+    /// direct caller, never by a merchant or subscriber signature.
+    #[test]
+    fn another_merchant_can_settle_a_mandate_but_never_receives_its_funds() {
+        let p = pair(START);
+        let env = &p.w.env;
+
+        for (which, caller) in [
+            (Which::A, p.merchant_b.clone()),
+            (Which::B, p.merchant_a.clone()),
+        ] {
+            let id = p.id(which);
+            env.mock_auths(&[MockAuth {
+                address: &caller,
+                invoke: &MockAuthInvoke {
+                    contract: &p.w.sub.address,
+                    fn_name: "charge",
+                    args: (&caller, &id).into_val(env),
+                    sub_invokes: &[],
+                },
+            }]);
+
+            // `settles_by` checks that the money reached `which`'s own
+            // merchant and that the caller got nothing.
+            let auths = p.settles_by(which, &caller);
+            assert_eq!(
+                auths,
+                std::vec![(
+                    caller.clone(),
+                    AuthorizedInvocation {
+                        function: AuthorizedFunction::Contract((
+                            p.w.sub.address.clone(),
+                            Symbol::new(env, "charge"),
+                            (&caller, id).into_val(env),
+                        )),
+                        sub_invocations: std::vec![],
+                    }
+                )]
+            );
+        }
+
+        let b = p.balances();
+        assert_eq!(b.merchant_a, AMOUNT_A - fee(AMOUNT_A));
+        assert_eq!(b.merchant_b, AMOUNT_B - fee(AMOUNT_B));
+    }
+
+    /// Nobody but the subscription contract can debit the vault, even naming
+    /// a real mandate and holding a valid signature of their own: merchant B
+    /// cannot pull mandate A's price (or B's own) straight out of the vault.
+    #[test]
+    fn vault_debits_that_bypass_the_subscription_contract_are_rejected() {
+        let p = pair(START);
+        let env = &p.w.env;
+        p.settles(Which::A);
+
+        let mut legs = soroban_sdk::Vec::new(env);
+        legs.push_back((p.merchant_b.clone(), AMOUNT_A));
+        env.mock_auths(&[MockAuth {
+            address: &p.merchant_b,
+            invoke: &MockAuthInvoke {
+                contract: &p.w.vault.address,
+                fn_name: "debit_multi_mandate",
+                args: (&p.user, &p.w.token, &p.a, legs.clone()).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+        let before = p.balances();
+        assert!(matches!(
+            p.w.vault
+                .try_debit_multi_mandate(&p.user, &p.w.token, &p.a, &legs),
+            Err(Err(_))
+        ));
+        assert_eq!(p.balances(), before);
+
+        env.mock_auths(&[MockAuth {
+            address: &p.merchant_b,
+            invoke: &MockAuthInvoke {
+                contract: &p.w.vault.address,
+                fn_name: "debit_mandate",
+                args: (&p.user, &p.w.token, &p.b, &p.merchant_b, &AMOUNT_B).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(matches!(
+            p.w.vault
+                .try_debit_mandate(&p.user, &p.w.token, &p.b, &p.merchant_b, &AMOUNT_B),
+            Err(Err(_))
+        ));
+        assert_eq!(p.balances(), before);
+        p.assert_invariants();
+
+        // The legitimate path is unaffected and still bounded by the balance.
+        env.mock_all_auths();
+        p.settles(Which::B);
+        p.period(1);
+        p.settles(Which::A);
+        assert_eq!(p.debited.get(), START);
+    }
+
+    /// Merchant B cannot end, pause or cancel mandate A, nor pause charging
+    /// on merchant A's plan, so it cannot interfere with how A draws on the
+    /// shared balance.
+    #[test]
+    fn a_merchant_cannot_end_pause_or_cancel_another_merchants_mandate() {
+        let p = pair(START);
+        let mb = &p.merchant_b;
+
+        assert_eq!(
+            p.w.sub.try_end_mandate(mb, &p.a),
+            Err(Ok(Error::NotMerchant))
+        );
+        assert_eq!(
+            p.w.sub.try_set_paused(mb, &p.a, &true),
+            Err(Ok(Error::NotSubscriber))
+        );
+        assert_eq!(p.w.sub.try_cancel(mb, &p.a), Err(Ok(Error::NotSubscriber)));
+        assert_eq!(
+            p.w.registry
+                .try_set_plan_charges_paused(mb, &p.plan_a, &true),
+            Err(Ok(RegistryError::NotPlanOwner))
+        );
+
+        assert_eq!(p.w.sub.get_mandate(&p.a).status, MandateStatus::Active);
+        p.settles(Which::A);
+        p.settles(Which::B);
+    }
+
+    // ---- failure / lifecycle ----
+
+    /// Closing mandate A mid-sequence, by the subscriber cancelling or by
+    /// merchant A ending it, stops A for good without moving funds, while B
+    /// keeps billing until the balance runs out.
+    #[test]
+    fn closing_one_mandate_mid_sequence_leaves_the_other_billing() {
+        for subscriber_cancels in [true, false] {
+            let p = pair(ROOMY);
+            p.settles(Which::A); // 170_000
+            p.settles(Which::B); // 130_000
+
+            if subscriber_cancels {
+                p.w.sub.cancel(&p.user, &p.a);
+                assert_eq!(p.w.sub.get_mandate(&p.a).status, MandateStatus::Cancelled);
+            } else {
+                p.w.sub.end_mandate(&p.merchant_a, &p.a);
+            }
+            p.assert_invariants();
+
+            for period in 1..=3 {
+                p.period(period);
+                p.rejected(Which::A, Error::MandateNotActive);
+                p.settles(Which::B); // 90_000, 50_000, 10_000
+            }
+            p.period(4);
+            p.rejected(Which::A, Error::MandateNotActive);
+            p.unaffordable(Which::B);
+
+            assert_eq!(p.w.sub.get_mandate(&p.a).charges_made, 1);
+            assert_eq!(p.w.sub.get_mandate(&p.b).charges_made, 4);
+            assert_eq!(p.debited.get(), AMOUNT_A + 4 * AMOUNT_B);
+        }
+    }
+
+    /// A paused mandate A is skipped without moving funds while B bills;
+    /// once resumed, A competes for the balance again and the two together
+    /// still cannot overdraw it.
+    #[test]
+    fn pausing_one_mandate_mid_sequence_skips_it_without_moving_funds() {
+        let p = pair(ROOMY);
+        p.settles(Which::A); // 170_000
+        p.settles(Which::B); // 130_000
+
+        p.w.sub.set_paused(&p.user, &p.a, &true);
+        p.period(1);
+        p.rejected(Which::A, Error::MandateNotActive);
+        p.settles(Which::B); // 90_000
+
+        p.w.sub.set_paused(&p.user, &p.a, &false);
+        p.settles(Which::A); // 60_000, still due from period 1
+
+        p.period(2);
+        p.settles(Which::A); // 30_000
+        p.unaffordable(Which::B);
+        p.period(3);
+        p.settles(Which::A); // 0
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), ROOMY);
+    }
+
+    /// While merchant A has charging paused on its plan, A's charges fail
+    /// with `PlanChargesPaused` and move nothing; B spends the balance in the
+    /// meantime, so when A is resumed it cannot overdraw what is left.
+    #[test]
+    fn a_plan_charge_pause_on_one_mandate_does_not_unlock_extra_spend() {
+        let p = pair(START);
+        p.w.registry
+            .set_plan_charges_paused(&p.merchant_a, &p.plan_a, &true);
+
+        p.rejected(Which::A, Error::PlanChargesPaused);
+        p.settles(Which::B); // 60_000
+        p.period(1);
+        p.rejected(Which::A, Error::PlanChargesPaused);
+        p.settles(Which::B); // 20_000
+
+        p.w.registry
+            .set_plan_charges_paused(&p.merchant_a, &p.plan_a, &false);
+        p.unaffordable(Which::A); // 20_000 < 30_000
+        assert_eq!(p.debited.get(), 2 * AMOUNT_B);
+    }
+
+    /// A top-up mid-sequence funds a mandate that had just failed, exactly
+    /// once: it settles in the same period because the failure never
+    /// advanced its schedule, and it cannot settle a second time.
+    #[test]
+    fn a_top_up_mid_sequence_funds_later_debits_exactly_once() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.settles(Which::B); // 30_000
+
+        p.period(1);
+        p.unaffordable(Which::B);
+        p.top_up(50_000); // 80_000
+        p.settles(Which::B); // 40_000
+        p.rejected(Which::B, Error::NotDue);
+        p.settles(Which::A); // 10_000
+        p.rejected(Which::A, Error::NotDue);
+
+        p.period(2);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        assert_eq!(p.debited.get(), START + 50_000 - 10_000);
+    }
+
+    /// Withdrawals interleaved with debits: the subscriber can take back only
+    /// what has not been charged, a withdrawal reduces what later debits can
+    /// reach, and nothing already charged can be reclaimed.
+    #[test]
+    fn withdrawals_mid_sequence_cannot_reclaim_charged_funds_or_overdraw() {
+        let p = pair(START);
+        p.settles(Which::A); // 70_000
+        p.withdraw(20_000); // 50_000
+        p.settles(Which::B); // 10_000
+
+        assert_eq!(
+            p.w.vault.try_withdraw(&p.user, &p.w.token, &10_001),
+            Err(Ok(VaultError::InsufficientBalance))
+        );
+        p.assert_invariants();
+
+        p.period(1);
+        p.unaffordable(Which::A);
+        p.unaffordable(Which::B);
+        p.withdraw(10_000); // 0
+
+        assert_eq!(p.debited.get(), AMOUNT_A + AMOUNT_B);
+        assert_eq!(p.balances().wallet, START + 30_000);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #244: plan and mandate ids are reproducible given the same call sequence
+// ---------------------------------------------------------------------------
+
+/// Plan and mandate IDs must come out the same every time the same call
+/// sequence runs, because generated bindings, indexers and their tests key on
+/// them.
+///
+/// Both IDs are plain global counters: not hashes, not random, and not scoped
+/// per merchant, subscriber or plan.
+/// - Plan IDs come from the registry's `NextPlanId` (instance storage, starts
+///   at 1). `create_plan` and `create_plans` read it only after checking the
+///   merchant's auth and validating every plan.
+/// - Mandate IDs come from the subscription contract's `NextMandateId`
+///   (instance storage, starts at 1). The one creation path shared by
+///   `subscribe`, `subscribe_at` and `subscribe_with_deposit` reads it only
+///   after every check has passed.
+///
+/// A rejected call is rolled back whole by the host, so it must never consume
+/// an ID. These tests prove it by slipping failing and unauthorized creates
+/// between the steps of a fixed sequence and checking that the IDs that follow
+/// are exactly the ones a clean run assigns.
+mod deterministic_ids {
+    use super::*;
+    use payflow_plan_registry::{Error as RegistryError, PlanParams};
+    use soroban_sdk::testutils::{AuthorizedFunction, AuthorizedInvocation};
+    use soroban_sdk::{InvokeError, Val};
+
+    /// Ledger timestamp every run is pinned to.
+    const T0: u64 = 1_000_000;
+    /// Ledger sequence every run is pinned to.
+    const SEQ: u32 = 100;
+    /// What each subscriber holds in the vault, and again in its wallet.
+    const FUNDING: i128 = 1_000_000;
+    /// A plan ID no run ever reaches.
+    const MISSING_PLAN: u64 = 999;
+
+    // GOLDEN VALUES. Generated bindings, indexers and their fixtures rely on
+    // these exact IDs for this call sequence. A change that shifts any of them
+    // is a breaking change for every consumer of the IDs, so do not edit them
+    // just to make this test pass.
+
+    /// Plan IDs in creation order: A's plan, B's plan, then A's batch of two.
+    const GOLDEN_PLANS: [u64; 4] = [1, 2, 3, 4];
+    /// `(mandate ID, plan ID)` in creation order.
+    const GOLDEN_MANDATES: [(u64, u64); 5] = [(1, 1), (2, 1), (3, 2), (4, 3), (5, 4)];
+    /// The next IDs each contract will hand out once the sequence is done.
+    const GOLDEN_NEXT_PLAN_ID: u64 = 5;
+    const GOLDEN_NEXT_MANDATE_ID: u64 = 6;
+
+    type TryId<E> = Result<Result<u64, soroban_sdk::Error>, Result<E, InvokeError>>;
+
+    /// Calls slipped in between the steps of the sequence. Every one of them
+    /// must fail and leave both counters where they were.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Noise {
+        None,
+        /// Creates the contracts reject: bad input, a missing, closed or full
+        /// plan, a paused protocol, or a deposit the wallet cannot cover.
+        Failures,
+        /// Creates without the merchant's or subscriber's signature.
+        Unauthorized,
+    }
+
+    /// Everything one run assigned, as plain values that compare across
+    /// `Env`s. Addresses are read back from the stored plan and mandate
+    /// records as `ScVal`s, so comparing two runs also proves each ID points
+    /// at the same record in both.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Ids {
+        /// `(plan ID, merchant)` in creation order.
+        plans: std::vec::Vec<(u64, ScVal)>,
+        /// `(mandate ID, plan ID, subscriber, merchant)` in creation order.
+        mandates: std::vec::Vec<(u64, u64, ScVal, ScVal)>,
+        next_plan_id: u64,
+        next_mandate_id: u64,
+    }
+
+    impl Ids {
+        fn plan_ids(&self) -> std::vec::Vec<u64> {
+            self.plans.iter().map(|(id, _)| *id).collect()
+        }
+
+        fn mandate_ids(&self) -> std::vec::Vec<(u64, u64)> {
+            self.mandates
+                .iter()
+                .map(|(id, plan, _, _)| (*id, *plan))
+                .collect()
+        }
+    }
+
+    struct Run {
+        w: World<'static>,
+        merchant_a: Address,
+        merchant_b: Address,
+        u1: Address,
+        u2: Address,
+        /// An account that is never authorized for anything.
+        outsider: Address,
+        plans: std::vec::Vec<u64>,
+        mandates: std::vec::Vec<u64>,
+    }
+
+    fn sc(env: &Env, address: &Address) -> ScVal {
+        let val: Val = address.into_val(env);
+        ScVal::try_from_val(env, &val).unwrap()
+    }
+
+    /// A fresh `Env` with the three contracts deployed, the ledger pinned to
+    /// `T0` / `SEQ`, and every account the sequence uses created up front in
+    /// the same order whatever noise follows, so generated addresses line up
+    /// across runs.
+    fn fresh() -> Run {
+        let w = world();
+        w.env.ledger().with_mut(|l| {
+            l.timestamp = T0;
+            l.sequence_number = SEQ;
+        });
+        let merchant_a = w.merchant.clone();
+        let merchant_b = Address::generate(&w.env);
+        let outsider = Address::generate(&w.env);
+        let u1 = w.subscriber(FUNDING);
+        let u2 = w.subscriber(FUNDING);
+        Run {
+            w,
+            merchant_a,
+            merchant_b,
+            u1,
+            u2,
+            outsider,
+            plans: std::vec::Vec::new(),
+            mandates: std::vec::Vec::new(),
+        }
+    }
+
+    /// The fixed call sequence, with `noise` slipped in before every create
+    /// and once more at the end:
+    ///
+    /// 1. merchant A publishes a plan, then merchant B publishes one;
+    /// 2. A publishes two more in one `create_plans` batch, the second capped
+    ///    at one subscriber;
+    /// 3. u1 and u2 subscribe to A's first plan, and u1 to B's plan;
+    /// 4. B closes its plan to new sign-ups;
+    /// 5. u2 schedules a mandate on A's third plan with `subscribe_at`;
+    /// 6. u1 takes the only seat on A's capped plan with
+    ///    `subscribe_with_deposit`.
+    fn run(noise: Noise) -> Run {
+        let mut r = fresh();
+        let (a, b) = (r.merchant_a.clone(), r.merchant_b.clone());
+        let (u1, u2) = (r.u1.clone(), r.u2.clone());
+
+        r.plan_noise(noise);
+        let p1 = r.publish(&a, 10_000);
+        r.plan_noise(noise);
+        let p2 = r.publish(&b, 20_000);
+        r.plan_noise(noise);
+        let batch = r.w.registry.create_plans(
+            &a,
+            &soroban_sdk::vec![&r.w.env, r.params(30_000, 0), r.params(40_000, 1)],
+        );
+        r.plans.extend(batch.iter());
+        let (p3, p4) = (batch.get(0).unwrap(), batch.get(1).unwrap());
+
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u1, p1);
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u2, p1);
+        r.mandate_noise(noise, p1);
+        r.subscribe(&u1, p2);
+
+        r.w.registry.set_plan_active(&b, &p2, &false);
+        if noise == Noise::Failures {
+            r.closed_plan_failures(p2);
+        }
+
+        r.mandate_noise(noise, p1);
+        let m4 = r.w.sub.subscribe_at(&u2, &p3, &0, &0, &(T0 + WEEK), &None);
+        r.mandates.push(m4);
+        r.mandate_noise(noise, p1);
+        let m5 =
+            r.w.sub
+                .subscribe_with_deposit(&u1, &p4, &0, &0, &10_000, &None);
+        r.mandates.push(m5);
+        if noise == Noise::Failures {
+            r.full_plan_failures(p4);
+        }
+
+        r.plan_noise(noise);
+        r.mandate_noise(noise, p1);
+        r
+    }
+
+    impl Run {
+        fn ids(&self) -> Ids {
+            let env = &self.w.env;
+            Ids {
+                plans: self
+                    .plans
+                    .iter()
+                    .map(|id| (*id, sc(env, &self.w.registry.get_plan(id).merchant)))
+                    .collect(),
+                mandates: self
+                    .mandates
+                    .iter()
+                    .map(|id| {
+                        let m = self.w.sub.get_mandate(id);
+                        (*id, m.plan_id, sc(env, &m.subscriber), sc(env, &m.merchant))
+                    })
+                    .collect(),
+                next_plan_id: self.w.registry.next_plan_id(),
+                next_mandate_id: self.w.sub.next_mandate_id(),
+            }
+        }
+
+        fn params(&self, amount: i128, max_subscribers: u32) -> PlanParams {
+            let env = &self.w.env;
+            PlanParams {
+                token: self.w.token.clone(),
+                amount,
+                period: MONTH,
+                name: String::from_str(env, "Plan"),
+                description: String::from_str(env, ""),
+                keeper_bps: 0,
+                category: Symbol::new(env, ""),
+                terms_uri: String::from_str(env, ""),
+                available_until: 0,
+                referral_bps: 0,
+                payout: None,
+                max_subscribers,
+            }
+        }
+
+        /// `create_plan`'s arguments, for building a `MockAuth` that matches
+        /// `try_publish` exactly.
+        fn plan_args(
+            &self,
+            merchant: &Address,
+            amount: i128,
+            period: u64,
+        ) -> soroban_sdk::Vec<Val> {
+            let env = &self.w.env;
+            (
+                merchant,
+                &self.w.token,
+                &amount,
+                &period,
+                &String::from_str(env, "Plan"),
+                &String::from_str(env, ""),
+                &0u32,
+                &Symbol::new(env, ""),
+                &String::from_str(env, ""),
+                &0u64,
+                &0u32,
+                &None::<Address>,
+                &0u32,
+            )
+                .into_val(env)
+        }
+
+        fn try_publish(
+            &self,
+            merchant: &Address,
+            amount: i128,
+            period: u64,
+        ) -> TryId<RegistryError> {
+            let env = &self.w.env;
+            self.w.registry.try_create_plan(
+                merchant,
+                &self.w.token,
+                &amount,
+                &period,
+                &String::from_str(env, "Plan"),
+                &String::from_str(env, ""),
+                &0,
+                &Symbol::new(env, ""),
+                &String::from_str(env, ""),
+                &0u64,
+                &0u32,
+                &None::<Address>,
+                &0u32,
+            )
+        }
+
+        fn publish(&mut self, merchant: &Address, amount: i128) -> u64 {
+            let id = self.try_publish(merchant, amount, MONTH).unwrap().unwrap();
+            self.plans.push(id);
+            id
+        }
+
+        fn try_subscribe(&self, user: &Address, plan_id: u64) -> TryId<Error> {
+            self.w
+                .sub
+                .try_subscribe(user, &plan_id, &0, &0, &None::<Address>)
+        }
+
+        fn subscribe(&mut self, user: &Address, plan_id: u64) -> u64 {
+            let id = self.try_subscribe(user, plan_id).unwrap().unwrap();
+            self.mandates.push(id);
+            id
+        }
+
+        /// Only `signer` signs the next call, for exactly `fn_name(args)`.
+        fn signed_by(
+            &self,
+            signer: &Address,
+            contract: &Address,
+            fn_name: &str,
+            args: soroban_sdk::Vec<Val>,
+        ) {
+            self.w.env.mock_auths(&[MockAuth {
+                address: signer,
+                invoke: &MockAuthInvoke {
+                    contract,
+                    fn_name,
+                    args,
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        /// Run `attempt`, which must fail, and check it consumed neither a
+        /// plan ID nor a mandate ID.
+        fn consumes_no_id(&self, what: &str, attempt: impl FnOnce(&Self)) {
+            let next_plan = self.w.registry.next_plan_id();
+            let next_mandate = self.w.sub.next_mandate_id();
+            attempt(self);
+            assert_eq!(
+                self.w.registry.next_plan_id(),
+                next_plan,
+                "{what} consumed a plan id"
+            );
+            assert_eq!(
+                self.w.sub.next_mandate_id(),
+                next_mandate,
+                "{what} consumed a mandate id"
+            );
+        }
+
+        fn plan_noise(&self, noise: Noise) {
+            match noise {
+                Noise::None => {}
+                Noise::Failures => self.plan_failures(),
+                Noise::Unauthorized => self.unauthorized_plans(),
+            }
+        }
+
+        fn mandate_noise(&self, noise: Noise, open_plan: u64) {
+            match noise {
+                Noise::None => {}
+                Noise::Failures => self.mandate_failures(open_plan),
+                Noise::Unauthorized => self.unauthorized_mandates(open_plan),
+            }
+        }
+
+        fn plan_failures(&self) {
+            let a = &self.merchant_a;
+            self.consumes_no_id("a zero-amount plan", |r| {
+                assert_eq!(
+                    r.try_publish(a, 0, MONTH),
+                    Err(Ok(RegistryError::InvalidAmount))
+                );
+            });
+            self.consumes_no_id("a plan with too short a period", |r| {
+                assert_eq!(
+                    r.try_publish(a, 10_000, 1),
+                    Err(Ok(RegistryError::InvalidPeriod))
+                );
+            });
+            self.consumes_no_id("a batch with one invalid plan", |r| {
+                let env = &r.w.env;
+                let batch = soroban_sdk::vec![env, r.params(10_000, 0), r.params(0, 0)];
+                assert_eq!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Ok(RegistryError::InvalidAmount))
+                );
+            });
+            self.consumes_no_id("an empty batch", |r| {
+                assert_eq!(
+                    r.w.registry
+                        .try_create_plans(a, &soroban_sdk::Vec::new(&r.w.env)),
+                    Err(Ok(RegistryError::EmptyBatch))
+                );
+            });
+            self.consumes_no_id("an oversized batch", |r| {
+                let mut batch = soroban_sdk::Vec::new(&r.w.env);
+                for _ in 0..=payflow_plan_registry::MAX_BATCH_PLANS {
+                    batch.push_back(r.params(10_000, 0));
+                }
+                assert_eq!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Ok(RegistryError::BatchTooLarge))
+                );
+            });
+        }
+
+        fn mandate_failures(&self, open_plan: u64) {
+            let u2 = &self.u2;
+            self.consumes_no_id("a mandate on a missing plan", |r| {
+                assert_eq!(
+                    r.try_subscribe(u2, MISSING_PLAN),
+                    Err(Ok(Error::PlanNotFound))
+                );
+            });
+            self.consumes_no_id("a deposit-and-subscribe on a missing plan", |r| {
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u2, &MISSING_PLAN, &0, &0, &10_000, &None),
+                    Err(Ok(Error::PlanNotFound))
+                );
+            });
+            self.consumes_no_id("a backdated mandate", |r| {
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_at(u2, &open_plan, &0, &0, &(T0 - 1), &None),
+                    Err(Ok(Error::InvalidStart))
+                );
+            });
+            self.consumes_no_id("a negative spend cap", |r| {
+                assert_eq!(
+                    r.w.sub.try_subscribe(u2, &open_plan, &0, &-1, &None),
+                    Err(Ok(Error::InvalidMaxTotal))
+                );
+            });
+            self.consumes_no_id("a deposit the wallet cannot cover", |r| {
+                let vault_before = r.w.vault.balance(u2, &r.w.token);
+                assert_eq!(
+                    r.w.sub.try_subscribe_with_deposit(
+                        u2,
+                        &open_plan,
+                        &0,
+                        &0,
+                        &(10 * FUNDING),
+                        &None
+                    ),
+                    Err(Ok(Error::VaultCallFailed))
+                );
+                assert_eq!(r.w.vault.balance(u2, &r.w.token), vault_before);
+            });
+            self.consumes_no_id("a mandate while the protocol is paused", |r| {
+                r.w.sub.set_protocol_paused(&true);
+                assert_eq!(
+                    r.try_subscribe(u2, open_plan),
+                    Err(Ok(Error::ProtocolPaused))
+                );
+                r.w.sub.set_protocol_paused(&false);
+            });
+        }
+
+        /// `closed` no longer accepts sign-ups. `subscribe_with_deposit`
+        /// deposits before it finds that out, so this also proves the deposit
+        /// is rolled back with the rest of the call.
+        fn closed_plan_failures(&self, closed: u64) {
+            let u2 = &self.u2;
+            self.consumes_no_id("a mandate on a closed plan", |r| {
+                assert_eq!(r.try_subscribe(u2, closed), Err(Ok(Error::PlanInactive)));
+            });
+            self.consumes_no_id("a deposit-and-subscribe on a closed plan", |r| {
+                let t = &r.w.token_client;
+                let (vault, wallet) = (r.w.vault.balance(u2, &r.w.token), t.balance(u2));
+                assert_eq!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u2, &closed, &0, &0, &10_000, &None),
+                    Err(Ok(Error::PlanInactive))
+                );
+                assert_eq!(r.w.vault.balance(u2, &r.w.token), vault);
+                assert_eq!(t.balance(u2), wallet);
+            });
+        }
+
+        fn full_plan_failures(&self, full: u64) {
+            self.consumes_no_id("a mandate on a full plan", |r| {
+                assert_eq!(r.try_subscribe(&r.u2, full), Err(Ok(Error::PlanFull)));
+            });
+        }
+
+        fn unauthorized_plans(&self) {
+            let a = &self.merchant_a;
+            let registry = &self.w.registry.address;
+            self.consumes_no_id("an unsigned plan", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+            });
+            self.consumes_no_id("a plan signed by someone else", |r| {
+                r.signed_by(
+                    &r.outsider,
+                    registry,
+                    "create_plan",
+                    r.plan_args(a, 10_000, MONTH),
+                );
+                assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+            });
+            self.consumes_no_id("a batch signed by the other merchant", |r| {
+                let env = &r.w.env;
+                let batch = soroban_sdk::vec![env, r.params(10_000, 0)];
+                r.signed_by(
+                    &r.merchant_b,
+                    registry,
+                    "create_plans",
+                    (a, batch.clone()).into_val(env),
+                );
+                assert!(matches!(
+                    r.w.registry.try_create_plans(a, &batch),
+                    Err(Err(_))
+                ));
+            });
+            self.w.env.mock_all_auths();
+        }
+
+        fn unauthorized_mandates(&self, open_plan: u64) {
+            let u1 = &self.u1;
+            let sub = &self.w.sub.address;
+            self.consumes_no_id("an unsigned mandate", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+            });
+            self.consumes_no_id("a mandate signed by someone else", |r| {
+                let args = (u1, &open_plan, &0u32, &0i128, &None::<Address>).into_val(&r.w.env);
+                r.signed_by(&r.outsider, sub, "subscribe", args);
+                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+            });
+            self.consumes_no_id("a scheduled mandate signed by someone else", |r| {
+                let start = T0 + WEEK;
+                let args =
+                    (u1, &open_plan, &0u32, &0i128, &start, &None::<Address>).into_val(&r.w.env);
+                r.signed_by(&r.outsider, sub, "subscribe_at", args);
+                assert!(matches!(
+                    r.w.sub
+                        .try_subscribe_at(u1, &open_plan, &0, &0, &start, &None),
+                    Err(Err(_))
+                ));
+            });
+            self.consumes_no_id("an unsigned deposit-and-subscribe", |r| {
+                r.w.env.mock_auths(&[]);
+                assert!(matches!(
+                    r.w.sub
+                        .try_subscribe_with_deposit(u1, &open_plan, &0, &0, &10_000, &None),
+                    Err(Err(_))
+                ));
+            });
+            self.w.env.mock_all_auths();
+        }
+    }
+
+    // ---- reproducibility ----
+
+    /// The same call sequence in two separate fresh `Env`s assigns the same
+    /// plan and mandate IDs, in the same order, to the same records.
+    #[test]
+    fn the_same_call_sequence_assigns_the_same_ids_in_fresh_envs() {
+        let first = run(Noise::None).ids();
+        let second = run(Noise::None).ids();
+        assert_eq!(first, second);
+    }
+
+    /// The sequence assigns exactly the pinned golden IDs, each to the record
+    /// the sequence created it for. See the note on the golden constants:
+    /// changing these is a breaking change for bindings and indexers.
+    #[test]
+    fn ids_match_the_pinned_golden_values() {
+        let r = run(Noise::None);
+        let ids = r.ids();
+        let env = &r.w.env;
+
+        assert_eq!(ids.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(ids.mandate_ids(), GOLDEN_MANDATES);
+        assert_eq!(ids.next_plan_id, GOLDEN_NEXT_PLAN_ID);
+        assert_eq!(ids.next_mandate_id, GOLDEN_NEXT_MANDATE_ID);
+
+        let (a, b) = (sc(env, &r.merchant_a), sc(env, &r.merchant_b));
+        let (u1, u2) = (sc(env, &r.u1), sc(env, &r.u2));
+        let merchants: std::vec::Vec<_> = ids.plans.iter().map(|(_, m)| m.clone()).collect();
+        assert_eq!(merchants, [a.clone(), b.clone(), a.clone(), a.clone()]);
+        let owners: std::vec::Vec<_> = ids
+            .mandates
+            .iter()
+            .map(|(_, _, s, m)| (s.clone(), m.clone()))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                (u1.clone(), a.clone()),
+                (u2.clone(), a.clone()),
+                (u1.clone(), b),
+                (u2, a.clone()),
+                (u1, a),
+            ]
+        );
+    }
+
+    /// No ID repeats within a run, across plans or across mandates.
+    #[test]
+    fn ids_are_unique_within_a_run() {
+        let ids = run(Noise::None).ids();
+        let mut plans = ids.plan_ids();
+        plans.sort_unstable();
+        plans.dedup();
+        assert_eq!(plans.len(), ids.plans.len());
+        let mut mandates: std::vec::Vec<u64> = ids.mandates.iter().map(|m| m.0).collect();
+        mandates.sort_unstable();
+        mandates.dedup();
+        assert_eq!(mandates.len(), ids.mandates.len());
+    }
+
+    /// IDs are one global sequence per contract, not one per merchant,
+    /// subscriber or plan: merchant B's first plan is 2 and u2's first mandate
+    /// is 2. The per-scope indexes list the global IDs in creation order, and
+    /// the two counters do not affect each other.
+    #[test]
+    fn ids_are_one_global_sequence_per_contract_not_per_scope() {
+        let r = run(Noise::None);
+        let w = &r.w;
+        let list = |v: soroban_sdk::Vec<u64>| -> std::vec::Vec<u64> { v.iter().collect() };
+
+        assert_eq!(
+            list(w.registry.merchant_plans(&r.merchant_a, &0, &10)),
+            [1, 3, 4]
+        );
+        assert_eq!(list(w.registry.merchant_plans(&r.merchant_b, &0, &10)), [2]);
+        assert_eq!(list(w.sub.subscriber_mandates(&r.u1, &0, &10)), [1, 3, 5]);
+        assert_eq!(list(w.sub.subscriber_mandates(&r.u2, &0, &10)), [2, 4]);
+        assert_eq!(
+            list(w.sub.merchant_mandates(&r.merchant_a, &0, &10)),
+            [1, 2, 4, 5]
+        );
+        assert_eq!(list(w.sub.merchant_mandates(&r.merchant_b, &0, &10)), [3]);
+        assert_eq!(list(w.sub.plan_mandates(&1, &0, &10)), [1, 2]);
+        assert_eq!(list(w.sub.plan_mandates(&2, &0, &10)), [3]);
+    }
+
+    /// IDs follow call order, so a different order assigns them differently,
+    /// and that different assignment is itself reproducible.
+    #[test]
+    fn a_different_call_order_assigns_different_but_reproducible_ids() {
+        /// Merchants A and B each publish one plan and u1 subscribes to both,
+        /// B first when `b_first`. Returns `(plan ID, mandate ID)` for A's
+        /// plan, then for B's.
+        fn two_merchants(b_first: bool) -> [(u64, u64); 2] {
+            let mut r = fresh();
+            let (a, b, u1) = (r.merchant_a.clone(), r.merchant_b.clone(), r.u1.clone());
+            let order = if b_first { [&b, &a] } else { [&a, &b] };
+            let plans = order.map(|m| r.publish(m, 10_000));
+            let mandates = plans.map(|p| r.subscribe(&u1, p));
+            let mut out = [(plans[0], mandates[0]), (plans[1], mandates[1])];
+            if b_first {
+                out.swap(0, 1);
+            }
+            out
+        }
+
+        assert_eq!(two_merchants(false), [(1, 1), (2, 2)]);
+        assert_eq!(two_merchants(true), [(2, 2), (1, 1)]);
+        assert_eq!(two_merchants(true), two_merchants(true));
+        assert_eq!(two_merchants(false), two_merchants(false));
+    }
+
+    // ---- failure paths ----
+
+    /// Rejected creates slipped in before every step consume no ID, so every
+    /// later create gets exactly the ID a clean run gives it. The rejections
+    /// cover bad plan input and bad batches, a missing plan, a closed plan, a
+    /// full plan, a backdated start, a negative spend cap, a paused protocol,
+    /// and a deposit the wallet cannot cover.
+    #[test]
+    fn failed_creates_do_not_consume_ids() {
+        let noisy = run(Noise::Failures).ids();
+        assert_eq!(noisy, run(Noise::None).ids());
+        assert_eq!(noisy.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(noisy.mandate_ids(), GOLDEN_MANDATES);
+    }
+
+    // ---- authorization ----
+
+    /// Creates without the merchant's or subscriber's signature, slipped in
+    /// before every step, consume no ID either.
+    #[test]
+    fn unauthorized_creates_do_not_consume_ids() {
+        let noisy = run(Noise::Unauthorized).ids();
+        assert_eq!(noisy, run(Noise::None).ids());
+        assert_eq!(noisy.plan_ids(), GOLDEN_PLANS);
+        assert_eq!(noisy.mandate_ids(), GOLDEN_MANDATES);
+    }
+
+    /// With real auth checking (no `mock_all_auths`), a create that nobody or
+    /// the wrong account signs is rejected, and the first create its owner
+    /// signs still gets ID 1. The owner's signature is the only auth that
+    /// create needs.
+    #[test]
+    fn the_first_authorized_create_gets_id_1_and_needs_only_its_owners_auth() {
+        let r = fresh();
+        let env = &r.w.env;
+        let a = &r.merchant_a;
+        let registry = &r.w.registry.address;
+        let args = r.plan_args(a, 10_000, MONTH);
+
+        env.mock_auths(&[]);
+        assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+        r.signed_by(&r.outsider, registry, "create_plan", args.clone());
+        assert!(matches!(r.try_publish(a, 10_000, MONTH), Err(Err(_))));
+        r.signed_by(a, registry, "create_plan", args.clone());
+        assert_eq!(r.try_publish(a, 10_000, MONTH), Ok(Ok(GOLDEN_PLANS[0])));
+        assert_eq!(
+            env.auths(),
+            std::vec![(
+                a.clone(),
+                AuthorizedInvocation {
+                    function: AuthorizedFunction::Contract((
+                        registry.clone(),
+                        Symbol::new(env, "create_plan"),
+                        args,
+                    )),
+                    sub_invocations: std::vec![],
+                }
+            )]
+        );
+
+        let u1 = &r.u1;
+        let sub = &r.w.sub.address;
+        let plan = GOLDEN_PLANS[0];
+        let args: soroban_sdk::Vec<Val> =
+            (u1, &plan, &0u32, &0i128, &None::<Address>).into_val(env);
+
+        env.mock_auths(&[]);
+        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        r.signed_by(&r.outsider, sub, "subscribe", args.clone());
+        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        r.signed_by(u1, sub, "subscribe", args.clone());
+        assert_eq!(r.try_subscribe(u1, plan), Ok(Ok(GOLDEN_MANDATES[0].0)));
+        assert_eq!(
+            env.auths(),
+            std::vec![(
+                u1.clone(),
+                AuthorizedInvocation {
+                    function: AuthorizedFunction::Contract((
+                        sub.clone(),
+                        Symbol::new(env, "subscribe"),
+                        args,
+                    )),
+                    sub_invocations: std::vec![],
+                }
+            )]
+        );
+
+        assert_eq!(r.w.registry.next_plan_id(), 2);
+        assert_eq!(r.w.sub.next_mandate_id(), 2);
+    }
+}
+// Numeric maximum values (#242)
+// ---------------------------------------------------------------------------
+
+fn set_next_mandate_id(w: &World, next: u64) {
+    w.env.as_contract(&w.sub.address, || {
+        w.env
+            .storage()
+            .instance()
+            .set(&DataKey::NextMandateId, &next);
+    });
+}
+
+#[test]
+fn maximum_amount_charge_is_safe_and_reports_max_committed_revenue() {
+    let w = world();
+    w.sub.set_fee_bps(&0);
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = Address::generate(&w.env);
+    w.minter.mint(&user, &i128::MAX);
+    w.vault.deposit(&user, &w.token, &i128::MAX);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Same-period normalisation must return the amount itself, not overflow
+    // to a zero contribution and leave the revenue cache empty.
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+
+    let result = w.sub.charge(&w.keeper, &id);
+    assert_eq!(result.merchant_amount, i128::MAX);
+    assert_eq!(result.fee, 0);
+    assert_eq!(result.charges_made, 1);
+    assert!(!result.completed);
+    assert_eq!(w.vault.balance(&user, &w.token), 0);
+    assert_eq!(w.token_client.balance(&w.merchant), i128::MAX);
+    assert_eq!(w.token_client.balance(&w.vault.address), 0);
+    assert_eq!(w.sub.get_mandate(&id).total_spent, i128::MAX);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+
+    // A second charge would make total_spent + amount exceed i128::MAX. It
+    // must fail with a typed error and leave the settled mandate untouched.
+    let before = w.sub.get_mandate(&id);
+    w.advance(MONTH);
+    assert_eq!(
+        w.sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+    let after = w.sub.get_mandate(&id);
+    assert_eq!(after.charges_made, before.charges_made);
+    assert_eq!(after.total_spent, before.total_spent);
+    assert_eq!(after.next_charge, before.next_charge);
+}
+
+#[test]
+fn maximum_counts_seats_and_pause_are_stored_without_wrapping() {
+    let w = world();
+    let plan_id = w.plan_with_cap(u32::MAX);
+    let user = w.subscriber(PRICE * 4);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.max_charges, u32::MAX);
+    assert_eq!(mandate.max_total, i128::MAX);
+    assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
+
+    // Re-setting the same maximum is a valid no-op, not an InvalidMaxCharges.
+    w.sub.set_max_charges(&user, &id, &u32::MAX);
+    w.sub.set_seats(&user, &id, &u32::MAX);
+    assert_eq!(w.sub.get_mandate(&id).seats, u32::MAX);
+
+    w.sub.pause_until(&user, &id, &u64::MAX);
+    let paused = w.sub.get_mandate(&id);
+    assert_eq!(paused.paused_until, u64::MAX);
+    assert_eq!(paused.next_charge, u64::MAX);
+    assert_eq!(paused.status, MandateStatus::Paused);
+}
+
+#[test]
+fn mandate_id_counter_exhaustion_is_a_typed_error_without_state_changes() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    set_next_mandate_id(&w, u64::MAX);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>),
+        Err(Ok(Error::AmountOverflow))
+    );
+    assert_eq!(w.sub.next_mandate_id(), u64::MAX);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(
+        w.sub.try_get_mandate(&u64::MAX),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn maximum_value_subscribe_requires_the_subscribers_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    w.env.set_auths(&[]);
+
+    assert!(w
+        .sub
+        .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>)
+        .is_err());
+    assert_eq!(w.sub.next_mandate_id(), 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+    assert_eq!(w.vault.balance(&user, &w.token), PRICE);
 }

@@ -172,8 +172,9 @@ mod contract {
         /// if `name` exceeds [`MAX_NAME_LEN`], [`Error::DescriptionTooLong`] if `description`
         /// exceeds [`MAX_DESCRIPTION_LEN`], [`Error::InvalidPeriod`] if `period < MIN_PERIOD`,
         /// [`Error::KeeperBpsTooHigh`] if `keeper_bps > MAX_KEEPER_BPS`,
-        /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`], or
-        /// [`Error::NotInitialized`] if the contract has not been initialized.
+        /// [`Error::UriTooLong`] if `terms_uri` exceeds [`MAX_TERMS_LEN`],
+        /// [`Error::NotInitialized`] if the contract has not been initialized, or
+        /// [`Error::PlanIdOverflow`] if the next plan ID would exceed `u64`.
         #[allow(clippy::too_many_arguments)]
         pub fn create_plan(
             env: Env,
@@ -210,8 +211,9 @@ mod contract {
             Self::validate_plan(&params)?;
 
             let id = Self::read_next_plan_id(&env)?;
+            let next_id = id.checked_add(1).ok_or(Error::PlanIdOverflow)?;
             Self::store_plan(&env, &merchant, id, &params);
-            Self::set_next_plan_id(&env, id + 1);
+            Self::set_next_plan_id(&env, next_id);
 
             Ok(id)
         }
@@ -237,8 +239,9 @@ mod contract {
         /// # Errors
         /// Returns [`Error::EmptyBatch`] if `plans` is empty,
         /// [`Error::BatchTooLarge`] if it holds more than [`MAX_BATCH_PLANS`]
-        /// plans, and otherwise the same validation errors as `create_plan`
-        /// for the first invalid plan.
+        /// plans, [`Error::PlanIdOverflow`] if the batch would carry the plan
+        /// ID counter past `u64::MAX`, and otherwise the same validation errors
+        /// as `create_plan` for the first invalid plan.
         pub fn create_plans(
             env: Env,
             merchant: Address,
@@ -258,13 +261,20 @@ mod contract {
             }
 
             let first_id = Self::read_next_plan_id(&env)?;
+            // Reserve the whole range before writing any plan, so a batch that
+            // would carry the counter past `u64::MAX` writes nothing at all.
+            let next_id = first_id
+                .checked_add(u64::from(plans.len()))
+                .ok_or(Error::PlanIdOverflow)?;
             let mut plan_ids = Vec::new(&env);
             for i in 0..plans.len() {
-                let id = first_id + u64::from(i);
+                let id = first_id
+                    .checked_add(u64::from(i))
+                    .ok_or(Error::PlanIdOverflow)?;
                 Self::store_plan(&env, &merchant, id, &plans.get(i).unwrap());
                 plan_ids.push_back(id);
             }
-            Self::set_next_plan_id(&env, first_id + u64::from(plans.len()));
+            Self::set_next_plan_id(&env, next_id);
 
             PlansCreated {
                 merchant,
@@ -303,11 +313,7 @@ mod contract {
             }
 
             let key = DataKey::Plan(plan_id);
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .ok_or(Error::PlanNotFound)?;
+            let mut plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
 
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
@@ -349,11 +355,7 @@ mod contract {
         ) -> Result<(), Error> {
             merchant.require_auth();
 
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Plan(plan_id))
-                .ok_or(Error::PlanNotFound)?;
+            let mut plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
 
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
@@ -564,11 +566,7 @@ mod contract {
             merchant.require_auth();
 
             let plan_key = DataKey::Plan(plan_id);
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&plan_key)
-                .ok_or(Error::PlanNotFound)?;
+            let mut plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
 
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
@@ -577,11 +575,8 @@ mod contract {
                 return Err(Error::SelfSuccessor);
             }
 
-            let successor: Plan = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Plan(successor_id))
-                .ok_or(Error::SuccessorNotFound)?;
+            let successor: Plan =
+                Self::read_plan(&env, successor_id).ok_or(Error::SuccessorNotFound)?;
 
             if successor.merchant != merchant {
                 return Err(Error::NotPlanOwner);
@@ -701,7 +696,7 @@ mod contract {
                 };
 
                 let plan_key = DataKey::Plan(plan_id);
-                let mut plan: Plan = p.get(&plan_key).ok_or(Error::PlanNotFound)?;
+                let mut plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
                 if plan.merchant != merchant {
                     // Defensive: the per-merchant index only lists its own plans.
                     continue;
@@ -727,11 +722,14 @@ mod contract {
         }
 
         /// Look up a published plan by its unique ID.
+        ///
+        /// Reading a plan also refreshes its TTL (#247). A plan that is used by
+        /// every charge but never edited is still a hot key; leaving its rent
+        /// unchanged until the next write would let it expire while mandates
+        /// are open against it. The bump is conditional: an entry already past
+        /// the threshold keeps its TTL exactly as it was.
         pub fn get_plan(env: Env, plan_id: u64) -> Result<Plan, Error> {
-            env.storage()
-                .persistent()
-                .get(&DataKey::Plan(plan_id))
-                .ok_or(Error::PlanNotFound)
+            Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)
         }
 
         /// How many plans `merchant` has published, active or not.
@@ -925,11 +923,7 @@ mod contract {
         ) -> Result<(), Error> {
             merchant.require_auth();
 
-            let plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Plan(plan_id))
-                .ok_or(Error::PlanNotFound)?;
+            let plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
             if plan.merchant != merchant {
                 return Err(Error::NotPlanOwner);
             }
@@ -969,11 +963,7 @@ mod contract {
             }
 
             let plan_key = DataKey::Plan(plan_id);
-            let mut plan: Plan = env
-                .storage()
-                .persistent()
-                .get(&plan_key)
-                .ok_or(Error::PlanNotFound)?;
+            let mut plan: Plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
 
             let old_owner = plan.merchant.clone();
             Self::index_remove(&env, &old_owner, plan_id);
@@ -1000,11 +990,7 @@ mod contract {
         fn listings(env: &Env, ids: Vec<u64>) -> Vec<PlanListing> {
             let mut out = Vec::new(env);
             for id in ids.iter() {
-                if let Some(plan) = env
-                    .storage()
-                    .persistent()
-                    .get::<_, Plan>(&DataKey::Plan(id))
-                {
+                if let Some(plan) = Self::read_plan(env, id) {
                     out.push_back(PlanListing {
                         id: plan.id,
                         merchant: plan.merchant,
@@ -1017,6 +1003,18 @@ mod contract {
                 }
             }
             out
+        }
+
+        /// Read a plan and refresh its TTL when it is close to expiry (#247).
+        /// The bump is bounded by `PERSIST_THRESHOLD`, so an entry with plenty
+        /// of rent left is untouched. Returns `None` for an unknown plan.
+        fn read_plan(env: &Env, plan_id: u64) -> Option<Plan> {
+            let key = DataKey::Plan(plan_id);
+            let plan: Plan = env.storage().persistent().get(&key)?;
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+            Some(plan)
         }
 
         fn read_next_plan_id(env: &Env) -> Result<u64, Error> {

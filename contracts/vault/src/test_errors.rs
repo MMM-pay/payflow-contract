@@ -21,6 +21,9 @@ fn every_error_code_is_in_the_vault_range() {
         (Error::SpendLimitExceeded, 12),
         (Error::InvalidWindow, 13),
         (Error::ReserveExceedsBalance, 14),
+        (Error::RateLimitExceeded, 15),
+        (Error::UnexpectedTransferAmount, 16),
+        (Error::ZeroAddress, 17),
     ];
 
     let mut seen = std::vec::Vec::new();

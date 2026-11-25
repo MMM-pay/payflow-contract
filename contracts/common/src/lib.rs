@@ -1,9 +1,10 @@
 //! Shared TTL constants and storage helpers for the Payflow contracts.
 //!
 //! Configuration lives in instance storage; mandates, plans, balances and
-//! index entries live in persistent storage with a 90-day TTL that is
-//! extended on write, not on read. An entry untouched for longer is archived
-//! and must be restored before use.
+//! index entries live in persistent storage with a 90-day TTL. Every write
+//! extends it, and reads of hot mandate/plan keys extend it too (#247) so an
+//! actively used entry does not expire mid-life. An entry untouched for longer
+//! is archived and must be restored before use.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -22,7 +23,8 @@ pub const PERSIST_BUMP: u32 = 90 * DAY_IN_LEDGERS;
 /// Threshold below which instance storage is extended on access.
 pub const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
 
-/// Threshold below which persistent storage is extended on write.
+/// Threshold below which persistent storage is extended on write and on
+/// access to a hot key.
 pub const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 
 /// Extend the TTL of instance storage, keeping configuration alive.

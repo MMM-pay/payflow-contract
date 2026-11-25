@@ -139,6 +139,9 @@ cross-contract calls (Subscription → PlanRegistry → Vault → token) for
 `subscribe`, `charge` and `cancel`, the errors each step can stop on, the
 events each flow emits, and what the protocol pause blocks.
 
+See the [event contribution guide](docs/adding-events.md) to add or change a
+typed contract event, test its wire layout and regenerate bindings.
+
 The complete numeric error reference is in [`docs/ERRORS.md`](docs/ERRORS.md), including the trigger condition for every contract error.
 
 ## Architecture decision records
@@ -151,6 +154,8 @@ consequences) in [`docs/adr/`](docs/adr/index.md):
 - [0003: Constructors instead of `initialize`](docs/adr/0003-constructors-not-initialize.md)
 - [0004: Per-position indexes](docs/adr/0004-per-position-indexes.md)
 - [0005: Permissionless `charge`](docs/adr/0005-permissionless-charge.md)
+- [0006: Prorated upgrade charging](docs/adr/0006-prorated-upgrade-charging.md)
+- [0007: TTL refresh on access for hot keys](docs/adr/0007-ttl-refresh-on-access.md)
 
 Add a new ADR whenever a design choice changes.
 
