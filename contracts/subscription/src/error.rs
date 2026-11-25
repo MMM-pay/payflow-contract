@@ -115,6 +115,10 @@ pub enum Error {
     /// so the token is unsafe for exact-amount accounting (for example a
     /// fee-on-transfer token). The refund is rolled back.
     UnexpectedTransferAmount = 2040,
+    /// `flag_failed_charge` was called inside the plan's frozen retry window
+    /// (#343). The charge may still succeed, so no failure is recorded until
+    /// the window closes.
+    RetryWindowActive = 2041,
 }
 
 impl From<Error> for ErrorCode {

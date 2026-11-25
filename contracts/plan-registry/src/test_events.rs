@@ -91,6 +91,7 @@ fn plan_created_layout() {
             referral_bps: 0,
             payout: a.clone(),
             max_subscribers: 0,
+            retry_window_ledgers: None,
         },
     );
 }
