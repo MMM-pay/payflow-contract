@@ -8,7 +8,7 @@ This page is the integration reference for the errors returned by the contracts 
 
 The Rust enums remain the source of truth: [plan-registry errors](../contracts/plan-registry/src/error.rs), [subscription errors](../contracts/subscription/src/error.rs), and [vault errors](../contracts/vault/src/error.rs). Error variants are append-only so existing client mappings remain stable.
 
-## Plan registry (1001–1024)
+## Plan registry (1001–1026)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -36,8 +36,10 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1022 | `EmptyBatch` | A batch operation was submitted without items. |
 | 1023 | `BatchTooLarge` | A batch exceeds the contract's maximum size. |
 | 1024 | `PlanIdOverflow` | The next plan ID would exceed `u64`; no plan is written. |
+| 1025 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
+| 1026 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
-## Subscription (2001–2040)
+## Subscription (2001–2042)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -81,8 +83,10 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2038 | `PlanChargesPaused` | Charges are paused for the referenced plan. |
 | 2039 | `ProtocolPaused` | Protocol-wide operations are paused. |
 | 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
+| 2041 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
+| 2042 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
-## Vault (3001–3017)
+## Vault (3001–3021)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -103,5 +107,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3015 | `RateLimitExceeded` | The operation exceeds the configured rate limit. |
 | 3016 | `UnexpectedTransferAmount` | A token transfer did not move the exact amount (for example a fee-on-transfer token); the operation is rolled back. |
 | 3017 | `ZeroAddress` | A withdrawal or payout destination is the zero/unset account or contract address. |
+| 3018 | `ReserveCapExceeded` | A reserve would take the subscriber's total reserve above the vault's configured reserve cap. |
+| 3019 | `InvalidReserveCap` | The constructor was given a reserve cap above 10,000 basis points. |
+| 3020 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
+| 3021 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.

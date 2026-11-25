@@ -9,6 +9,12 @@ change the contract interface.
 
 ### Added
 
+- **#237: upgrade storage-layout coverage (all contracts).** New tests write
+  every persistent and instance value (plans and indexes, vault balances, caps,
+  allowlist, spend limits, reserves and operation windows, mandates, indexes,
+  grace and failed-charge keys, and pending admin proposals), upgrade the code,
+  and assert every value still decodes with the current types. Each suite also
+  asserts a rejected upgrade leaves storage and the upgrade history untouched.
 - **#247: TTL refresh on access for hot mandate and plan keys.** Reading a
   mandate (`subscription`) or plan (`plan-registry`) now extends its persistent
   TTL when it is within a day of expiry, so entries that are used often but
@@ -165,6 +171,12 @@ change the contract interface.
 
 ### Changed
 
+- **#238: two-step admin handover (all contracts).** `update_admin` is replaced
+  by `propose_admin(new_admin)` followed by `accept_admin(new_admin)`, so the
+  role moves only after the proposed address accepts. New errors
+  `PendingAdminNotFound` and `NotPendingAdmin` are appended per contract, and
+  the pending address is stored under `DataKey::PendingAdmin`. See
+  [`SECURITY.md`](SECURITY.md) for the client-visible change.
 - **#291: subscription module organization.** Charge splitting and merchant
   proceeds calculations, mandate lifecycle/grace rules, and due-state
   calculations now live in focused `charge`, `lifecycle` and `views` modules.

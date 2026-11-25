@@ -31,6 +31,13 @@ struct Harness<'a> {
 }
 
 fn setup() -> Harness<'static> {
+    // Existing tests predate the reserve cap (#348) and reserve the whole
+    // balance, so they run with the cap fully open. The cap's own tests below
+    // deploy with a real limit.
+    setup_with_reserve_cap(BPS_DENOMINATOR)
+}
+
+fn setup_with_reserve_cap(reserve_cap_bps: u32) -> Harness<'static> {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -41,7 +48,7 @@ fn setup() -> Harness<'static> {
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let token = sac.address();
 
-    let vault_id = env.register(Vault, (admin.clone(),));
+    let vault_id = env.register(Vault, (admin.clone(), reserve_cap_bps));
     let vault = VaultClient::new(&env, &vault_id);
     vault.set_subscription(&subscription);
 
@@ -1070,7 +1077,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
     let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
-    let vault_id = env.register(Vault, (admin,));
+    let vault_id = env.register(Vault, (admin, BPS_DENOMINATOR));
     let vault = VaultClient::new(&env, &vault_id);
     vault.set_subscription(&subscription);
 
@@ -1466,23 +1473,84 @@ fn debits_stop_after_subscription_contract_is_replaced() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let h = setup();
+    let admin = h.vault.admin();
     let next = Address::generate(&h.env);
 
-    h.vault.update_admin(&next);
+    h.vault.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(h.vault.admin(), admin);
+
+    h.vault.accept_admin(&next);
     assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let h = setup();
     let before = h.vault.admin();
     let next = Address::generate(&h.env);
 
     h.env.set_auths(&[]);
-    assert!(h.vault.try_update_admin(&next).is_err());
+    assert!(h.vault.try_propose_admin(&next).is_err());
     assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_accept_admin(&next).is_err());
+    assert_eq!(h.vault.admin(), before);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let h = setup();
+    let before = h.vault.admin();
+    let attacker = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    let attacker = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let h = setup();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+    h.vault.accept_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
@@ -1879,6 +1947,96 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     // And the new code still runs: deposits continue where they left off.
     h.vault.deposit(&user, &h.token, &1_000);
     assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    let pending_admin = Address::generate(&h.env);
+
+    h.vault.deposit(&user, &h.token, &4_000);
+    h.vault.set_deposit_cap(&user, &h.token, &8_000);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_spend_limit(&user, &h.token, &5_000, &3_600);
+    h.vault.set_reserve(&user, &h.token, &1, &1_500);
+    h.vault.propose_admin(&pending_admin);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 8_000);
+    assert!(h.vault.token_allowed(&h.token));
+    assert!(h.vault.allowlist_enabled());
+    assert_eq!(h.vault.subscription(), h.subscription);
+    assert_eq!(
+        h.vault.spend_limit(&user, &h.token),
+        SpendLimit {
+            amount: 5_000,
+            window_secs: 3_600,
+        }
+    );
+    assert_eq!(h.vault.admin(), admin);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    h.env.as_contract(&h.vault_id, || {
+        let p = h.env.storage().persistent();
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::Reserved(user.clone(), h.token.clone(), 1)),
+            Some(1_500)
+        );
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::ReservedTotal(user.clone(), h.token.clone())),
+            Some(1_500)
+        );
+        let window = p
+            .get::<_, OperationWindow>(&DataKey::OperationWindow(user.clone(), h.token.clone()))
+            .unwrap();
+        assert!(window.operations >= 1);
+        assert_eq!(
+            h.env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still moves funds against the preserved balance entry.
+    h.vault.withdraw(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.admin(), admin);
+    assert_eq!(h.vault.upgrade_history().len(), 0);
 }
 
 #[test]
@@ -2402,6 +2560,94 @@ fn reserves_are_scoped_to_user_and_token() {
     assert_eq!(h.vault.reserved_total(&alice, &h.token), 1_000);
 }
 
+// ---------------------------------------------------------------------------
+// Total reserve cap per subscriber (#348): many mandates can no longer
+// earmark the whole balance, so a minimum free balance stays withdrawable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reserve_cap_keeps_a_minimum_free_balance() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+    assert_eq!(h.vault.reserve_cap_bps(), DEFAULT_RESERVE_CAP_BPS);
+
+    // 90% of 1,000 is 900, so the whole balance can no longer be earmarked.
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &901),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &900);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 100);
+
+    // Releasing a reserve is always allowed, cap or no cap.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_000);
+}
+
+#[test]
+fn ten_mandates_fill_the_cap_and_the_eleventh_is_rejected() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+
+    // Ten mandates at 90 each reach exactly the 900 cap.
+    for id in 1..=10u64 {
+        h.vault.set_reserve(&user, &h.token, &id, &90);
+    }
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 100);
+
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &11u64, &90),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+
+    // Releasing one mandate's reserve makes room for the eleventh.
+    h.vault.set_reserve(&user, &h.token, &1u64, &0);
+    h.vault.set_reserve(&user, &h.token, &11u64, &90);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 900);
+}
+
+#[test]
+fn reducing_a_reserve_is_allowed_even_under_the_cap() {
+    let h = setup_with_reserve_cap(DEFAULT_RESERVE_CAP_BPS);
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &900);
+    // Replacing it with a smaller reserve must not be mistaken for growth.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &100);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 100);
+
+    // Growing it again is still bound by the cap.
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &901),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+}
+
+#[test]
+fn a_zero_cap_forbids_reserving() {
+    let h = setup_with_reserve_cap(0);
+    let user = depositor(&h, 1_000);
+
+    assert_eq!(
+        h.vault.try_set_reserve(&user, &h.token, &MANDATE_A, &1),
+        Err(Ok(Error::ReserveCapExceeded))
+    );
+    // Releasing (or leaving at zero) is still a no-op that succeeds.
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &0);
+}
+
+#[test]
+fn a_full_balance_cap_keeps_the_previous_behaviour() {
+    let h = setup_with_reserve_cap(BPS_DENOMINATOR);
+    let user = depositor(&h, 1_000);
+
+    h.vault.set_reserve(&user, &h.token, &MANDATE_A, &1_000);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 1_000);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 0);
+}
+
 #[test]
 fn can_debit_reports_reserve_aware_headroom() {
     let h = setup();
@@ -2888,7 +3134,7 @@ fn failing_vault_views_are_side_effect_free_too() {
 
     // An unconfigured vault reports a typed error, still without writing.
     let admin = Address::generate(env);
-    let bare = VaultClient::new(env, &env.register(Vault, (admin,)));
+    let bare = VaultClient::new(env, &env.register(Vault, (admin, BPS_DENOMINATOR)));
     assert_eq!(
         assert_read_only(env, "subscription (unset)", || bare.try_subscription()),
         Err(Ok(Error::SubscriptionNotSet))

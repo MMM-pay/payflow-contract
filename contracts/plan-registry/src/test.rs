@@ -1901,23 +1901,79 @@ fn set_plan_name_requires_the_merchants_auth() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let (env, client, admin) = setup();
     let next = Address::generate(&env);
 
-    client.update_admin(&next);
+    client.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(client.admin(), admin);
+
+    client.accept_admin(&next);
     assert_eq!(client.admin(), next);
-    assert_ne!(client.admin(), admin);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let (env, client, admin) = setup();
     let next = Address::generate(&env);
 
     env.set_auths(&[]);
-    assert!(client.try_update_admin(&next).is_err());
+    assert!(client.try_propose_admin(&next).is_err());
     assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let (env, client, admin) = setup();
+    let next = Address::generate(&env);
+    client.propose_admin(&next);
+
+    env.set_auths(&[]);
+    assert!(client.try_accept_admin(&next).is_err());
+    assert_eq!(client.admin(), admin);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let (env, client, admin) = setup();
+    let attacker = Address::generate(&env);
+
+    assert_eq!(
+        client.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let (env, client, admin) = setup();
+    let next = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.propose_admin(&next);
+
+    assert_eq!(
+        client.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let (env, client, _admin) = setup();
+    let next = Address::generate(&env);
+    client.propose_admin(&next);
+    client.accept_admin(&next);
+
+    assert_eq!(
+        client.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(client.admin(), next);
 }
 
 #[test]
@@ -2904,6 +2960,181 @@ fn admin_can_upgrade_and_state_written_before_survives() {
         &0,
     );
     assert_eq!(next, id + 1);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let (env, client, admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let payout = Address::generate(&env);
+    let heir = Address::generate(&env);
+    let pending_admin = Address::generate(&env);
+
+    let name = String::from_str(&env, "Pro Monthly");
+    let description = String::from_str(&env, "Unlimited follow-ups");
+    let terms_uri = String::from_str(&env, "https://example.com/terms");
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &12_345,
+        &604_800,
+        &name,
+        &description,
+        &250,
+        &Symbol::new(&env, "saas"),
+        &terms_uri,
+        &2_000_000_000u64,
+        &500,
+        &Some(payout.clone()),
+        &42,
+    );
+    let successor = client.create_plan(
+        &merchant,
+        &token,
+        &9_999,
+        &2_592_000,
+        &String::from_str(&env, "Basic"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    client.set_successor(&merchant, &id, &successor);
+    client.set_plan_charges_paused(&merchant, &id, &true);
+    client.set_plan_grace_period(&merchant, &id, &86_400);
+    let profile_name = String::from_str(&env, "Acme");
+    let profile_url = String::from_str(&env, "https://acme.example");
+    client.set_profile(&merchant, &profile_name, &profile_url);
+    client.propose_plan_owner(&merchant, &id, &heir);
+    client.propose_admin(&pending_admin);
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    client.upgrade_wasm(&wasm_hash);
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.id, id);
+    assert_eq!(plan.merchant, merchant);
+    assert_eq!(plan.payout, payout);
+    assert_eq!(plan.name, name);
+    assert_eq!(plan.description, description);
+    assert_eq!(plan.token, token);
+    assert_eq!(plan.amount, 12_345);
+    assert_eq!(plan.period, 604_800);
+    assert!(plan.active);
+    assert_eq!(plan.category, Symbol::new(&env, "saas"));
+    assert_eq!(plan.keeper_bps, 250);
+    assert_eq!(plan.successor_id, successor);
+    assert_eq!(plan.terms_uri, terms_uri);
+    assert_eq!(plan.referral_bps, 500);
+    assert_eq!(plan.available_until, 2_000_000_000);
+    assert_eq!(plan.max_subscribers, 42);
+
+    let profile = client.profile(&merchant);
+    assert_eq!(profile.merchant, merchant);
+    assert_eq!(profile.name, profile_name);
+    assert_eq!(profile.url, profile_url);
+
+    // Both indexes and the plan-id counter survive with their contents.
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+    assert_eq!(
+        client.merchant_plans(&merchant, &0, &50),
+        soroban_sdk::vec![&env, id, successor]
+    );
+    assert_eq!(client.token_plan_count(&token), 2);
+    assert_eq!(
+        client.token_plans(&token, &0, &50),
+        soroban_sdk::vec![&env, id, successor]
+    );
+    assert_eq!(client.next_plan_id(), successor + 1);
+    assert_eq!(client.admin(), admin);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    env.as_contract(&client.address, || {
+        let p = env.storage().persistent();
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::PlanChargesPaused(id)),
+            Some(true)
+        );
+        assert_eq!(p.get::<_, u64>(&DataKey::PlanGracePeriod(id)), Some(86_400));
+        assert_eq!(
+            p.get::<_, Address>(&DataKey::PlanOwnerProposal(id)),
+            Some(heir.clone())
+        );
+        assert_eq!(p.get::<_, u32>(&DataKey::PlanIndex(id)), Some(0));
+        assert_eq!(
+            env.storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still runs against the existing counter.
+    let next = client.create_plan(
+        &merchant,
+        &token,
+        &9_999,
+        &2_592_000,
+        &String::from_str(&env, "Third"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    assert_eq!(next, successor + 1);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let (env, client, admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &7,
+    );
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(client.get_plan(&id).max_subscribers, 7);
+    assert_eq!(client.next_plan_id(), 2);
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.upgrade_history().len(), 0);
 }
 
 #[test]

@@ -88,6 +88,37 @@ These are understood tradeoffs, not undiscovered bugs:
 
 ## Externally visible behaviour changes
 
+### Admin handover is two-step (#238)
+
+`update_admin(new_admin)` has been removed from `plan-registry`, `subscription`
+and `vault`. It set the admin role in one call, so a single compromised or
+mistyped admin key could hand the contract to an address that never agreed to
+hold it, with no way to undo the mistake.
+
+Handover now takes two calls:
+
+1. `propose_admin(new_admin)` — authorized by the current admin. This records
+   `new_admin` under the new `DataKey::PendingAdmin` instance key and changes no
+   authority. Proposing again overwrites the pending address, so a wrong
+   proposal can be replaced before it is accepted.
+2. `accept_admin(new_admin)` — authorized by `new_admin`. The role moves only
+   when the proposed address itself accepts, and the pending proposal is
+   consumed. Accepting with no proposal fails with `PendingAdminNotFound`
+   (1025 / 2041 / 3020) and accepting from any other address fails with
+   `NotPendingAdmin` (1026 / 2042 / 3021).
+
+Clients that call `update_admin` must switch to the two-step flow. The admin
+returned by `admin()` is unchanged until acceptance, and every admin-gated
+entry point (`set_fee_bps`, `set_protocol_paused`, `set_subscription`,
+`upgrade_wasm`, and so on) keeps using the stored `Admin` address. A deployment
+whose `PendingAdmin` key is set but never accepted simply keeps its current
+admin; there is no timeout.
+
+Regression tests: `accept_admin_without_a_proposal_is_rejected`,
+`accept_admin_rejects_an_address_that_was_not_proposed`,
+`accept_admin_requires_the_proposed_admins_auth` and
+`a_consumed_admin_proposal_cannot_be_replayed` in all three contract suites.
+
 ### Due-date overflow now reports `ScheduleOverflow` (#290)
 
 The period and due-date arithmetic in `subscription` was reviewed for overflow

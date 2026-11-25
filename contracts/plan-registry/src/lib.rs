@@ -32,7 +32,8 @@
 //! | `merchant_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
 //! | `token_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
 //! | `next_plan_id` | 1 (NextPlanId) | 0 | 0 | 0 | |
-//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `propose_admin` | 1 (Admin) | 1 (PendingAdmin) | 0 | 0 | Extends instance TTL |
+//! | `accept_admin` | 2 (Admin, PendingAdmin) | 1 (Admin) | 0 | 0 | Removes PendingAdmin; extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
 //! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
 //! | `propose_plan_owner` | 0 | 0 | 1 (Plan) | 1 (Proposal) | Extends persistent TTL |
@@ -123,6 +124,7 @@ mod contract {
         MAX_NAME_LEN, MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT,
         MIN_PERIOD, PERSIST_BUMP, PERSIST_THRESHOLD,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Contract implementation for publishing and managing subscription plans.
     #[contract]
@@ -656,10 +658,7 @@ mod contract {
 
         /// `merchant`'s self-declared profile, if one has been set.
         pub fn profile(env: Env, merchant: Address) -> Result<Profile, Error> {
-            env.storage()
-                .persistent()
-                .get(&DataKey::Profile(merchant))
-                .ok_or(Error::ProfileNotFound)
+            load_or_err(&env, &DataKey::Profile(merchant), Error::ProfileNotFound)
         }
 
         /// Deactivate up to `limit` of `merchant`'s plans, starting at position
@@ -818,24 +817,62 @@ mod contract {
         /// The id the next published plan will get. Plans are numbered from 1, so
         /// `next_plan_id() - 1` is the number of plans published so far.
         pub fn next_plan_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
-        /// Hand the admin role to another address. Only the current admin may
-        /// call this, and the new admin takes effect immediately: the old one
-        /// keeps no authority. A deployment whose admin key is lost or
-        /// rotated is otherwise stuck with it for the life of the contract.
+        /// Propose handing the admin role to `new_admin` (#238).
+        ///
+        /// This is step one of a two-step handover. The current admin keeps
+        /// the role until `new_admin` accepts with `accept_admin`; proposing
+        /// alone changes no authority, so a mistyped or hostile proposal can
+        /// be replaced before anyone accepts it. A later proposal to another
+        /// address overwrites the pending one.
         ///
         /// # Auth
         /// Requires authorization from the current admin.
-        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
             let current: Address = Self::admin(env.clone())?;
             current.require_auth();
 
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingAdmin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
+        }
+
+        /// Accept a pending admin handover (#238). Step two of the handshake:
+        /// only the address the current admin proposed may accept, and the
+        /// role moves only when it does. The pending proposal is consumed, so
+        /// a second accept by the same address fails.
+        ///
+        /// # Auth
+        /// Requires authorization from `new_admin`.
+        ///
+        /// # Errors
+        /// Returns [`Error::PendingAdminNotFound`] if no handover is pending,
+        /// or [`Error::NotPendingAdmin`] if `new_admin` is not the proposed
+        /// successor.
+        pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            new_admin.require_auth();
+
+            let pending: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingAdmin)
+                .ok_or(Error::PendingAdminNotFound)?;
+            if pending != new_admin {
+                return Err(Error::NotPendingAdmin);
+            }
+
             env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&DataKey::PendingAdmin);
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -845,10 +882,7 @@ mod contract {
 
         /// Address of the contract administrator.
         pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::Admin, Error::NotInitialized)
         }
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
@@ -953,11 +987,8 @@ mod contract {
             new_owner.require_auth();
 
             let proposal_key = DataKey::PlanOwnerProposal(plan_id);
-            let proposed: Address = env
-                .storage()
-                .persistent()
-                .get(&proposal_key)
-                .ok_or(Error::PendingOwnershipNotFound)?;
+            let proposed: Address =
+                load_or_err(&env, &proposal_key, Error::PendingOwnershipNotFound)?;
             if proposed != new_owner {
                 return Err(Error::NotPendingOwner);
             }
@@ -1018,10 +1049,7 @@ mod contract {
         }
 
         fn read_next_plan_id(env: &Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
         fn set_next_plan_id(env: &Env, next: u64) {
