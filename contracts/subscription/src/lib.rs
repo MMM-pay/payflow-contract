@@ -924,10 +924,8 @@ mod contract {
                 }
             }
 
-            // The part of the current period that is still ahead of us. A mandate
-            // that was never charged has `next_charge` in the past, so nothing is
-            // left of the current period and nothing is prorated: the old price
-            // was never collected.
+            // Common math clamps the remaining period, charges only positive
+            // upgrades and truncates towards zero in the subscriber's favour.
             let charged = prorated_upgrade(
                 old_amount, plan.amount, old_period, mandate.next_charge, now,
             ).ok_or(Error::AmountOverflow)?;
