@@ -184,41 +184,7 @@ export const Error = {
    * and plan upgrades are refused until it is resumed; reads,
    * cancellations, refunds and vault withdrawals are unaffected.
    */
-  2039 : { message: "ProtocolPaused" },
-  /**
-   * A refund transfer did not deliver exactly the recorded refund amount,
-   * so the token is unsafe for exact-amount accounting (for example a
-   * fee-on-transfer token). The refund is rolled back.
-   */
-  2040 : { message: "UnexpectedTransferAmount" },
-  /**
-   * `accept_admin` was called with no pending admin handover, or after the
-   * proposal was already accepted (#238).
-   */
-  2041 : { message: "PendingAdminNotFound" },
-  /**
-   * The address accepting the admin role is not the one the current admin
-   * proposed in `propose_admin` (#238).
-   */
-  2042 : { message: "NotPendingAdmin" },
-  /**
-   * The requested mandate ID has been tombstoned after deletion and cannot
-   * be reused (#368).
-   */
-  2043 : { message: "MandateIdTombstoned" },
-  /**
-   * The requested mandate ID is already assigned to an existing mandate (#368).
-   */
-  2044 : { message: "MandateAlreadyExists" },
-  /**
-   * The requested mandate ID is invalid (mandate IDs start at 1) (#368).
-   */
-  2045 : { message: "InvalidMandateId" },
-  /**
-   * An active or paused mandate cannot be deleted until it is cancelled or
-   * completed (#368).
-   */
-  2046 : { message: "MandateStillActive" }
+  2039 : { message: "ProtocolPaused" }
 }
 
 /**
@@ -964,24 +930,6 @@ export interface SeatsChangedEvent {
 }
 
 /**
- * Emitted when a subscriber deletes a cancelled or completed mandate,
- * removing its record from storage and permanently tombstoning its ID (#368).
- */
-export interface MandateDeletedEvent {
-  name: "MandateDeleted";
-  data: {
-    /**
-     * ID of the deleted and tombstoned mandate.
-     */
-    mandate_id: bigint;
-    /**
-     * Account of the subscriber who deleted the mandate.
-     */
-    subscriber: string;
-  };
-}
-
-/**
  * Emitted after every state change to a mandate, carrying a complete snapshot
  * of the mandate so indexers do not have to reconstruct state or risk drift
  * from missed intermediate events.
@@ -1127,5 +1075,4 @@ export interface CommittedRevenueChangedEvent {
     period?: bigint;
   };
 }
-    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateDeletedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;
-    
+    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;
