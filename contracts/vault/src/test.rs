@@ -994,6 +994,7 @@ struct FailingTokenHarness<'a> {
     vault: VaultClient<'a>,
     vault_id: Address,
     token: Address,
+    token_admin: Address,
     test_token: TestTokenClient<'a>,
 }
 
@@ -1005,7 +1006,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
     let token_admin = Address::generate(&env);
     let subscription = Address::generate(&env);
 
-    let token = env.register(TestToken, (token_admin,));
+    let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
     let vault_id = env.register(Vault, (admin,));
@@ -1017,6 +1018,7 @@ fn setup_failing_token() -> FailingTokenHarness<'static> {
         vault,
         vault_id,
         token,
+        token_admin,
         test_token,
     }
 }
@@ -1113,6 +1115,99 @@ fn failing_transfer_reverts_debit_and_leaves_balances_unchanged() {
     h.test_token.set_fail_transfers(&false);
     h.vault.debit(&user, &h.token, &merchant, &1_200);
 
+    assert_eq!(h.vault.balance(&user, &h.token), 3_800);
+    assert_eq!(h.test_token.balance(&merchant), 1_200);
+    assert_eq!(h.test_token.balance(&h.vault_id), 3_800);
+}
+
+#[test]
+fn fee_on_transfer_deposit_is_rejected_and_moves_nothing() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.test_token.set_transfer_fee_bps(&100);
+
+    // The vault would receive 9_900 but credit 10_000: reject before writing.
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &10_000),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+    assert_eq!(h.test_token.balance(&h.token_admin), 0);
+
+    // Without the fee the same deposit is exact and succeeds.
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.deposit(&user, &h.token, &10_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 10_000);
+    assert_eq!(h.test_token.balance(&user), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 10_000);
+}
+
+#[test]
+fn fee_on_transfer_deposit_without_user_auth_moves_nothing() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.test_token.set_transfer_fee_bps(&100);
+
+    h.env.mock_auths(&[]);
+    assert!(h.vault.try_deposit(&user, &h.token, &4_000).is_err());
+
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.test_token.balance(&user), 10_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 0);
+}
+
+#[test]
+fn fee_on_transfer_withdraw_is_rejected_and_state_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    h.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &1_500),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    // The user would receive 1_485 while the vault burned 1_500 of their
+    // balance: the whole withdrawal is rolled back.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.test_token.balance(&user), 6_000);
+    assert_eq!(h.test_token.balance(&h.vault_id), 4_000);
+
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.withdraw(&user, &h.token, &1_500);
+    assert_eq!(h.vault.balance(&user, &h.token), 2_500);
+    assert_eq!(h.test_token.balance(&user), 7_500);
+    assert_eq!(h.test_token.balance(&h.vault_id), 2_500);
+}
+
+#[test]
+fn fee_on_transfer_debit_is_rejected_and_state_unchanged() {
+    let h = setup_failing_token();
+    let user = Address::generate(&h.env);
+    let merchant = Address::generate(&h.env);
+    h.test_token.mint(&user, &10_000);
+    h.vault.deposit(&user, &h.token, &5_000);
+
+    h.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        h.vault.try_debit(&user, &h.token, &merchant, &1_200),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    // The merchant would receive 1_188 for a 1_200 charge: reject and roll back.
+    assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+    assert_eq!(h.test_token.balance(&merchant), 0);
+    assert_eq!(h.test_token.balance(&h.vault_id), 5_000);
+
+    h.test_token.set_transfer_fee_bps(&0);
+    h.vault.debit(&user, &h.token, &merchant, &1_200);
     assert_eq!(h.vault.balance(&user, &h.token), 3_800);
     assert_eq!(h.test_token.balance(&merchant), 1_200);
     assert_eq!(h.test_token.balance(&h.vault_id), 3_800);

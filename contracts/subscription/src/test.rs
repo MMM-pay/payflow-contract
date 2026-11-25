@@ -3359,6 +3359,7 @@ struct FailingTokenWorld<'a> {
     registry: RegistryClient<'a>,
     vault: RealVaultClient<'a>,
     token: Address,
+    token_admin: Address,
     test_token: TestTokenClient<'a>,
     merchant: Address,
     fee_to: Address,
@@ -3376,7 +3377,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
     let fee_to = Address::generate(&env);
     let keeper = Address::generate(&env);
 
-    let token = env.register(TestToken, (token_admin,));
+    let token = env.register(TestToken, (token_admin.clone(),));
     let test_token = TestTokenClient::new(&env, &token);
 
     let registry_id = env.register(PlanRegistry, (admin.clone(),));
@@ -3405,6 +3406,7 @@ fn failing_token_world() -> FailingTokenWorld<'static> {
         registry,
         vault,
         token,
+        token_admin,
         test_token,
         merchant,
         fee_to,
@@ -3543,6 +3545,74 @@ fn charge_reverts_completely_when_keeper_tip_transfer_fails() {
     assert_eq!(w.test_token.balance(&w.fee_to), 0);
     assert_eq!(w.test_token.balance(&w.keeper), 0);
     assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+}
+
+#[test]
+fn charge_with_fee_on_transfer_reverts_completely() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // The merchant would receive 9_900 for a 10_000 charge (the 1% fee is
+    // deducted on transfer), so the vault rejects the debit and rolls the
+    // whole charge back.
+    w.test_token.set_transfer_fee_bps(&100);
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+
+    let m = w.sub.get_mandate(&id);
+    assert_eq!(m.charges_made, 0);
+    assert_eq!(m.last_charge, 0);
+    assert_eq!(m.next_charge, 1_000_000);
+    assert_eq!(m.status, MandateStatus::Active);
+
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000);
+    assert_eq!(w.test_token.balance(&w.merchant), 0);
+    assert_eq!(w.test_token.balance(&w.fee_to), 0);
+    assert_eq!(w.test_token.balance(&w.vault.address), 50_000);
+    assert_eq!(w.test_token.balance(&w.token_admin), 0);
+
+    // With exact transfers the same charge settles normally.
+    w.test_token.set_transfer_fee_bps(&0);
+    w.sub.charge(&w.keeper, &id);
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    assert_eq!(w.test_token.balance(&w.merchant), PRICE - fee);
+    assert_eq!(w.test_token.balance(&w.fee_to), fee);
+    assert_eq!(w.vault.balance(&user, &w.token), 50_000 - PRICE);
+}
+
+#[test]
+fn refund_with_fee_on_transfer_reverts_and_leaves_the_mandate_unchanged() {
+    let w = failing_token_world();
+    let plan_id = w.plan_with_keeper(0);
+    let user = w.subscriber(50_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let merchant_balance = w.test_token.balance(&w.merchant);
+    assert_eq!(merchant_balance, PRICE - fee);
+
+    // The subscriber would receive 990 for a 1_000 refund: reject instead of
+    // recording a refund that did not deliver.
+    w.test_token.set_transfer_fee_bps(&100);
+    assert_eq!(
+        w.sub.try_refund(&w.merchant, &id, &1_000),
+        Err(Ok(Error::UnexpectedTransferAmount))
+    );
+
+    assert_eq!(w.sub.get_mandate(&id).refunded, 0);
+    assert_eq!(w.test_token.balance(&w.merchant), merchant_balance);
+    // The subscriber's wallet still holds the 50_000 not deposited in the vault.
+    assert_eq!(w.test_token.balance(&user), 50_000);
+    assert_eq!(w.test_token.balance(&w.token_admin), 0);
+
+    // Turning the fee off lets the merchant refund normally.
+    w.test_token.set_transfer_fee_bps(&0);
+    w.sub.refund(&w.merchant, &id, &1_000);
+    assert_eq!(w.sub.get_mandate(&id).refunded, 1_000);
+    assert_eq!(w.test_token.balance(&user), 51_000);
+    assert_eq!(w.test_token.balance(&w.merchant), merchant_balance - 1_000);
 }
 
 // ----- upgrading a mandate to another plan (#94) -----

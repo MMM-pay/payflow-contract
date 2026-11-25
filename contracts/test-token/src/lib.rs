@@ -41,6 +41,8 @@ mod types {
         AmountOverflow = 4,
         /// Transfer failed because failure injection is enabled.
         TransferFailed = 5,
+        /// The transfer fee in basis points exceeds `10_000` (100%).
+        InvalidFee = 6,
     }
 
     /// Storage keys used by the test token contract.
@@ -55,6 +57,8 @@ mod types {
         FailTransfers,
         /// Flag controlling failure injection for a specific recipient address.
         FailTransfersTo(Address),
+        /// Transfer fee in basis points, deducted from the received amount.
+        TransferFeeBps,
     }
 }
 
@@ -163,6 +167,42 @@ mod contract {
             env.storage().persistent().get(&key).unwrap_or(false)
         }
 
+        /// Set the fee-on-transfer rate in basis points (`0`–`10_000`).
+        ///
+        /// The fee is deducted from what the recipient receives and credited
+        /// to the token admin, modelling a SEP-41 token that does not deliver
+        /// the full transfer amount. `0` disables the fee.
+        ///
+        /// # Auth
+        /// Requires authorization from the contract admin.
+        ///
+        /// # Events
+        /// Emits no events.
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured, or
+        /// [`Error::InvalidFee`] if `bps > 10_000`.
+        pub fn set_transfer_fee_bps(env: Env, bps: u32) -> Result<(), Error> {
+            let admin = Self::admin(env.clone())?;
+            admin.require_auth();
+            if bps > 10_000 {
+                return Err(Error::InvalidFee);
+            }
+            env.storage().instance().set(&DataKey::TransferFeeBps, &bps);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+            Ok(())
+        }
+
+        /// Current fee-on-transfer rate in basis points.
+        pub fn transfer_fee_bps(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&DataKey::TransferFeeBps)
+                .unwrap_or(0)
+        }
+
         /// Mint tokens to an account.
         ///
         /// # Auth
@@ -219,14 +259,41 @@ mod contract {
                 panic_with_error!(&env, Error::InsufficientBalance);
             }
 
+            let fee_bps = Self::transfer_fee_bps(env.clone());
+            let fee = if fee_bps == 0 {
+                0
+            } else {
+                let Some(product) = amount.checked_mul(i128::from(fee_bps)) else {
+                    panic_with_error!(&env, Error::AmountOverflow)
+                };
+                product / 10_000
+            };
+            let net = amount - fee;
+
             let to_balance = Self::read_balance(&env, &to);
             let new_from = from_balance - amount;
-            let Some(new_to) = to_balance.checked_add(amount) else {
+            let Some(new_to) = to_balance.checked_add(net) else {
                 panic_with_error!(&env, Error::AmountOverflow)
             };
 
             Self::write_balance(&env, &from, new_from);
             Self::write_balance(&env, &to, new_to);
+
+            // The fee accrues to the admin, modelling a fee collector. A
+            // transfer where the admin is the sender burns the fee instead.
+            if fee > 0 {
+                let admin = match Self::admin(env.clone()) {
+                    Ok(admin) => admin,
+                    Err(error) => panic_with_error!(&env, error),
+                };
+                if admin != from {
+                    let admin_balance = Self::read_balance(&env, &admin);
+                    let Some(new_admin) = admin_balance.checked_add(fee) else {
+                        panic_with_error!(&env, Error::AmountOverflow)
+                    };
+                    Self::write_balance(&env, &admin, new_admin);
+                }
+            }
         }
 
         /// Number of decimals for the token (7).
@@ -379,5 +446,63 @@ mod test {
 
         // Attacker cannot transfer user's tokens
         assert!(client.try_transfer(&user, &attacker, &100).is_err());
+    }
+
+    #[test]
+    fn fee_on_transfer_deducts_from_recipient_and_accrues_to_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+
+        let contract_id = env.register(TestToken, (admin.clone(),));
+        let client = TestTokenClient::new(&env, &contract_id);
+        client.mint(&user_a, &10_000);
+
+        client.set_transfer_fee_bps(&100);
+        assert_eq!(client.transfer_fee_bps(), 100);
+        client.transfer(&user_a, &user_b, &1_000);
+
+        assert_eq!(client.balance(&user_a), 9_000);
+        assert_eq!(client.balance(&user_b), 990);
+        assert_eq!(client.balance(&admin), 10);
+
+        // Turning the fee off restores exact transfers.
+        client.set_transfer_fee_bps(&0);
+        client.transfer(&user_a, &user_b, &1_000);
+        assert_eq!(client.balance(&user_a), 8_000);
+        assert_eq!(client.balance(&user_b), 1_990);
+        assert_eq!(client.balance(&admin), 10);
+    }
+
+    #[test]
+    fn transfer_fee_requires_admin_and_is_capped_at_one_hundred_percent() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+
+        let contract_id = env.register(TestToken, (admin,));
+        let client = TestTokenClient::new(&env, &contract_id);
+
+        env.mock_auths(&[]);
+        assert!(client.try_set_transfer_fee_bps(&100).is_err());
+        assert_eq!(client.transfer_fee_bps(), 0);
+
+        env.mock_all_auths();
+        assert!(client.try_set_transfer_fee_bps(&10_001).is_err());
+        assert_eq!(client.transfer_fee_bps(), 0);
+
+        // A 100% fee delivers nothing to the recipient and everything to the
+        // admin; it is the largest rate the fixture accepts.
+        client.set_transfer_fee_bps(&10_000);
+        client.mint(&user_a, &1_000);
+        client.transfer(&user_a, &user_b, &1_000);
+        assert_eq!(client.balance(&user_a), 0);
+        assert_eq!(client.balance(&user_b), 0);
+        assert_eq!(client.transfer_fee_bps(), 10_000);
     }
 }

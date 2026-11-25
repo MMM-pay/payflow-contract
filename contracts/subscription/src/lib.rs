@@ -1448,11 +1448,16 @@ mod contract {
                 return Err(Error::RefundExceedsReceived);
             }
 
-            token::TokenClient::new(&env, &mandate.token).transfer(
-                &merchant,
-                &mandate.subscriber,
-                &amount,
-            );
+            let token_client = token::TokenClient::new(&env, &mandate.token);
+            let received_before = token_client.balance(&mandate.subscriber);
+            token_client.transfer(&merchant, &mandate.subscriber, &amount);
+            let received = token_client
+                .balance(&mandate.subscriber)
+                .checked_sub(received_before)
+                .ok_or(Error::UnexpectedTransferAmount)?;
+            if received != amount {
+                return Err(Error::UnexpectedTransferAmount);
+            }
 
             mandate.refunded += amount;
             Self::write_mandate(&env, &mandate);
