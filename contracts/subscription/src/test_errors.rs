@@ -58,6 +58,7 @@ fn every_error_code_is_in_the_subscription_range() {
         (Error::ExtraChargeExceedsCap, 42),
         (Error::ExtraChargeAlreadyUsed, 43),
         (Error::MinimumCommitmentNotMet, 40),
+        (Error::InsufficientBalance, 41),
     ];
 
     let mut seen = std::vec::Vec::new();

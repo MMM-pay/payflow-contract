@@ -96,4 +96,7 @@ pub trait VaultInterface {
     /// requires the subscriber's auth, which is covered by the outer
     /// `subscribe_with_deposit` authorization.
     fn deposit(env: Env, user: Address, token: Address, amount: i128);
+
+    /// Balance available to a new mandate after existing reserves.
+    fn unreserved_balance(env: Env, user: Address, token: Address) -> i128;
 }

@@ -57,8 +57,19 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     (env, client, admin)
+}
+
+fn configure_subscription(env: &Env, registry: &Address) -> Address {
+    let subscription = Address::generate(env);
+    env.as_contract(registry, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::SubscriptionContract, &subscription);
+    });
+    subscription
 }
 
 fn batch_plan(env: &Env, token: &Address, amount: i128, name: &str) -> PlanParams {
@@ -188,10 +199,61 @@ fn create_plan_auth_args(
 }
 
 #[test]
+fn create_plan_rejects_reserved_contract_addresses_as_tokens() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(PlanRegistry, (admin,));
+    let client = PlanRegistryClient::new(&env, &id);
+    let merchant = Address::generate(&env);
+    let subscription = Address::generate(&env);
+    client.set_subscription_contract(&subscription);
+
+    assert_eq!(
+        client.try_create_plan(
+            &merchant,
+            &id,
+            &1_000,
+            &2_592_000,
+            &String::from_str(&env, "Invalid token"),
+            &String::from_str(&env, ""),
+            &0,
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
+            &0,
+            &0,
+            &None::<Address>,
+            &0,
+        ),
+        Err(Ok(Error::InvalidToken))
+    );
+    assert_eq!(
+        client.try_create_plan(
+            &merchant,
+            &subscription,
+            &1_000,
+            &2_592_000,
+            &String::from_str(&env, "Invalid token"),
+            &String::from_str(&env, ""),
+            &0,
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
+            &0,
+            &0,
+            &None::<Address>,
+            &0,
+        ),
+        Err(Ok(Error::InvalidToken))
+    );
+    assert_eq!(client.next_plan_id(), 1);
+}
+
+#[test]
 fn create_plan_authorizes_exact_merchant_tree() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
@@ -244,6 +306,7 @@ fn create_plan_rejects_a_wrong_signer() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let attacker = Address::generate(&env);
@@ -531,6 +594,7 @@ fn set_plan_active_authorizes_exact_merchant_tree() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
@@ -1343,6 +1407,7 @@ fn deactivate_page_requires_the_merchants_auth() {
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
     let id = env.register(PlanRegistry, (merchant.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     client.create_plan(
         &merchant,
@@ -1629,6 +1694,7 @@ fn set_successor_requires_the_merchants_auth() {
     env.mock_all_auths();
     let merchant = Address::generate(&env);
     let id = env.register(PlanRegistry, (merchant.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let token = Address::generate(&env);
     let plan_id = client.create_plan(
@@ -2997,6 +3063,7 @@ fn propose_requires_the_merchants_auth() {
     let new_owner = Address::generate(&env);
     let token = Address::generate(&env);
     let id = env.register(PlanRegistry, (merchant.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let plan = client.create_plan(
         &merchant,
@@ -3997,6 +4064,7 @@ fn create_plans_authorizes_the_exact_merchant_tree() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin.clone(),));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
@@ -4329,6 +4397,7 @@ fn hot_plan_world() -> (Env, PlanRegistryClient<'static>, Address, u64) {
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let id = env.register(PlanRegistry, (admin,));
+    configure_subscription(&env, &id);
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);

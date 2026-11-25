@@ -1,5 +1,4 @@
 import {Address} from '@stellar/stellar-sdk';
-
     /**
  * Errors returned by the subscription contract.
  */
@@ -207,8 +206,11 @@ export const Error = {
    * from completing its frozen minimum number of billing periods.
    */
   2040 : { message: "MinimumCommitmentNotMet" }
+   * The subscriber's unreserved vault balance cannot cover one period's
+   * charge for a new mandate.
+   */
+  2041 : { message: "InsufficientBalance" }
 }
-
 /**
  * A standing authorization from a subscriber to a merchant, bounded in
  * amount, frequency, total number of charges and total spend.
@@ -310,6 +312,10 @@ export interface Mandate {
    * ID of the plan against which this mandate was opened or upgraded.
    */
   plan_id: bigint;
+  /**
+   * Plan terms copied at sign-up.
+   */
+  plan_snapshot: PlanSnapshot;
   /**
    * Referral share in basis points of the merchant's share, frozen from the
    * plan at sign-up. Capped at `MAX_REFERRAL_BPS`.
@@ -469,6 +475,18 @@ export interface MandateTerms {
    * Whether a pause currently prevents charging.
    */
   paused: boolean;
+ * Plan terms captured when a mandate is opened or upgraded. The registry's
+ * mutable state (such as charging pause status) remains authoritative.
+ */
+export interface PlanSnapshot {
+  /**
+   * Total charge per billing period.
+   */
+  amount: bigint;
+  /**
+   * Plan name at the time the subscriber agreed to its terms.
+   */
+  name: string;
   /**
    * Billing period in seconds.
    */

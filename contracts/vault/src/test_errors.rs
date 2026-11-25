@@ -29,6 +29,9 @@ fn every_error_code_is_in_the_vault_range() {
         (Error::PendingAdminNotFound, 20),
         (Error::NotPendingAdmin, 21),
         (Error::InvalidAddress, 22),
+        (Error::EmptyReserveBatch, 18),
+        (Error::ReserveBatchTooLarge, 19),
+        (Error::DuplicateReserve, 20),
     ];
 
     let mut seen = std::vec::Vec::new();

@@ -165,6 +165,9 @@ pub enum Error {
     /// Cancellation, an upgrade, or a mandate cap would prevent the mandate
     /// from completing its frozen minimum number of billing periods.
     MinimumCommitmentNotMet = 2040,
+    /// The subscriber's unreserved vault balance cannot cover one period's
+    /// charge for a new mandate.
+    InsufficientBalance = 2041,
 }
 
 impl From<Error> for ErrorCode {

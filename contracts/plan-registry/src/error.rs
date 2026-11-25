@@ -10,7 +10,7 @@ use soroban_sdk::contracterror;
 pub enum Error {
     /// The contract has already been initialized.
     AlreadyInitialized = 1001,
-    /// The contract has not been initialized with an admin and counter.
+    /// The contract or its subscription address has not been initialized.
     NotInitialized = 1002,
     /// The requested plan ID does not exist in storage.
     PlanNotFound = 1003,
@@ -69,6 +69,8 @@ pub enum Error {
     NotPendingAdmin = 1026,
     /// A configured token address is zero/burn or otherwise invalid (#235).
     InvalidAddress = 1027,
+    /// The plan token address is a reserved Payflow contract address.
+    InvalidToken = 1025,
 }
 
 impl From<Error> for ErrorCode {

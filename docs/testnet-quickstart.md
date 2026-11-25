@@ -59,6 +59,8 @@ The script deploys the contracts in dependency order:
    default fee of 100 bps (1 %), and the deployer as fee recipient.
 4. **Debit rights** — the vault is told that the subscription contract may
    debit it.
+5. **Plan-token validation** — the registry is told the subscription address
+   so merchants cannot publish plans using the subscription contract as a token.
 
 On success the script prints a block of environment variables:
 
@@ -110,6 +112,7 @@ stellar contract invoke --id "$SUBSCRIPTION" \
 | `Identity not found` during deploy | Run step 1 again; the CLI does not persist identities across machines. |
 | `InsufficientBalance` on charge | The subscriber has not deposited into the vault, or the vault balance is exhausted. |
 | `SubscriptionNotSet` on debit | The vault was not told which subscription contract may call it. The deploy script handles this automatically; a manual deploy must call `set_subscription`. |
+| `NotInitialized` on `create_plan` | The registry has not been wired to the subscription address. Call `set_subscription_contract` as the registry admin after deployment. |
 | `AlreadyInitialized` | The deploy script deployed to an existing contract ID. Use `stellar contract deploy` without `--wasm-hash` to get a fresh ID. |
 
 ## Re-deploying

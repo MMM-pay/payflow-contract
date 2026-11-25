@@ -75,6 +75,12 @@ pub enum Error {
     InvalidAddress = 3022,
     /// `balances` was given more than 20 tokens in a single call (#38).
     TooManyTokens = 3023,
+    /// A bulk reserve update contains no entries.
+    EmptyReserveBatch = 3018,
+    /// A bulk reserve update exceeds `MAX_RESERVE_UPDATES`.
+    ReserveBatchTooLarge = 3019,
+    /// A bulk reserve update contains the same mandate more than once.
+    DuplicateReserve = 3020,
 }
 
 impl From<Error> for ErrorCode {
