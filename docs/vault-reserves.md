@@ -78,6 +78,7 @@ In the table below, `R` is `reserved(user, token, mandate_id)` before the call,
 | `set_reserve(..., mandate_id, A)` where `A > R` | Vault | `+(A - R)` | `+(A - R)` | `-(A - R)` | `ReserveSet` |
 | `set_reserve(..., mandate_id, A)` where `0 < A < R` | Vault | `-(R - A)` | `-(R - A)` | `+(R - A)` | `ReserveSet` |
 | `set_reserve(..., mandate_id, 0)` (release) | Vault | `-R` (entry removed) | `-R` | `+R` | `ReserveSet` |
+| `emergency_withdraw(subscriber, token)` (admin only) | Vault | `-R` (all entries removed) | `-T` (`0`) | `+T` (full balance withdrawable) | `EmergencyWithdraw` |
 | `charge` (`debit_multi_mandate` for `total`) | Subscription → Vault | `-min(R, total)` | `-min(R, total)` | `-(total - min(R, total))` | `Debit` (per non-zero leg), `MandateUpdated`, `Charged` (no `ReserveSet`) |
 | `upgrade` (price increase, `charged > 0`) | Subscription → Vault | `-min(R, charged)` | `-min(R, charged)` | `-(charged - min(R, charged))` | `Debit` (per non-zero leg), `MandateUpdated`, `Upgraded`, `CommittedRevenueChanged` |
 | `upgrade` (downgrade or `charged == 0`) | Subscription | `0` | `0` | `0` | `MandateUpdated`, `Upgraded`, `CommittedRevenueChanged` |

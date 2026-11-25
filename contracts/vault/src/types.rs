@@ -43,6 +43,9 @@ pub enum DataKey {
     /// Proposed successor admin awaiting their acceptance (#238). Missing
     /// means no handover is pending.
     PendingAdmin,
+    /// List of mandate IDs with non-zero reserves for (user, token), used by
+    /// `emergency_withdraw` (#341) to release every reserve in one call.
+    ReservedMandates(Address, Address),
 }
 
 /// A subscriber's optional ceiling on total debits per fixed time window,

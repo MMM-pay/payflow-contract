@@ -148,3 +148,17 @@ fn reserve_set_layout() {
         },
     );
 }
+#[test]
+fn emergency_withdraw_layout() {
+    let env = Env::default();
+    let a = address(&env);
+    snapshot(
+        &env,
+        "emergency_withdraw",
+        super::EmergencyWithdraw::spec_xdr(),
+        &super::EmergencyWithdraw {
+            subscriber: a,
+            amount: 4_500,
+        },
+    );
+}

@@ -35,6 +35,7 @@
 //! | `deposit_cap` | 0 | 0 | 1 (DepositCap) | 0 | |
 //! | `set_spend_limit` | 0 | 0 | 0 | 1–2 (SpendLimit, SpendWindow) | User auth, extends persistent TTL |
 //! | `spend_limit` | 0 | 0 | 1 (SpendLimit) | 0 | |
+//! | `emergency_withdraw` | 1 (Admin) | 0 | 1–2 (ReservedTotal, ReservedMandates) | 1+ (clears Reserved keys) | Admin only, releases all reserves |
 //! | `propose_admin` | 1 (Admin) | 1 (PendingAdmin) | 0 | 0 | Extends instance TTL |
 //! | `accept_admin` | 2 (Admin, PendingAdmin) | 1 (Admin) | 0 | 0 | Removes PendingAdmin; extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
@@ -63,7 +64,8 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw, WithdrawTo,
+    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, ReserveSet,
+    Withdraw, WithdrawTo,
 };
 pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow, UpgradeRecord};
 
@@ -110,9 +112,9 @@ pub const BPS_DENOMINATOR: u32 = 10_000;
 mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractUpgraded,
-        DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
-        ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw, WithdrawTo,
-        BPS_DENOMINATOR, DEFAULT_RESERVE_CAP_BPS, INSTANCE_BUMP, INSTANCE_THRESHOLD,
+        DataKey, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, Env, Error,
+        OperationWindow, ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw,
+        WithdrawTo, BPS_DENOMINATOR, DEFAULT_RESERVE_CAP_BPS, INSTANCE_BUMP, INSTANCE_THRESHOLD,
         MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
         VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
@@ -1034,6 +1036,53 @@ mod contract {
                     window_secs: 0,
                 })
         }
+
+        /// Release all per-mandate reserves held for `subscriber` in `token`
+        /// (#341), making their full vault balance withdrawable when a merchant
+        /// becomes unresponsive.
+        ///
+        /// Moves no tokens out of the vault — the admin still has no path to
+        /// user funds — and emits [`EmergencyWithdraw`] with the total released
+        /// reserve amount.
+        ///
+        /// # Auth
+        /// Requires authorization from the contract admin.
+        ///
+        /// # Events
+        /// Emits [`EmergencyWithdraw`].
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn emergency_withdraw(
+            env: Env,
+            subscriber: Address,
+            token: Address,
+        ) -> Result<i128, Error> {
+            Self::require_admin(&env)?;
+
+            let released = Self::read_reserved_total(&env, &subscriber, &token);
+            let list_key = DataKey::ReservedMandates(subscriber.clone(), token.clone());
+            let p = env.storage().persistent();
+            if let Some(mandate_ids) = p.get::<_, soroban_sdk::Vec<u64>>(&list_key) {
+                for mandate_id in mandate_ids.iter() {
+                    p.remove(&DataKey::Reserved(
+                        subscriber.clone(),
+                        token.clone(),
+                        mandate_id,
+                    ));
+                }
+                p.remove(&list_key);
+            }
+            Self::write_reserved_total(&env, &subscriber, &token, 0);
+
+            EmergencyWithdraw {
+                subscriber,
+                amount: released,
+            }
+            .publish(&env);
+
+            Ok(released)
+        }
     }
 
     impl Vault {
@@ -1353,12 +1402,45 @@ mod contract {
             amount: i128,
         ) {
             let key = DataKey::Reserved(user.clone(), token.clone(), mandate_id);
+            let list_key = DataKey::ReservedMandates(user.clone(), token.clone());
             let p = env.storage().persistent();
+            let mut mandate_ids: soroban_sdk::Vec<u64> = p
+                .get(&list_key)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
             if amount == 0 {
                 p.remove(&key);
+                let mut idx: Option<u32> = None;
+                for i in 0..mandate_ids.len() {
+                    if mandate_ids.get_unchecked(i) == mandate_id {
+                        idx = Some(i);
+                        break;
+                    }
+                }
+                if let Some(pos) = idx {
+                    mandate_ids.remove(pos);
+                    if mandate_ids.is_empty() {
+                        p.remove(&list_key);
+                    } else {
+                        p.set(&list_key, &mandate_ids);
+                        p.extend_ttl(&list_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                    }
+                }
             } else {
                 p.set(&key, &amount);
                 p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                let mut found = false;
+                for i in 0..mandate_ids.len() {
+                    if mandate_ids.get_unchecked(i) == mandate_id {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    mandate_ids.push_back(mandate_id);
+                    p.set(&list_key, &mandate_ids);
+                }
+                p.extend_ttl(&list_key, PERSIST_THRESHOLD, PERSIST_BUMP);
             }
         }
 

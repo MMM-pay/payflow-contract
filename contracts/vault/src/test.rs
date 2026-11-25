@@ -3360,3 +3360,112 @@ fn maximum_deposit_requires_the_users_auth() {
     assert_eq!(h.token_client.balance(&user), i128::MAX);
     assert_eq!(h.token_client.balance(&h.vault_id), 0);
 }
+
+// ---------------------------------------------------------------------------
+// #341 / #369: Admin emergency_withdraw releases all per-mandate reserves.
+// ---------------------------------------------------------------------------
+
+fn last_emergency_withdraw_event(h: &Harness) -> Option<(Address, i128)> {
+    let mut found = None;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let is_emergency = matches!(
+            body.topics.first(),
+            Some(ScVal::Symbol(ScSymbol(name))) if name.to_utf8_string_lossy() == "emergency_withdraw"
+        );
+        if !is_emergency {
+            continue;
+        }
+        let Some(topic_addr @ ScVal::Address(_)) = body.topics.get(1) else {
+            continue;
+        };
+        let subscriber: Address = soroban_sdk::TryFromVal::try_from_val(&h.env, topic_addr).ok()?;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries {
+            let (ScVal::Symbol(ScSymbol(name)), ScVal::I128(parts)) = (&entry.key, &entry.val)
+            else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == "amount" {
+                let amount = (i128::from(parts.hi) << 64) | i128::from(parts.lo);
+                found = Some((subscriber.clone(), amount));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn emergency_withdraw_releases_all_reserves_and_emits_the_correct_event() {
+    let h = setup();
+    let user = depositor(&h, 1_500);
+    let other_user = depositor(&h, 600);
+    let mandate_1 = 10u64;
+    let mandate_2 = 20u64;
+    let mandate_3 = 30u64;
+
+    h.vault.set_reserve(&user, &h.token, &mandate_1, &200);
+    h.vault.set_reserve(&user, &h.token, &mandate_2, &350);
+    h.vault.set_reserve(&user, &h.token, &mandate_3, &450);
+    h.vault.set_reserve(&other_user, &h.token, &mandate_1, &400);
+
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 1_000);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 500);
+
+    // Admin releases all reserves for `user` in one call.
+    let released = h.vault.emergency_withdraw(&user, &h.token);
+    assert_eq!(released, 1_000);
+
+    // The emitted event carries the subscriber and sum of released reserves.
+    // Must be checked before subsequent contract reads clear `events().all()`.
+    assert_eq!(
+        last_emergency_withdraw_event(&h),
+        Some((user.clone(), 1_000))
+    );
+
+    // All three per-mandate reserves and the aggregate total are now zero.
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_1), 0);
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_2), 0);
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_3), 0);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+
+    // Other subscribers' reserves are unaffected.
+    assert_eq!(h.vault.reserved(&other_user, &h.token, &mandate_1), 400);
+
+    // The full balance is now withdrawable by the subscriber.
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_500);
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 1_500);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 1_500);
+}
+
+#[test]
+fn emergency_withdraw_requires_admin_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &1, &300);
+    h.vault.set_reserve(&user, &h.token, &2, &400);
+
+    // A normal subscriber cannot call emergency_withdraw on their own behalf.
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "emergency_withdraw",
+            args: (&user, &h.token).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_emergency_withdraw(&user, &h.token).is_err());
+
+    // An unauthenticated call is also rejected.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_emergency_withdraw(&user, &h.token).is_err());
+
+    // All reserves remain untouched.
+    assert_eq!(h.vault.reserved(&user, &h.token, &1), 300);
+    assert_eq!(h.vault.reserved(&user, &h.token, &2), 400);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 700);
+}
