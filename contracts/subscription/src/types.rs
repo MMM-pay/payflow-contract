@@ -133,6 +133,38 @@ pub struct ChargeQuote {
     pub chargeable: bool,
 }
 
+/// Exact settlement recipients and amounts for a prospective charge.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeSimulation {
+    /// Subscriber whose vault balance would be debited.
+    pub subscriber: Address,
+    /// Token used for the charge.
+    pub token: Address,
+    /// Total amount debited from the subscriber.
+    pub amount: i128,
+    /// Address receiving the merchant's net share.
+    pub payout: Address,
+    /// Merchant's net share after fees, keeper tip and referral.
+    pub merchant_amount: i128,
+    /// Address receiving the protocol fee.
+    pub fee_to: Address,
+    /// Protocol fee.
+    pub fee: i128,
+    /// Proposed keeper address and recipient of any tip.
+    pub keeper: Address,
+    /// Keeper tip.
+    pub tip: i128,
+    /// Referral recipient, if any.
+    pub referrer: Option<Address>,
+    /// Referral payment (zero when there is no referrer).
+    pub referral: i128,
+    /// Unix seconds at which the charge is due.
+    pub due_at: u64,
+    /// Whether timing, status, caps and configured pauses permit charging now.
+    pub chargeable: bool,
+}
+
 /// Estimated end of a capped mandate, in the units a UI needs without extra
 /// math (#287). `timestamp` is Unix seconds (format it as ISO-8601 client
 /// side), `ledger` the ledger sequence that time is expected to land in, and

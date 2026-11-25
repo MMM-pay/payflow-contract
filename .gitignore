@@ -11,3 +11,4 @@ target/
 .stellar/
 contracts/*/test_snapshots/*
 !contracts/*/test_snapshots/events/
+!contracts/subscription/test_snapshots/budgets.csv

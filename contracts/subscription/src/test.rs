@@ -1717,6 +1717,101 @@ fn quote_needs_no_authorization() {
     assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
 }
 
+#[test]
+fn simulate_charge_reports_exact_recipients_without_authorization_or_writes() {
+    let w = world();
+    let referrer = Address::generate(&w.env);
+    let payout = Address::generate(&w.env);
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, Some(payout.clone()));
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+    let mandate_before = w.sub.get_mandate(&id);
+    let vault_before = w.vault.balance(&user, &w.token);
+
+    w.env.mock_auths(&[]);
+    let simulation = w.sub.simulate_charge(&w.keeper, &id);
+
+    let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
+    let merchant_gross = PRICE - fee;
+    let tip = merchant_gross * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
+    let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
+    let merchant_amount = merchant_gross - tip - referral;
+    assert_eq!(simulation.subscriber, user);
+    assert_eq!(simulation.token, w.token);
+    assert_eq!(simulation.amount, PRICE);
+    assert_eq!(simulation.payout, payout);
+    assert_eq!(simulation.merchant_amount, merchant_amount);
+    assert_eq!(simulation.fee_to, w.fee_to);
+    assert_eq!(simulation.fee, fee);
+    assert_eq!(simulation.keeper, w.keeper);
+    assert_eq!(simulation.tip, tip);
+    assert_eq!(simulation.referrer, Some(referrer.clone()));
+    assert_eq!(simulation.referral, referral);
+    assert_eq!(simulation.due_at, mandate_before.next_charge);
+    assert!(simulation.chargeable);
+    assert_eq!(w.sub.get_mandate(&id), mandate_before);
+    assert_eq!(w.vault.balance(&user, &w.token), vault_before);
+
+    w.env.mock_all_auths();
+    w.sub.charge(&w.keeper, &id);
+    assert_eq!(w.token_client.balance(&payout), merchant_amount);
+    assert_eq!(w.token_client.balance(&w.fee_to), fee);
+    assert_eq!(w.token_client.balance(&w.keeper), tip);
+    assert_eq!(w.token_client.balance(&referrer), referral);
+    assert_eq!(
+        vault_before - w.vault.balance(&user, &w.token),
+        simulation.amount
+    );
+}
+
+#[test]
+fn simulate_charge_reports_paused_and_missing_mandates() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.set_protocol_paused(&true);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+    assert_eq!(
+        w.sub.try_simulate_charge(&w.keeper, &99),
+        Err(Ok(Error::MandateNotFound))
+    );
+}
+
+#[test]
+fn simulate_charge_reports_plan_pause_and_cap_without_moving_funds() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &false);
+    w.sub.charge(&w.keeper, &id);
+    assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
+    assert_eq!(w.vault.balance(&user, &w.token), 100_000 - PRICE);
+}
+
+#[test]
+fn simulate_charge_reports_amount_overflow() {
+    let w = world();
+    let plan_id = w.plan_priced(i128::MAX);
+    let user = w.subscriber(1_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(
+        w.sub.try_simulate_charge(&w.keeper, &id),
+        Err(Ok(Error::AmountOverflow))
+    );
+}
+
 /// A price large enough to overflow the fee multiplication is reported as
 /// `AmountOverflow` by both quote and charge instead of panicking.
 #[test]
@@ -7562,4 +7657,99 @@ fn due_mandates_full_page_stays_within_resource_limits() {
     );
     // Native costs underestimate WASM; this only catches an unbounded scan.
     assert!(cpu < 20_000_000, "page scan used {cpu} CPU instructions");
+#[test]
+fn subscription_call_budgets_stay_within_committed_snapshots() {
+    let mut measurements = std::vec::Vec::new();
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.cost_estimate().budget().reset_default();
+    w.sub.charge(&w.keeper, &id);
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_success",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.mock_auths(&[]);
+    w.env.cost_estimate().budget().reset_default();
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_missing_auth",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan();
+    let user = Address::generate(&w.env);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.env.cost_estimate().budget().reset_default();
+    assert!(w.sub.try_charge(&w.keeper, &id).is_err());
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "charge_vault_failure",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let w = world();
+    let plan_id = w.plan_full(KEEPER_BPS, REFERRAL_BPS, None);
+    let user = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &0, &0, &Some(w.keeper.clone()));
+    w.env.mock_auths(&[]);
+    w.env.cost_estimate().budget().reset_default();
+    let simulation = w.sub.simulate_charge(&w.keeper, &id);
+    assert!(simulation.chargeable);
+    let budget = w.env.cost_estimate().budget();
+    measurements.push((
+        "simulate_charge",
+        budget.cpu_instruction_cost(),
+        budget.memory_bytes_cost(),
+    ));
+
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from("call,cpu_instructions,memory_bytes\n");
+        for (name, cpu, memory) in measurements {
+            std::fmt::Write::write_fmt(&mut snapshot, format_args!("{name},{cpu},{memory}\n"))
+                .unwrap();
+        }
+        std::fs::write(snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for (name, cpu, memory) in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{name},")))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {name}"));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let cpu_limit = expected_cpu + (expected_cpu / 20).max(1);
+        let memory_limit = expected_memory + (expected_memory / 20).max(1);
+        assert!(
+            cpu <= cpu_limit,
+            "{name} CPU budget grew from {expected_cpu} to {cpu} instructions (5% tolerance: {cpu_limit})"
+        );
+        assert!(
+            memory <= memory_limit,
+            "{name} memory budget grew from {expected_memory} to {memory} bytes (5% tolerance: {memory_limit})"
+        );
+    }
 }

@@ -139,6 +139,9 @@ cross-contract calls (Subscription → PlanRegistry → Vault → token) for
 `subscribe`, `charge` and `cancel`, the errors each step can stop on, the
 events each flow emits, and what the protocol pause blocks.
 
+See the [event contribution guide](docs/adding-events.md) to add or change a
+typed contract event, test its wire layout and regenerate bindings.
+
 The complete numeric error reference is in [`docs/ERRORS.md`](docs/ERRORS.md), including the trigger condition for every contract error.
 
 ## Architecture decision records

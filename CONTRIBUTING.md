@@ -59,6 +59,8 @@ opens an issue automatically when a new advisory affects the dependency tree.
   `persistent`. Every persistent write must extend TTL.
 - **Events.** Use the `#[contractevent]` macro, never the deprecated
   `env.events().publish` tuple form. Indexers depend on the typed shape.
+  Follow the [event contribution guide](docs/adding-events.md) when adding or
+  changing an event.
 - **Auth.** State exactly whose `require_auth()` is required in the doc comment
   of any function that mutates state.
 - **Doc comments.** Every `pub fn` in `#[contractimpl]` must have a `///` doc
@@ -117,12 +119,27 @@ re-baseline all three crates in the same PR that bumps the toolchain. Raising a
 floor is always welcome. Lowering one must be justified in the PR description —
 normally by adding tests instead. `test-token`, `shared` and `common` are
 support/fixture crates and are intentionally not gated.
+The subscription suite also commits resource-budget snapshots for representative
+charge calls, including missing authorization and vault failures. CI allows at
+most a 5% increase in CPU instructions or memory bytes. To intentionally
+refresh the reviewed baselines, run:
+
+```bash
+UPDATE_RESOURCE_BUDGETS=1 cargo test -p payflow-subscription subscription_call_budgets_stay_within_committed_snapshots
+```
+
+Review `contracts/subscription/test_snapshots/budgets.csv` before committing a
+refreshed snapshot.
 
 ### Event snapshots
 
 Each contract event has a committed XDR snapshot under
 `contracts/<contract>/test_snapshots/events/`. To update snapshots after an
 intentional event layout change, run:
+
+See the [event contribution guide](docs/adding-events.md) for the full sequence
+of defining, emitting, testing, documenting and regenerating bindings for an
+event.
 
 ```bash
 UPDATE_SNAPSHOTS=1 cargo test --all
