@@ -12,7 +12,7 @@ use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
 use payflow_test_token::{TestToken, TestTokenClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, Limits, ReadXdr, ScMap, ScSymbol, ScVal, WriteXdr},
     Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal,
@@ -258,14 +258,10 @@ fn simulate_billing_period(w: &World, mandate_id: u64) {
     // Check if charge is due
     assert!(w.sub.is_due(&mandate_id), "Mandate should be due");
 
-    // Attempt charge
-    let result = w.sub.charge(&w.keeper, &mandate_id);
-    // Charge may or may not complete depending on max_charges/max_total
-    // Just verify it doesn't panic and returns a result
-    assert!(
-        result.completed || !result.completed,
-        "Charge should return a result"
-    );
+    // Attempt charge. It may or may not complete depending on
+    // max_charges/max_total; settling without panicking is what this helper
+    // exercises, and the mandate checks below cover the outcome.
+    let _result = w.sub.charge(&w.keeper, &mandate_id);
 
     // Verify mandate state after charge
     let mandate = w.sub.get_mandate(&mandate_id);
@@ -302,10 +298,13 @@ fn property_long_running_subscription_regular() {
         .sub
         .subscribe(&subscriber, &plan_id, &3, &500_000, &None::<Address>);
 
+    let second_user = w.subscriber(150_000);
     let second_id = w
         .sub
         .subscribe(&second_user, &plan_id, &0, &0, &None::<Address>);
-    assert_eq!(second_id, next_id);
+    // Mandate ids are allocated sequentially, so the second mandate opened in
+    // this world is exactly one past the first.
+    assert_eq!(second_id, mandate_id + 1);
 }
 
 /// Pull a u32 field out of the data map of any emitted contract event.
@@ -974,11 +973,9 @@ fn property_long_running_subscription_with_upgrades() {
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &mandate_id);
 
-    // Upgrade to more expensive plan
-    let upgrade_result = w.sub.upgrade(&subscriber, &mandate_id, &plan_id_v2);
-    // Handle result - may fail if vault can't cover prorated amount
-    // Just verify it doesn't panic
-    let _ = upgrade_result;
+    // Upgrade to the more expensive plan. The prorated difference is debited
+    // from the subscriber's vault balance, which covers it here.
+    w.sub.upgrade(&subscriber, &mandate_id, &plan_id_v2);
 
     // Charge with new plan price
     w.advance(MONTH);
@@ -1032,7 +1029,7 @@ fn property_long_running_subscription_failed_payments() {
         subscriber_balance, 0,
         "Subscriber should have no remaining balance"
     );
-    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+    assert_eq!(w.sub.get_mandate(&mandate_id).status, MandateStatus::Active);
 }
 
 #[test]
@@ -5007,6 +5004,11 @@ fn referral_share_is_paid_to_the_referrer() {
 
     w.sub.charge(&w.keeper, &id);
 
+    // The test env only exposes the events of the invocation that just ran, so
+    // read them before the balance and mandate views below run another call.
+    let referral_event = event_by_topic(&w.env, "referral_paid");
+    let event_amount = last_event_field_i128(&w.env, "amount");
+
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
     let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
@@ -5026,11 +5028,13 @@ fn referral_share_is_paid_to_the_referrer() {
     assert_eq!(m.referrer, Some(referrer.clone()));
     assert_eq!(m.referral_bps, REFERRAL_BPS);
 
-    let referral_event = event_by_topic(&w.env, "referral_paid");
-    assert!(referral_event.is_some(), "ReferralPaid event must be emitted on charge");
-    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(referral));
+    let body = referral_event.expect("ReferralPaid event must be emitted on charge");
+    assert_eq!(event_amount, Some(referral));
+    // `referrer` is a topic of the event, alongside the mandate id, so a
+    // dunning or rewards service can filter on it.
+    assert_eq!(body.topics.len(), 3);
     assert_eq!(
-        event_field_address(&w.env, "referral_paid", "referrer"),
+        Address::try_from_val(&w.env, &body.topics[2]).ok(),
         Some(referrer)
     );
 }
@@ -5638,6 +5642,7 @@ fn upgrade_preserves_every_stored_value() {
         &REFERRAL_BPS,
         &Some(payout.clone()),
         &10u32,
+        &None::<u32>,
     );
     w.registry
         .set_plan_grace_period(&w.merchant, &plan_id, &86_400);
@@ -7950,6 +7955,118 @@ fn fresh_and_missing_mandates_are_untouched_by_access() {
     );
 }
 
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
 #[test]
 fn subscription_call_budgets_stay_within_committed_snapshots() {
     let mut measurements = std::vec::Vec::new();
@@ -8971,7 +9088,7 @@ mod deterministic_ids {
             period: u64,
         ) -> soroban_sdk::Vec<Val> {
             let env = &self.w.env;
-            (
+            let mut args: soroban_sdk::Vec<Val> = (
                 merchant,
                 &self.w.token,
                 &amount,
@@ -8986,7 +9103,11 @@ mod deterministic_ids {
                 &None::<Address>,
                 &0u32,
             )
-                .into_val(env)
+                .into_val(env);
+            // `create_plan` also takes the optional retry window, one argument
+            // past the thirteen-element tuple conversion.
+            args.push_back(Option::<u32>::None.into_val(env));
+            args
         }
 
         fn try_publish(
