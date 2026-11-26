@@ -1,6 +1,6 @@
 //! Storage keys for the vault contract.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, String};
 
 // Keep the historical types::DataKey path available to existing consumers.
 pub use crate::storage_keys::DataKey;

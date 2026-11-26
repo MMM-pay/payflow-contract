@@ -10,9 +10,47 @@ use soroban_sdk::{
     Address, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
-/// A valid plan-registry wasm used as the `upgrade_wasm` target (#158); the
-/// contract upgrades to a copy of itself to exercise the upgrade mechanism.
+/// The plan-registry wasm used as the `upgrade_wasm` target (#158).
+///
+/// It is a published build, not a rebuild of the working tree, and a new
+/// executable is a blocking finding for the repository's malware scan, so the
+/// fixture only changes when a release ships. Its entrypoints therefore keep
+/// the argument lists they were released with: its `create_plan` stops at
+/// `max_subscribers` (no `retry_window_ledgers`) and it has no `create_plans`.
 const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_plan_registry.wasm");
+
+/// `create_plan` as the published upgrade target declares it.
+///
+/// After the swap the contract runs the fixture's code, so the call has to
+/// carry the thirteen arguments that build was compiled with rather than the
+/// fourteen of the working tree.
+fn create_plan_on_upgrade_target(
+    env: &Env,
+    contract: &Address,
+    merchant: &Address,
+    token: &Address,
+    amount: i128,
+    period: u64,
+    name: &str,
+) -> u64 {
+    let args = soroban_sdk::vec![
+        env,
+        merchant.into_val(env),
+        token.into_val(env),
+        amount.into_val(env),
+        period.into_val(env),
+        String::from_str(env, name).into_val(env),
+        String::from_str(env, "").into_val(env),
+        0_u32.into_val(env),
+        Symbol::new(env, "").into_val(env),
+        String::from_str(env, "").into_val(env),
+        0_u64.into_val(env),
+        0_u32.into_val(env),
+        Option::<Address>::None.into_val(env),
+        0_u32.into_val(env),
+    ];
+    env.invoke_contract(contract, &Symbol::new(env, "create_plan"), args)
+}
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     let env = Env::default();
@@ -105,6 +143,35 @@ fn create_plan_assigns_sequential_ids() {
     assert_eq!(client.next_plan_id(), 3);
 }
 
+/// The argument vector `create_plan` is invoked with, as the host records it.
+///
+/// `create_plan` takes fourteen arguments, one past the largest tuple
+/// conversion soroban-sdk implements, so the vector is built explicitly.
+fn create_plan_auth_args(
+    env: &Env,
+    merchant: &Address,
+    token: &Address,
+    name: &String,
+    desc: &String,
+) -> Vec<soroban_sdk::Val> {
+    let mut args = Vec::new(env);
+    args.push_back(merchant.into_val(env));
+    args.push_back(token.into_val(env));
+    args.push_back(1_000_i128.into_val(env));
+    args.push_back(604_800_u64.into_val(env));
+    args.push_back(name.into_val(env));
+    args.push_back(desc.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Symbol::new(env, "").into_val(env));
+    args.push_back(String::from_str(env, "").into_val(env));
+    args.push_back(0_u64.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Option::<Address>::None.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Option::<u32>::None.into_val(env));
+    args
+}
+
 #[test]
 fn create_plan_authorizes_exact_merchant_tree() {
     let env = Env::default();
@@ -121,22 +188,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "create_plan",
-            args: (
-                &merchant,
-                &token,
-                &1_000_i128,
-                &604_800_u64,
-                &name,
-                &desc,
-                &0_u32,
-                &Symbol::new(&env, ""),
-                &String::from_str(&env, ""),
-                &0_u64,
-                &0_u32,
-                &None::<Address>,
-                &0u32,
-            )
-                .into_val(&env),
+            args: create_plan_auth_args(&env, &merchant, &token, &name, &desc),
             sub_invokes: &[],
         },
     }]);
@@ -164,22 +216,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
                 function: soroban_sdk::testutils::AuthorizedFunction::Contract((
                     client.address.clone(),
                     soroban_sdk::Symbol::new(&env, "create_plan"),
-                    (
-                        &merchant,
-                        &token,
-                        &1_000_i128,
-                        &604_800_u64,
-                        &name,
-                        &desc,
-                        &0_u32,
-                        &Symbol::new(&env, ""),
-                        &String::from_str(&env, ""),
-                        &0_u64,
-                        &0_u32,
-                        &None::<Address>,
-                        &0u32
-                    )
-                        .into_val(&env),
+                    create_plan_auth_args(&env, &merchant, &token, &name, &desc),
                 )),
                 sub_invocations: std::vec![],
             }
@@ -622,6 +659,7 @@ fn plan_charge_terms_agree_with_get_plan_and_charges_paused() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let check = || {
         let plan = client.get_plan(&id);
@@ -3127,22 +3165,16 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     assert_eq!(plan.max_subscribers, 3);
     assert_eq!(client.admin(), admin);
 
-    // The new code still runs: the next plan gets the next id.
-    let next = client.create_plan(
+    // The swapped-in code still runs: the surviving counter hands out the next
+    // id.
+    let next = create_plan_on_upgrade_target(
+        &env,
+        &client.address,
         &merchant,
         &token,
-        &1_000,
-        &604_800,
-        &String::from_str(&env, "Second"),
-        &String::from_str(&env, ""),
-        &0,
-        &Symbol::new(&env, ""),
-        &String::from_str(&env, ""),
-        &0u64,
-        &0u32,
-        &None::<Address>,
-        &0,
-        &None::<u32>,
+        1_000,
+        604_800,
+        "Second",
     );
     assert_eq!(next, id + 1);
 }
@@ -3175,6 +3207,7 @@ fn upgrade_preserves_every_stored_value() {
         &500,
         &Some(payout.clone()),
         &42,
+        &None::<u32>,
     );
     let successor = client.create_plan(
         &merchant,
@@ -3190,6 +3223,7 @@ fn upgrade_preserves_every_stored_value() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     client.set_successor(&merchant, &id, &successor);
     client.set_plan_charges_paused(&merchant, &id, &true);
@@ -3262,21 +3296,15 @@ fn upgrade_preserves_every_stored_value() {
         );
     });
 
-    // The upgraded code still runs against the existing counter.
-    let next = client.create_plan(
+    // The swapped-in code still runs against the existing counter.
+    let next = create_plan_on_upgrade_target(
+        &env,
+        &client.address,
         &merchant,
         &token,
-        &9_999,
-        &2_592_000,
-        &String::from_str(&env, "Third"),
-        &String::from_str(&env, ""),
-        &0,
-        &Symbol::new(&env, ""),
-        &String::from_str(&env, ""),
-        &0u64,
-        &0u32,
-        &None::<Address>,
-        &0u32,
+        9_999,
+        2_592_000,
+        "Third",
     );
     assert_eq!(next, successor + 1);
 }
@@ -3300,6 +3328,7 @@ fn rejected_upgrade_leaves_stored_values_intact() {
         &0u32,
         &None::<Address>,
         &7,
+        &None::<u32>,
     );
 
     let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
@@ -4683,6 +4712,7 @@ fn plan_registry_call_budgets_stay_within_committed_snapshots() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     measurements.push(measure_call(&env, "create_plan"));
 
@@ -4899,10 +4929,9 @@ fn batch_plan_id_overflow_writes_nothing() {
     assert_eq!(client.merchant_plan_count(&merchant), 0);
 }
 
-
 /// #280: v0.2.0 used the same instance counter and merchant index keys.
 /// Seed those entries directly, as an older deployed contract would have done,
-/// rather than creating them through today's create_plan implementation.
+/// rather than creating them through today's `create_plan` implementation.
 #[test]
 fn legacy_registry_counter_and_index_remain_readable() {
     let (env, client, admin) = setup();
@@ -4943,5 +4972,450 @@ fn legacy_registry_counter_and_index_remain_readable() {
     assert_eq!(
         client.merchant_plans(&merchant, &0, &50),
         soroban_sdk::vec![&env, 3u64, 9u64]
+    );
+}
+// ---------------------------------------------------------------------------
+// Plan listing pagination under concurrent creates (#349)
+// ---------------------------------------------------------------------------
+//
+// `merchant_plans`, `token_plans` and their `*_listings` variants page by a
+// numeric offset into an append-only index: `create_plan` and `create_plans`
+// write the new id at `count`, then bump the count, so an existing slot never
+// moves. A client walking the catalogue one page at a time can therefore be
+// interleaved with creates from other transactions -- a create that is
+// concurrent from the client's point of view -- and still visit every plan
+// exactly once: no plan is skipped when the catalogue grows past the cursor,
+// and none is repeated when a page is read again.
+//
+// These tests drive that walk for real: read a page, publish plans, resume
+// from the cursor. They then check the index left behind is intact, so a
+// corrupted slot or a lost count cannot hide behind the pagination result.
+
+/// Page size used by the pagination tests: small enough that a handful of
+/// plans needs several pages, and well below [`MAX_PAGE`].
+const PAGE_SIZE: u32 = 4;
+
+/// Publish one valid plan and return its id.
+fn create_test_plan(
+    env: &Env,
+    client: &PlanRegistryClient<'static>,
+    merchant: &Address,
+    token: &Address,
+) -> u64 {
+    client.create_plan(
+        merchant,
+        token,
+        &1_000,
+        &3_600,
+        &String::from_str(env, "Plan"),
+        &String::from_str(env, ""),
+        &0,
+        &Symbol::new(env, ""),
+        &String::from_str(env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+        &None::<u32>,
+    )
+}
+
+/// The ids 1..=`last` in publication order.
+fn sequential_ids(env: &Env, last: u64) -> Vec<u64> {
+    let mut ids = Vec::new(env);
+    let mut id = 1u64;
+    while id <= last {
+        ids.push_back(id);
+        id += 1;
+    }
+    ids
+}
+
+fn extend_ids(ids: &mut Vec<u64>, page: &Vec<u64>) {
+    for id in page.iter() {
+        ids.push_back(id);
+    }
+}
+
+/// Walk `merchant_plans` from offset 0 to the end, `page_size` ids at a time.
+fn paginated_merchant_ids(
+    env: &Env,
+    client: &PlanRegistryClient<'static>,
+    merchant: Address,
+    page_size: u32,
+) -> Vec<u64> {
+    let mut ids = Vec::new(env);
+    let mut start = 0u32;
+    while start < client.merchant_plan_count(&merchant) {
+        let page = client.merchant_plans(&merchant, &start, &page_size);
+        assert!(
+            !page.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += page.len();
+        extend_ids(&mut ids, &page);
+    }
+    ids
+}
+
+/// Walk `token_plans` from offset 0 to the end, `page_size` ids at a time.
+fn paginated_token_ids(
+    env: &Env,
+    client: &PlanRegistryClient<'static>,
+    token: Address,
+    page_size: u32,
+) -> Vec<u64> {
+    let mut ids = Vec::new(env);
+    let mut start = 0u32;
+    while start < client.token_plan_count(&token) {
+        let page = client.token_plans(&token, &start, &page_size);
+        assert!(
+            !page.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += page.len();
+        extend_ids(&mut ids, &page);
+    }
+    ids
+}
+
+/// Walk `merchant_plan_listings` from offset 0 to the end, `page_size` rows at
+/// a time.
+fn paginated_merchant_listing_ids(
+    env: &Env,
+    client: &PlanRegistryClient<'static>,
+    merchant: Address,
+    page_size: u32,
+) -> Vec<u64> {
+    let mut ids = Vec::new(env);
+    let mut start = 0u32;
+    while start < client.merchant_plan_count(&merchant) {
+        let rows = client.merchant_plan_listings(&merchant, &start, &page_size);
+        assert!(
+            !rows.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += rows.len();
+        for row in rows.iter() {
+            ids.push_back(row.id);
+        }
+    }
+    ids
+}
+
+/// Walk `token_plan_listings` from offset 0 to the end, `page_size` rows at a
+/// time.
+fn paginated_token_listing_ids(
+    env: &Env,
+    client: &PlanRegistryClient<'static>,
+    token: Address,
+    page_size: u32,
+) -> Vec<u64> {
+    let mut ids = Vec::new(env);
+    let mut start = 0u32;
+    while start < client.token_plan_count(&token) {
+        let rows = client.token_plan_listings(&token, &start, &page_size);
+        assert!(
+            !rows.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += rows.len();
+        for row in rows.iter() {
+            ids.push_back(row.id);
+        }
+    }
+    ids
+}
+
+#[test]
+fn merchant_plans_paginate_exactly_once_while_plans_are_created_between_pages() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    // Eight plans are already published when the client starts walking.
+    for _ in 0..8 {
+        create_test_plan(&env, &client, &merchant, &token);
+    }
+
+    // Page one is handed to the client and remembered.
+    let first_page = client.merchant_plans(&merchant, &0, &PAGE_SIZE);
+    assert_eq!(first_page, sequential_ids(&env, u64::from(PAGE_SIZE)));
+
+    let mut seen = Vec::new(&env);
+    extend_ids(&mut seen, &first_page);
+    let mut start = first_page.len();
+    let mut injected = false;
+
+    while start < client.merchant_plan_count(&merchant) {
+        let page = client.merchant_plans(&merchant, &start, &PAGE_SIZE);
+        assert!(
+            !page.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += page.len();
+        extend_ids(&mut seen, &page);
+
+        if !injected {
+            injected = true;
+            // Between two pages the merchant publishes six more plans: three
+            // in their own transactions, then a three-plan batch. These are
+            // the creates racing the client's walk.
+            for _ in 0..3 {
+                create_test_plan(&env, &client, &merchant, &token);
+            }
+            let batch = soroban_sdk::vec![
+                &env,
+                batch_plan(&env, &token, 1_000, "Racing A"),
+                batch_plan(&env, &token, 2_000, "Racing B"),
+                batch_plan(&env, &token, 3_000, "Racing C"),
+            ];
+            client.create_plans(&merchant, &batch);
+        }
+    }
+
+    // Every plan appears exactly once, in publication order: nothing skipped
+    // at the page boundary where the creates landed, and nothing repeated.
+    assert_eq!(seen, sequential_ids(&env, 14));
+    assert_eq!(client.merchant_plan_count(&merchant), 14);
+    assert_eq!(client.next_plan_id(), 15);
+
+    // The page already handed out did not move when the plans were appended.
+    assert_eq!(client.merchant_plans(&merchant, &0, &PAGE_SIZE), first_page);
+
+    // No slot is missing or duplicated: every offset below the count resolves
+    // exactly one plan, and it is the plan its id names.
+    for offset in 0..14u32 {
+        let slot = client.merchant_plans(&merchant, &offset, &1);
+        assert_eq!(slot.len(), 1, "index slot {offset} is empty");
+        let id = slot.get(0).unwrap();
+        assert_eq!(id, u64::from(offset) + 1, "slot {offset} points elsewhere");
+        let plan = client.get_plan(&id);
+        assert_eq!(plan.id, id);
+        assert_eq!(plan.merchant, merchant);
+        assert_eq!(plan.token, token);
+    }
+}
+
+#[test]
+fn merchant_plan_pages_already_read_are_unchanged_by_later_creates() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    for _ in 0..8 {
+        create_test_plan(&env, &client, &merchant, &token);
+    }
+
+    let page_one = client.merchant_plans(&merchant, &0, &PAGE_SIZE);
+    let page_two = client.merchant_plans(&merchant, &PAGE_SIZE, &PAGE_SIZE);
+    assert_eq!(page_one, soroban_sdk::vec![&env, 1u64, 2, 3, 4]);
+    assert_eq!(page_two, soroban_sdk::vec![&env, 5u64, 6, 7, 8]);
+
+    // The catalogue grows while the client holds a cursor after page two.
+    for _ in 0..4 {
+        create_test_plan(&env, &client, &merchant, &token);
+    }
+
+    // The pages already read are identical: appends never shift an existing
+    // position, so a cursor can neither skip nor repeat a plan.
+    assert_eq!(client.merchant_plans(&merchant, &0, &PAGE_SIZE), page_one);
+    assert_eq!(
+        client.merchant_plans(&merchant, &PAGE_SIZE, &PAGE_SIZE),
+        page_two
+    );
+
+    // A page straddling the old end and the newly appended plans returns each
+    // id once.
+    assert_eq!(
+        client.merchant_plans(&merchant, &2, &PAGE_SIZE),
+        soroban_sdk::vec![&env, 3u64, 4, 5, 6]
+    );
+    assert_eq!(
+        client.merchant_plans(&merchant, &6, &PAGE_SIZE),
+        soroban_sdk::vec![&env, 7u64, 8, 9, 10]
+    );
+    assert_eq!(
+        client.merchant_plans(&merchant, &8, &PAGE_SIZE),
+        soroban_sdk::vec![&env, 9u64, 10, 11, 12]
+    );
+
+    // Past the end there is nothing, and a capped page at the boundary of the
+    // old catalogue returns the tail exactly once.
+    assert_eq!(client.merchant_plans(&merchant, &12, &PAGE_SIZE).len(), 0);
+    assert_eq!(
+        client
+            .merchant_plans(&merchant, &u32::MAX, &PAGE_SIZE)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client.merchant_plans(&merchant, &8, &u32::MAX),
+        soroban_sdk::vec![&env, 9u64, 10, 11, 12]
+    );
+
+    // A full walk after the creates visits every plan exactly once.
+    assert_eq!(
+        paginated_merchant_ids(&env, &client, merchant.clone(), 3),
+        sequential_ids(&env, 12)
+    );
+}
+
+#[test]
+fn token_plans_paginate_exactly_once_under_concurrent_creates() {
+    let (env, client, _admin) = setup();
+    let merchant_a = Address::generate(&env);
+    let merchant_b = Address::generate(&env);
+    let usdc = Address::generate(&env);
+    let xlm = Address::generate(&env);
+
+    // Five USDC plans from two merchants, with XLM plans interleaved between
+    // them: the two token indexes must stay independent.
+    let mut usdc_ids = Vec::new(&env);
+    usdc_ids.push_back(create_test_plan(&env, &client, &merchant_a, &usdc)); // 1
+    usdc_ids.push_back(create_test_plan(&env, &client, &merchant_b, &usdc)); // 2
+    usdc_ids.push_back(create_test_plan(&env, &client, &merchant_a, &usdc)); // 3
+    let xlm_a = create_test_plan(&env, &client, &merchant_a, &xlm); // 4
+    usdc_ids.push_back(create_test_plan(&env, &client, &merchant_b, &usdc)); // 5
+    usdc_ids.push_back(create_test_plan(&env, &client, &merchant_a, &usdc)); // 6
+    let xlm_b = create_test_plan(&env, &client, &merchant_b, &xlm); // 7
+    assert_eq!(client.token_plan_count(&usdc), 5);
+
+    // First page of the USDC listing.
+    let first_page = client.token_plans(&usdc, &0, &PAGE_SIZE);
+    assert_eq!(first_page, soroban_sdk::vec![&env, 1u64, 2, 3, 5]);
+
+    let mut seen = Vec::new(&env);
+    extend_ids(&mut seen, &first_page);
+    let mut start = first_page.len();
+
+    // While the client is between pages, three more USDC plans are published
+    // by both merchants, and one XLM plan lands in the other token index.
+    let usdc_a = create_test_plan(&env, &client, &merchant_a, &usdc); // 8
+    let usdc_b = create_test_plan(&env, &client, &merchant_b, &usdc); // 9
+    let usdc_c = create_test_plan(&env, &client, &merchant_a, &usdc); // 10
+    let xlm_c = create_test_plan(&env, &client, &merchant_a, &xlm); // 11
+
+    while start < client.token_plan_count(&usdc) {
+        let page = client.token_plans(&usdc, &start, &PAGE_SIZE);
+        assert!(
+            !page.is_empty(),
+            "a page inside the index must make progress"
+        );
+        start += page.len();
+        extend_ids(&mut seen, &page);
+    }
+
+    // The USDC walk sees the old plans and the racing ones exactly once, in
+    // token-publication order; the XLM creates never leak into it.
+    let mut expected = usdc_ids.clone();
+    expected.push_back(usdc_a);
+    expected.push_back(usdc_b);
+    expected.push_back(usdc_c);
+    assert_eq!(seen, expected);
+    // A fresh walk after the creates visits the same plans exactly once.
+    assert_eq!(
+        paginated_token_ids(&env, &client, usdc.clone(), 3),
+        expected.clone()
+    );
+    assert_eq!(client.token_plan_count(&usdc), 8);
+    assert_eq!(client.token_plan_count(&xlm), 3);
+    assert_eq!(client.next_plan_id(), 12);
+
+    // The token index is intact: every offset below the count resolves one
+    // plan, in order, and every slot is denominated in the listing token.
+    for offset in 0..8u32 {
+        let slot = client.token_plans(&usdc, &offset, &1);
+        assert_eq!(slot.len(), 1, "token slot {offset} is empty");
+        let id = slot.get(0).unwrap();
+        assert_eq!(id, expected.get(offset).unwrap());
+        assert_eq!(client.get_plan(&id).token, usdc);
+    }
+    let xlm_ids = soroban_sdk::vec![&env, xlm_a, xlm_b, xlm_c];
+    assert_eq!(client.token_plans(&xlm, &0, &u32::MAX), xlm_ids);
+    for id in xlm_ids.iter() {
+        assert_eq!(client.get_plan(&id).token, xlm);
+    }
+
+    // The per-merchant indexes are untouched by the other merchant's creates.
+    assert_eq!(client.merchant_plan_count(&merchant_a), 7);
+    assert_eq!(client.merchant_plan_count(&merchant_b), 4);
+    for id in client.merchant_plans(&merchant_a, &0, &u32::MAX).iter() {
+        assert_eq!(client.get_plan(&id).merchant, merchant_a);
+    }
+    for id in client.merchant_plans(&merchant_b, &0, &u32::MAX).iter() {
+        assert_eq!(client.get_plan(&id).merchant, merchant_b);
+    }
+}
+
+#[test]
+fn plan_listings_paginate_exactly_once_under_concurrent_creates() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    for _ in 0..7 {
+        create_test_plan(&env, &client, &merchant, &token);
+    }
+
+    // The first listing page the client receives.
+    let first_page = client.merchant_plan_listings(&merchant, &0, &PAGE_SIZE);
+    assert_eq!(first_page.len(), PAGE_SIZE);
+    for (expected_id, row) in (1u64..).zip(first_page.iter()) {
+        assert_eq!(row.id, expected_id);
+        assert_eq!(row.merchant, merchant);
+        assert_eq!(row.token, token);
+        assert_eq!(row.amount, 1_000);
+        assert_eq!(row.period, 3_600);
+        assert!(row.active);
+        assert_eq!(row.name, String::from_str(&env, "Plan"));
+    }
+
+    // Five more plans are published between pages, one batch included.
+    for _ in 0..3 {
+        create_test_plan(&env, &client, &merchant, &token);
+    }
+    let batch = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 2_000, "Racing A"),
+        batch_plan(&env, &token, 3_000, "Racing B"),
+    ];
+    client.create_plans(&merchant, &batch);
+    assert_eq!(client.merchant_plan_count(&merchant), 12);
+
+    // Resuming from the cursor and walking to the end sees each plan exactly
+    // once, including the plans that arrived mid-walk.
+    assert_eq!(
+        paginated_merchant_listing_ids(&env, &client, merchant.clone(), PAGE_SIZE),
+        sequential_ids(&env, 12)
+    );
+    assert_eq!(
+        paginated_token_listing_ids(&env, &client, token.clone(), 5),
+        sequential_ids(&env, 12)
+    );
+
+    // The page already delivered is unchanged, and a page straddling the
+    // create boundary lists each id once.
+    for (expected_id, row) in (1u64..).zip(
+        client
+            .merchant_plan_listings(&merchant, &0, &PAGE_SIZE)
+            .iter(),
+    ) {
+        assert_eq!(row.id, expected_id);
+    }
+    let straddling = client.merchant_plan_listings(&merchant, &5, &PAGE_SIZE);
+    assert_eq!(straddling.len(), PAGE_SIZE);
+    assert_eq!(
+        straddling
+            .iter()
+            .map(|row| row.id)
+            .collect::<std::vec::Vec<u64>>(),
+        std::vec![6u64, 7, 8, 9]
+    );
+    assert_eq!(
+        client
+            .merchant_plan_listings(&merchant, &12, &PAGE_SIZE)
+            .len(),
+        0
     );
 }
