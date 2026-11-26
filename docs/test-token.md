@@ -21,11 +21,27 @@ without a Stellar Asset Contract issuer, and two failure-injection switches:
   `TransferFailed`.
 - `set_fail_transfers_to(to, fail)` makes transfers whose recipient is `to`
   fail, leaving other recipients working.
+- `set_transfer_fee_bps(bps)` deducts a fee of `bps / 10_000` from the amount
+  the recipient receives and credits it to the token admin. `0` disables it
+  and `10_000` is the maximum accepted rate.
 
-The read views `fail_transfers()` and `fail_transfers_to(to)` report the current
-switches. Failure injection is what lets the suite prove that a token failure
-rolls back a deposit, withdrawal or charge instead of leaving half of it
-applied.
+The read views `fail_transfers()`, `fail_transfers_to(to)` and
+`transfer_fee_bps()` report the current switches. Failure injection is what
+lets the suite prove that a token failure rolls back a deposit, withdrawal or
+charge instead of leaving half of it applied. The fee mode proves the same for
+a token that reports success but delivers less than the requested amount.
+
+## Fee-on-transfer limitation
+
+Payflow records exact amounts: the vault credits a deposit with the amount it
+asked the token to move, and a charge or refund records the amount it asked to
+pay. A fee-on-transfer token breaks that assumption, so the vault and the
+subscription refund path compare the recipient's balance before and after each
+transfer and reject any mismatch with `UnexpectedTransferAmount`
+(`3016`/`2040`), rolling the whole operation back. Fee-on-transfer tokens are
+therefore unsupported, and are refused at the first operation that would lose
+value rather than being silently mis-accounted. Standard SEP-41 tokens that
+deliver the exact amount are unaffected.
 
 ## Why it exists
 

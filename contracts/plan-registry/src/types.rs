@@ -13,7 +13,7 @@ use soroban_sdk::{contracttype, Address, String, Symbol};
 /// `payflow-shared`; this crate re-exports that definition, so no local
 /// change to the struct is required here. The subscription contract's mirror
 /// of `Plan` must be updated in lockstep with `payflow-shared`.
-pub use payflow_shared::Plan;
+pub use payflow_shared::{Plan, PlanChargeTerms};
 
 /// The mutable inputs shared by `create_plan` and `create_plans`.
 ///
@@ -100,6 +100,9 @@ pub enum DataKey {
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
+    PendingAdmin,
 }
 
 /// A single contract upgrade record.
