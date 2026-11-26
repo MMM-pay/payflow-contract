@@ -227,6 +227,9 @@ mod contract {
         /// Returns [`Error::NotInitialized`] if no admin is configured.
         pub fn set_token_allowed(env: Env, token: Address, allowed: bool) -> Result<(), Error> {
             Self::require_admin(&env)?;
+            if allowed && !payflow_common::is_valid_token_address(&env, &token) {
+                return Err(Error::InvalidAddress);
+            }
 
             let key = DataKey::TokenAllowed(token);
             env.storage().persistent().set(&key, &allowed);

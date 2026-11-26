@@ -3635,3 +3635,29 @@ fn emergency_withdraw_requires_admin_auth() {
     assert_eq!(h.vault.reserved(&user, &h.token, &2), 400);
     assert_eq!(h.vault.reserved_total(&user, &h.token), 700);
 }
+
+#[test]
+fn set_token_allowed_rejects_zero_and_self_addresses() {
+    let h = setup();
+    let zero_contract = Address::from_str(
+        &h.env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    );
+    let zero_account = Address::from_str(
+        &h.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    assert_eq!(
+        h.vault.try_set_token_allowed(&zero_contract, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(
+        h.vault.try_set_token_allowed(&zero_account, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(
+        h.vault.try_set_token_allowed(&h.vault.address, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
+}
