@@ -105,6 +105,35 @@ fn create_plan_assigns_sequential_ids() {
     assert_eq!(client.next_plan_id(), 3);
 }
 
+/// The argument vector `create_plan` is invoked with, as the host records it.
+///
+/// `create_plan` takes fourteen arguments, one past the largest tuple
+/// conversion soroban-sdk implements, so the vector is built explicitly.
+fn create_plan_auth_args(
+    env: &Env,
+    merchant: &Address,
+    token: &Address,
+    name: &String,
+    desc: &String,
+) -> Vec<soroban_sdk::Val> {
+    let mut args = Vec::new(env);
+    args.push_back(merchant.into_val(env));
+    args.push_back(token.into_val(env));
+    args.push_back(1_000_i128.into_val(env));
+    args.push_back(604_800_u64.into_val(env));
+    args.push_back(name.into_val(env));
+    args.push_back(desc.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Symbol::new(env, "").into_val(env));
+    args.push_back(String::from_str(env, "").into_val(env));
+    args.push_back(0_u64.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Option::<Address>::None.into_val(env));
+    args.push_back(0_u32.into_val(env));
+    args.push_back(Option::<u32>::None.into_val(env));
+    args
+}
+
 #[test]
 fn create_plan_authorizes_exact_merchant_tree() {
     let env = Env::default();
@@ -121,22 +150,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
         invoke: &MockAuthInvoke {
             contract: &client.address,
             fn_name: "create_plan",
-            args: (
-                &merchant,
-                &token,
-                &1_000_i128,
-                &604_800_u64,
-                &name,
-                &desc,
-                &0_u32,
-                &Symbol::new(&env, ""),
-                &String::from_str(&env, ""),
-                &0_u64,
-                &0_u32,
-                &None::<Address>,
-                &0u32,
-            )
-                .into_val(&env),
+            args: create_plan_auth_args(&env, &merchant, &token, &name, &desc),
             sub_invokes: &[],
         },
     }]);
@@ -164,22 +178,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
                 function: soroban_sdk::testutils::AuthorizedFunction::Contract((
                     client.address.clone(),
                     soroban_sdk::Symbol::new(&env, "create_plan"),
-                    (
-                        &merchant,
-                        &token,
-                        &1_000_i128,
-                        &604_800_u64,
-                        &name,
-                        &desc,
-                        &0_u32,
-                        &Symbol::new(&env, ""),
-                        &String::from_str(&env, ""),
-                        &0_u64,
-                        &0_u32,
-                        &None::<Address>,
-                        &0u32
-                    )
-                        .into_val(&env),
+                    create_plan_auth_args(&env, &merchant, &token, &name, &desc),
                 )),
                 sub_invocations: std::vec![],
             }
@@ -622,6 +621,7 @@ fn plan_charge_terms_agree_with_get_plan_and_charges_paused() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let check = || {
         let plan = client.get_plan(&id);
@@ -3175,6 +3175,7 @@ fn upgrade_preserves_every_stored_value() {
         &500,
         &Some(payout.clone()),
         &42,
+        &None::<u32>,
     );
     let successor = client.create_plan(
         &merchant,
@@ -3190,6 +3191,7 @@ fn upgrade_preserves_every_stored_value() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     client.set_successor(&merchant, &id, &successor);
     client.set_plan_charges_paused(&merchant, &id, &true);
@@ -3277,6 +3279,7 @@ fn upgrade_preserves_every_stored_value() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(next, successor + 1);
 }
@@ -3300,6 +3303,7 @@ fn rejected_upgrade_leaves_stored_values_intact() {
         &0u32,
         &None::<Address>,
         &7,
+        &None::<u32>,
     );
 
     let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
@@ -4683,6 +4687,7 @@ fn plan_registry_call_budgets_stay_within_committed_snapshots() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     measurements.push(measure_call(&env, "create_plan"));
 
@@ -4899,10 +4904,9 @@ fn batch_plan_id_overflow_writes_nothing() {
     assert_eq!(client.merchant_plan_count(&merchant), 0);
 }
 
-
 /// #280: v0.2.0 used the same instance counter and merchant index keys.
 /// Seed those entries directly, as an older deployed contract would have done,
-/// rather than creating them through today's create_plan implementation.
+/// rather than creating them through today's `create_plan` implementation.
 #[test]
 fn legacy_registry_counter_and_index_remain_readable() {
     let (env, client, admin) = setup();
