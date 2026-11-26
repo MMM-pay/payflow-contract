@@ -10,9 +10,47 @@ use soroban_sdk::{
     Address, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
-/// A valid plan-registry wasm used as the `upgrade_wasm` target (#158); the
-/// contract upgrades to a copy of itself to exercise the upgrade mechanism.
+/// The plan-registry wasm used as the `upgrade_wasm` target (#158).
+///
+/// It is a published build, not a rebuild of the working tree, and a new
+/// executable is a blocking finding for the repository's malware scan, so the
+/// fixture only changes when a release ships. Its entrypoints therefore keep
+/// the argument lists they were released with: its `create_plan` stops at
+/// `max_subscribers` (no `retry_window_ledgers`) and it has no `create_plans`.
 const UPGRADE_WASM: &[u8] = include_bytes!("../testdata/payflow_plan_registry.wasm");
+
+/// `create_plan` as the published upgrade target declares it.
+///
+/// After the swap the contract runs the fixture's code, so the call has to
+/// carry the thirteen arguments that build was compiled with rather than the
+/// fourteen of the working tree.
+fn create_plan_on_upgrade_target(
+    env: &Env,
+    contract: &Address,
+    merchant: &Address,
+    token: &Address,
+    amount: i128,
+    period: u64,
+    name: &str,
+) -> u64 {
+    let args = soroban_sdk::vec![
+        env,
+        merchant.into_val(env),
+        token.into_val(env),
+        amount.into_val(env),
+        period.into_val(env),
+        String::from_str(env, name).into_val(env),
+        String::from_str(env, "").into_val(env),
+        0_u32.into_val(env),
+        Symbol::new(env, "").into_val(env),
+        String::from_str(env, "").into_val(env),
+        0_u64.into_val(env),
+        0_u32.into_val(env),
+        Option::<Address>::None.into_val(env),
+        0_u32.into_val(env),
+    ];
+    env.invoke_contract(contract, &Symbol::new(env, "create_plan"), args)
+}
 
 fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
     let env = Env::default();
@@ -3127,22 +3165,16 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     assert_eq!(plan.max_subscribers, 3);
     assert_eq!(client.admin(), admin);
 
-    // The new code still runs: the next plan gets the next id.
-    let next = client.create_plan(
+    // The swapped-in code still runs: the surviving counter hands out the next
+    // id.
+    let next = create_plan_on_upgrade_target(
+        &env,
+        &client.address,
         &merchant,
         &token,
-        &1_000,
-        &604_800,
-        &String::from_str(&env, "Second"),
-        &String::from_str(&env, ""),
-        &0,
-        &Symbol::new(&env, ""),
-        &String::from_str(&env, ""),
-        &0u64,
-        &0u32,
-        &None::<Address>,
-        &0,
-        &None::<u32>,
+        1_000,
+        604_800,
+        "Second",
     );
     assert_eq!(next, id + 1);
 }
@@ -3264,22 +3296,15 @@ fn upgrade_preserves_every_stored_value() {
         );
     });
 
-    // The upgraded code still runs against the existing counter.
-    let next = client.create_plan(
+    // The swapped-in code still runs against the existing counter.
+    let next = create_plan_on_upgrade_target(
+        &env,
+        &client.address,
         &merchant,
         &token,
-        &9_999,
-        &2_592_000,
-        &String::from_str(&env, "Third"),
-        &String::from_str(&env, ""),
-        &0,
-        &Symbol::new(&env, ""),
-        &String::from_str(&env, ""),
-        &0u64,
-        &0u32,
-        &None::<Address>,
-        &0u32,
-        &None::<u32>,
+        9_999,
+        2_592_000,
+        "Third",
     );
     assert_eq!(next, successor + 1);
 }
