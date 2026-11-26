@@ -76,6 +76,8 @@ mod events;
 mod interfaces;
 mod lifecycle;
 #[allow(missing_docs)]
+mod storage_keys;
+#[allow(missing_docs)]
 mod types;
 mod views;
 
