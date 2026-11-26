@@ -383,8 +383,8 @@ pub struct CommittedRevenueChanged {
     pub merchant: Address,
     /// Token the plan is denominated in.
     pub token: Address,
-    /// Previous committed amount per period.
-    pub old_committed: i128,
+    // The previous value is the last new_committed for this plan, or zero
+    // before the first event; do not duplicate it in every event.
     /// New committed amount per period.
     pub new_committed: i128,
     /// Billing period in seconds.
