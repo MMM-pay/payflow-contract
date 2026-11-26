@@ -52,6 +52,10 @@ pub enum DataKey {
     /// Grace window in seconds frozen into a mandate at sign-up (#312).
     /// Missing means zero.
     MandateGracePeriod(u64),
+    /// Ledger-count retry window frozen into a mandate at sign-up (#343).
+    /// Missing means `None`: no extended window before a failure may be
+    /// flagged.
+    MandateRetryWindow(u64),
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,

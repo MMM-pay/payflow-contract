@@ -134,6 +134,10 @@ pub enum Error {
     /// A configured address is the contract itself or otherwise invalid for
     /// this role (#282).
     InvalidAddress = 2047,
+    /// `flag_failed_charge` was called inside the plan's frozen retry window
+    /// (#343). The charge may still succeed, so no failure is recorded until
+    /// the window closes.
+    RetryWindowActive = 2048,
 }
 
 impl From<Error> for ErrorCode {

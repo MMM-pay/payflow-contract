@@ -50,6 +50,10 @@ pub struct PlanParams {
     pub payout: Option<Address>,
     /// Maximum number of simultaneously-open mandates; 0 means unlimited.
     pub max_subscribers: u32,
+    /// Ledgers after a charge falls due during which a failed charge may be
+    /// retried before the mandate is marked failed (#343). `None` disables the
+    /// window. Frozen into each new mandate at sign-up.
+    pub retry_window_ledgers: Option<u32>,
 }
 
 /// A merchant's self-declared profile, shown to subscribers alongside the

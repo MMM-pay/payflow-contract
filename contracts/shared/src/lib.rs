@@ -230,6 +230,11 @@ mod plan {
         /// Maximum number of simultaneously-open mandates the plan accepts; 0
         /// means unlimited. Frozen into the plan, checked on each new sign-up.
         pub max_subscribers: u32,
+        /// Number of ledgers after a charge falls due during which a failed
+        /// charge may be retried before the mandate is marked failed (#343).
+        /// Frozen into each mandate at sign-up. `None` keeps the historical
+        /// behaviour: a failure can be flagged as soon as the charge is due.
+        pub retry_window_ledgers: Option<u32>,
     }
 
     /// The slice of a plan that settling a charge needs, returned by the
