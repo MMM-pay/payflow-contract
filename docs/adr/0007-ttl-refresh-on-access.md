@@ -12,7 +12,8 @@ to call it.
 
 ## Decision
 
-The central read helpers for hot keys extend the TTL as part of the read:
+The central read helpers for hot keys extend the TTL as part of the read (see
+[Storage TTL and Archival](../storage-ttl.md) for the full per-key model):
 
 - `plan-registry::read_plan` for `DataKey::Plan`
 - `subscription::read_mandate_opt` for `DataKey::Mandate`
