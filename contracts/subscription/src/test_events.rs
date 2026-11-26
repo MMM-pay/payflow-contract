@@ -268,8 +268,12 @@ fn committed_revenue_event_excludes_derivable_previous_value() {
     assert!(!encoded.is_empty());
 
     let spec = super::CommittedRevenueChanged::spec_xdr();
-    assert!(!spec.windows(b"old_committed".len()).any(|w| w == b"old_committed"));
-    assert!(spec.windows(b"new_committed".len()).any(|w| w == b"new_committed"));
+    assert!(!spec
+        .windows(b"old_committed".len())
+        .any(|w| w == b"old_committed"));
+    assert!(spec
+        .windows(b"new_committed".len())
+        .any(|w| w == b"new_committed"));
 }
 
 #[test]

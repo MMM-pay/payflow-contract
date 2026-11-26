@@ -69,6 +69,7 @@ declare -A allowlist_plan_registry=(
     [plan_charges_paused]=1
     [plan_paused]=1
     [plan_grace_period]=1
+    [plan_charge_terms]=1  # view: the plan fields a charge settlement needs
     [merchant_plan_count]=1
     [merchant_plans]=1
     [next_plan_id]=1

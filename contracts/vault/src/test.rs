@@ -3682,10 +3682,7 @@ fn legacy_vault_balance_and_subscription_pointer_remain_readable() {
 
     assert_eq!(h.vault.balance(&user, &h.token), 4_321);
     assert_eq!(h.vault.subscription(), h.subscription);
-    assert_eq!(
-        h.vault.balance(&Address::generate(&h.env), &h.token),
-        0
-    );
+    assert_eq!(h.vault.balance(&Address::generate(&h.env), &h.token), 0);
 
     let hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
     let attacker = Address::generate(&h.env);

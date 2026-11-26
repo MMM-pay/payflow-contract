@@ -52,10 +52,6 @@ pub enum DataKey {
     /// Grace window in seconds frozen into a mandate at sign-up (#312).
     /// Missing means zero.
     MandateGracePeriod(u64),
-    /// Ledger-count retry window frozen into a mandate at sign-up (#343).
-    /// Missing means `None`: no extended window before a failure may be
-    /// flagged.
-    MandateRetryWindow(u64),
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
@@ -64,4 +60,15 @@ pub enum DataKey {
     /// cancellations, refunds and vault withdrawals keep working. Missing
     /// means `false`.
     ProtocolPaused,
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
+    PendingAdmin,
+    /// Tombstone marker for mandate IDs that have been deleted (#368). Once
+    /// set, this ID can never be assigned to a new mandate.
+    MandateTombstone(u64),
+    /// Ledger-count retry window frozen into a mandate at sign-up (#343).
+    /// Missing means `None`: no extended window before a failure may be
+    /// flagged. Appended last so the keys above keep their serialized
+    /// variant indices.
+    MandateRetryWindow(u64),
 }
