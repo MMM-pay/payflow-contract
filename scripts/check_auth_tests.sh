@@ -40,7 +40,7 @@ declare -A allowlist_subscription=(
     [first_failed_charge]=1
     [is_in_grace_period]=1
     [mandate_grace_period]=1
-    [version]=1
+    [is_mandate_tombstoned]=1
     [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )
@@ -54,11 +54,11 @@ declare -A allowlist_vault=(
     [can_deposit]=1
     [reserved]=1
     [reserved_total]=1
+    [reserve_cap_bps]=1
     [unreserved_balance]=1
     [can_debit]=1
     [subscription]=1
     [admin]=1
-    [version]=1
     [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )
@@ -73,7 +73,6 @@ declare -A allowlist_plan_registry=(
     [merchant_plans]=1
     [next_plan_id]=1
     [admin]=1
-    [version]=1
     [version]=1
     [__constructor]=1  # constructors don't require auth tests
 )

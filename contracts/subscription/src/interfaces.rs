@@ -4,6 +4,10 @@ use crate::types::{Plan, PlanChargeTerms};
 use soroban_sdk::{contractclient, Address, Env};
 
 /// Read side of `payflow-plan-registry`.
+///
+/// Interface changes to this trait must be listed under `Unreleased` in
+/// CHANGELOG.md and flagged in the PR (`interface-change` label); CI publishes
+/// the generated spec under `spec/` so downstream breakage is caught early.
 #[allow(dead_code)]
 #[contractclient(name = "PlanRegistryClient")]
 pub trait PlanRegistryInterface {
@@ -22,6 +26,10 @@ pub trait PlanRegistryInterface {
 }
 
 /// Debit side of `payflow-vault`.
+///
+/// Interface changes to this trait must be listed under `Unreleased` in
+/// CHANGELOG.md and flagged in the PR (`interface-change` label); CI publishes
+/// the generated spec under `spec/` so downstream breakage is caught early.
 #[allow(dead_code)]
 #[contractclient(name = "VaultClient")]
 pub trait VaultInterface {

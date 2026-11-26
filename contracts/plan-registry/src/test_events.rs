@@ -68,6 +68,7 @@ fn snapshot<const N: usize>(env: &Env, event_name: &str, spec_xdr: [u8; N], even
     }
 }
 
+// PlanCreated events
 #[test]
 fn plan_created_layout() {
     let env = Env::default();
@@ -95,6 +96,7 @@ fn plan_created_layout() {
     );
 }
 
+// PlansCreated events
 #[test]
 fn plans_created_layout() {
     let env = Env::default();
@@ -109,6 +111,7 @@ fn plans_created_layout() {
     );
 }
 
+// PlanStatusChanged events
 #[test]
 fn plan_status_changed_layout() {
     let env = Env::default();
@@ -124,6 +127,7 @@ fn plan_status_changed_layout() {
     );
 }
 
+// PlanChargesPausedChanged events
 #[test]
 fn plan_charges_paused_changed_layout() {
     let env = Env::default();
@@ -139,6 +143,7 @@ fn plan_charges_paused_changed_layout() {
     );
 }
 
+// PlanGracePeriodSet events
 #[test]
 fn plan_grace_period_set_layout() {
     let env = Env::default();
@@ -154,6 +159,7 @@ fn plan_grace_period_set_layout() {
     );
 }
 
+// ProfileUpdated events
 #[test]
 fn profile_updated_layout() {
     let env = Env::default();
@@ -169,6 +175,7 @@ fn profile_updated_layout() {
     );
 }
 
+// PlanSuccessorSet events
 #[test]
 fn plan_successor_set_layout() {
     let env = Env::default();
@@ -180,6 +187,54 @@ fn plan_successor_set_layout() {
             merchant: address(&env),
             plan_id: 7,
             successor_id: 8,
+        },
+    );
+}
+
+// PlanOwnershipProposed events
+#[test]
+fn plan_ownership_proposed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_ownership_proposed",
+        super::PlanOwnershipProposed::spec_xdr(),
+        &super::PlanOwnershipProposed {
+            merchant: address(&env),
+            plan_id: 7,
+            new_owner: address(&env),
+        },
+    );
+}
+
+// PlanTransferred events
+#[test]
+fn plan_transferred_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_transferred",
+        super::PlanTransferred::spec_xdr(),
+        &super::PlanTransferred {
+            merchant: address(&env),
+            plan_id: 7,
+            new_owner: address(&env),
+        },
+    );
+}
+
+// PlanRenamed events
+#[test]
+fn plan_renamed_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "plan_renamed",
+        super::PlanRenamed::spec_xdr(),
+        &super::PlanRenamed {
+            merchant: address(&env),
+            plan_id: 7,
+            name: String::from_str(&env, "New Name"),
         },
     );
 }

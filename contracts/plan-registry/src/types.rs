@@ -100,6 +100,9 @@ pub enum DataKey {
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
+    PendingAdmin,
 }
 
 /// A single contract upgrade record.

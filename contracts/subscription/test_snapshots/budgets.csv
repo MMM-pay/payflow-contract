@@ -1,5 +1,5 @@
 call,cpu_instructions,memory_bytes
-charge_success,1345236,452896
+charge_success,1417299,466338
 charge_missing_auth,31663,25365
-charge_vault_failure,359458,185083
+charge_vault_failure,375501,189239
 simulate_charge,251288,136887

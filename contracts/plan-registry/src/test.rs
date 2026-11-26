@@ -1952,23 +1952,79 @@ fn set_plan_name_requires_the_merchants_auth() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let (env, client, admin) = setup();
     let next = Address::generate(&env);
 
-    client.update_admin(&next);
+    client.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(client.admin(), admin);
+
+    client.accept_admin(&next);
     assert_eq!(client.admin(), next);
-    assert_ne!(client.admin(), admin);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let (env, client, admin) = setup();
     let next = Address::generate(&env);
 
     env.set_auths(&[]);
-    assert!(client.try_update_admin(&next).is_err());
+    assert!(client.try_propose_admin(&next).is_err());
     assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let (env, client, admin) = setup();
+    let next = Address::generate(&env);
+    client.propose_admin(&next);
+
+    env.set_auths(&[]);
+    assert!(client.try_accept_admin(&next).is_err());
+    assert_eq!(client.admin(), admin);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let (env, client, admin) = setup();
+    let attacker = Address::generate(&env);
+
+    assert_eq!(
+        client.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let (env, client, admin) = setup();
+    let next = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.propose_admin(&next);
+
+    assert_eq!(
+        client.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(client.admin(), admin);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let (env, client, _admin) = setup();
+    let next = Address::generate(&env);
+    client.propose_admin(&next);
+    client.accept_admin(&next);
+
+    assert_eq!(
+        client.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(client.admin(), next);
 }
 
 #[test]
@@ -2955,6 +3011,181 @@ fn admin_can_upgrade_and_state_written_before_survives() {
         &0,
     );
     assert_eq!(next, id + 1);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let (env, client, admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let payout = Address::generate(&env);
+    let heir = Address::generate(&env);
+    let pending_admin = Address::generate(&env);
+
+    let name = String::from_str(&env, "Pro Monthly");
+    let description = String::from_str(&env, "Unlimited follow-ups");
+    let terms_uri = String::from_str(&env, "https://example.com/terms");
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &12_345,
+        &604_800,
+        &name,
+        &description,
+        &250,
+        &Symbol::new(&env, "saas"),
+        &terms_uri,
+        &2_000_000_000u64,
+        &500,
+        &Some(payout.clone()),
+        &42,
+    );
+    let successor = client.create_plan(
+        &merchant,
+        &token,
+        &9_999,
+        &2_592_000,
+        &String::from_str(&env, "Basic"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    client.set_successor(&merchant, &id, &successor);
+    client.set_plan_charges_paused(&merchant, &id, &true);
+    client.set_plan_grace_period(&merchant, &id, &86_400);
+    let profile_name = String::from_str(&env, "Acme");
+    let profile_url = String::from_str(&env, "https://acme.example");
+    client.set_profile(&merchant, &profile_name, &profile_url);
+    client.propose_plan_owner(&merchant, &id, &heir);
+    client.propose_admin(&pending_admin);
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    client.upgrade_wasm(&wasm_hash);
+
+    let plan = client.get_plan(&id);
+    assert_eq!(plan.id, id);
+    assert_eq!(plan.merchant, merchant);
+    assert_eq!(plan.payout, payout);
+    assert_eq!(plan.name, name);
+    assert_eq!(plan.description, description);
+    assert_eq!(plan.token, token);
+    assert_eq!(plan.amount, 12_345);
+    assert_eq!(plan.period, 604_800);
+    assert!(plan.active);
+    assert_eq!(plan.category, Symbol::new(&env, "saas"));
+    assert_eq!(plan.keeper_bps, 250);
+    assert_eq!(plan.successor_id, successor);
+    assert_eq!(plan.terms_uri, terms_uri);
+    assert_eq!(plan.referral_bps, 500);
+    assert_eq!(plan.available_until, 2_000_000_000);
+    assert_eq!(plan.max_subscribers, 42);
+
+    let profile = client.profile(&merchant);
+    assert_eq!(profile.merchant, merchant);
+    assert_eq!(profile.name, profile_name);
+    assert_eq!(profile.url, profile_url);
+
+    // Both indexes and the plan-id counter survive with their contents.
+    assert_eq!(client.merchant_plan_count(&merchant), 2);
+    assert_eq!(
+        client.merchant_plans(&merchant, &0, &50),
+        soroban_sdk::vec![&env, id, successor]
+    );
+    assert_eq!(client.token_plan_count(&token), 2);
+    assert_eq!(
+        client.token_plans(&token, &0, &50),
+        soroban_sdk::vec![&env, id, successor]
+    );
+    assert_eq!(client.next_plan_id(), successor + 1);
+    assert_eq!(client.admin(), admin);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    env.as_contract(&client.address, || {
+        let p = env.storage().persistent();
+        assert_eq!(
+            p.get::<_, bool>(&DataKey::PlanChargesPaused(id)),
+            Some(true)
+        );
+        assert_eq!(p.get::<_, u64>(&DataKey::PlanGracePeriod(id)), Some(86_400));
+        assert_eq!(
+            p.get::<_, Address>(&DataKey::PlanOwnerProposal(id)),
+            Some(heir.clone())
+        );
+        assert_eq!(p.get::<_, u32>(&DataKey::PlanIndex(id)), Some(0));
+        assert_eq!(
+            env.storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still runs against the existing counter.
+    let next = client.create_plan(
+        &merchant,
+        &token,
+        &9_999,
+        &2_592_000,
+        &String::from_str(&env, "Third"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    assert_eq!(next, successor + 1);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let (env, client, admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Plan"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &7,
+    );
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(client.get_plan(&id).max_subscribers, 7);
+    assert_eq!(client.next_plan_id(), 2);
+    assert_eq!(client.admin(), admin);
+    assert_eq!(client.upgrade_history().len(), 0);
 }
 
 #[test]
@@ -4172,6 +4403,182 @@ fn plan_listings_follow_paging_and_reflect_status() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-call resource budgets (#250)
+// ---------------------------------------------------------------------------
+
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
+#[test]
+fn plan_registry_call_budgets_stay_within_committed_snapshots() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let mut measurements = std::vec::Vec::new();
+
+    let name = String::from_str(&env, "Budget Plan");
+    let description = String::from_str(&env, "");
+    let category = Symbol::new(&env, "");
+    let terms_uri = String::from_str(&env, "");
+    env.cost_estimate().budget().reset_default();
+    let plan_id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &name,
+        &description,
+        &0,
+        &category,
+        &terms_uri,
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+    measurements.push(measure_call(&env, "create_plan"));
+
+    let plans = soroban_sdk::vec![
+        &env,
+        batch_plan(&env, &token, 1_000, "Batch 1"),
+        batch_plan(&env, &token, 1_100, "Batch 2"),
+        batch_plan(&env, &token, 1_200, "Batch 3"),
+        batch_plan(&env, &token, 1_300, "Batch 4"),
+        batch_plan(&env, &token, 1_400, "Batch 5"),
+        batch_plan(&env, &token, 1_500, "Batch 6"),
+        batch_plan(&env, &token, 1_600, "Batch 7"),
+        batch_plan(&env, &token, 1_700, "Batch 8"),
+        batch_plan(&env, &token, 1_800, "Batch 9"),
+        batch_plan(&env, &token, 1_900, "Batch 10"),
+    ];
+    env.cost_estimate().budget().reset_default();
+    client.create_plans(&merchant, &plans);
+    measurements.push(measure_call(&env, "create_plans_batch_10"));
+
+    env.cost_estimate().budget().reset_default();
+    let _ = client.get_plan(&plan_id);
+    measurements.push(measure_call(&env, "get_plan"));
+
+    env.cost_estimate().budget().reset_default();
+    let _ = client.merchant_plans(&merchant, &0, &10);
+    measurements.push(measure_call(&env, "merchant_plans_page_10"));
+
+    env.cost_estimate().budget().reset_default();
+    client.set_plan_active(&merchant, &plan_id, &false);
+    measurements.push(measure_call(&env, "set_plan_active"));
+
+    assert_within_committed_budgets("plan-registry", &measurements);
+}
+
 // Numeric maximum values (#242)
 // ---------------------------------------------------------------------------
 
