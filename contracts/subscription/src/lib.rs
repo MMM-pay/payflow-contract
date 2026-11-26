@@ -100,6 +100,7 @@ pub use types::{
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
+use payflow_common::{estimated_last_due, next_due_at, prorated_upgrade, split_mandate_fee};
 use soroban_sdk::{
     contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
 };
@@ -690,8 +691,7 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             // A next due date past u64::MAX is a schedule overflow, not an
             // amount overflow (#290).
-            let next_charge = now
-                .checked_add(mandate.period)
+            let next_charge = next_due_at(now, mandate.period)
                 .ok_or(Error::ScheduleOverflow)?;
             let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
                 || (mandate.max_total != 0 && next_total >= mandate.max_total);
@@ -1043,26 +1043,11 @@ mod contract {
                 }
             }
 
-            // The part of the current period that is still ahead of us. A mandate
-            // that was never charged has `next_charge` in the past, so nothing is
-            // left of the current period and nothing is prorated: the old price
-            // was never collected.
-            let remaining = mandate.next_charge.saturating_sub(now).min(old_period);
-
-            // The prorated price difference, truncated towards zero. Truncation
-            // is what rounds in the subscriber's favour: the subscriber pays at
-            // most the exact difference for the time that is left.
-            let difference = plan.amount - old_amount;
-            let charged: i128 = if difference > 0 && old_period > 0 {
-                difference
-                    .checked_mul(i128::from(remaining))
-                    .ok_or(Error::AmountOverflow)?
-                    / i128::from(old_period)
-            } else {
-                // A downgrade collects nothing now: it takes effect at the next
-                // charge and never refunds the difference already paid.
-                0
-            };
+            // Common math clamps the remaining period, charges only positive
+            // upgrades and truncates towards zero in the subscriber's favour.
+            let charged = prorated_upgrade(
+                old_amount, plan.amount, old_period, mandate.next_charge, now,
+            ).ok_or(Error::AmountOverflow)?;
 
             if charged > 0 {
                 // The protocol fee on the difference, at the rate frozen into the
@@ -1861,14 +1846,9 @@ mod contract {
                 return Ok(Some(mandate.last_charge));
             }
 
-            let remaining_periods = u64::from(remaining_charges - 1);
-            let offset = remaining_periods
-                .checked_mul(mandate.period)
-                .ok_or(Error::ScheduleOverflow)?;
-            let estimated_end = mandate
-                .next_charge
-                .checked_add(offset)
-                .ok_or(Error::ScheduleOverflow)?;
+            let estimated_end = estimated_last_due(
+                mandate.next_charge, mandate.period, remaining_charges,
+            ).ok_or(Error::ScheduleOverflow)?;
 
             Ok(Some(estimated_end))
         }
