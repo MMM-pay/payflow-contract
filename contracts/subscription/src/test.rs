@@ -1887,6 +1887,88 @@ fn quote_and_charge_agree_on_plan_charges_paused() {
     );
 }
 
+/// A plan registry deployed before `plan_charge_terms` existed: it serves the
+/// older read calls only, forwarding them to a real registry.
+mod legacy_registry {
+    use super::*;
+    use soroban_sdk::{contract, contractimpl, Symbol};
+
+    #[contract]
+    pub struct LegacyRegistry;
+
+    #[contractimpl]
+    impl LegacyRegistry {
+        pub fn __constructor(env: Env, inner: Address) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "inner"), &inner);
+        }
+
+        pub fn get_plan(env: Env, plan_id: u64) -> Plan {
+            Self::inner(&env).get_plan(&plan_id)
+        }
+
+        pub fn plan_charges_paused(env: Env, plan_id: u64) -> bool {
+            Self::inner(&env).plan_charges_paused(&plan_id)
+        }
+
+        pub fn plan_grace_period(env: Env, plan_id: u64) -> u64 {
+            Self::inner(&env).plan_grace_period(&plan_id)
+        }
+    }
+
+    impl LegacyRegistry {
+        fn inner(env: &Env) -> RegistryClient<'_> {
+            let inner: Address = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(env, "inner"))
+                .unwrap();
+            RegistryClient::new(env, &inner)
+        }
+    }
+}
+
+/// `charge` still works against a registry without `plan_charge_terms`, so
+/// the registry and subscription contracts can be upgraded in either order.
+#[test]
+fn charge_falls_back_when_registry_lacks_plan_charge_terms() {
+    let w = world();
+    let legacy = w.env.register(
+        legacy_registry::LegacyRegistry,
+        (w.registry.address.clone(),),
+    );
+    let admin = Address::generate(&w.env);
+    let sub_id = w.env.register(
+        Subscription,
+        (
+            admin,
+            legacy,
+            w.vault.address.clone(),
+            FEE_BPS,
+            w.fee_to.clone(),
+        ),
+    );
+    let sub = SubscriptionClient::new(&w.env, &sub_id);
+    w.vault.set_subscription(&sub_id);
+
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let id = sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    let result = sub.charge(&w.keeper, &id);
+    assert_eq!(result.charges_made, 1);
+    assert_eq!(sub.plan_committed_revenue(&plan_id), PRICE);
+
+    w.registry
+        .set_plan_charges_paused(&w.merchant, &plan_id, &true);
+    w.advance(MONTH);
+    assert_eq!(
+        sub.try_charge(&w.keeper, &id),
+        Err(Ok(Error::PlanChargesPaused))
+    );
+}
+
 /// Quote chargeable=false when mandate paused; charge fails with `MandateNotActive`.
 #[test]
 fn quote_and_charge_agree_on_mandate_paused() {

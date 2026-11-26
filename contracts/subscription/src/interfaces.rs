@@ -1,6 +1,6 @@
 //! Cross-contract interfaces for plan registry and vault clients.
 
-use crate::types::Plan;
+use crate::types::{Plan, PlanChargeTerms};
 use soroban_sdk::{contractclient, Address, Env};
 
 /// Read side of `payflow-plan-registry`.
@@ -19,6 +19,10 @@ pub trait PlanRegistryInterface {
 
     /// Grace window for new mandates against this plan (#312).
     fn plan_grace_period(env: Env, plan_id: u64) -> u64;
+
+    /// Merchant, token, period and charges-paused flag in one call, so a
+    /// settlement reads the plan once.
+    fn plan_charge_terms(env: Env, plan_id: u64) -> PlanChargeTerms;
 }
 
 /// Debit side of `payflow-vault`.
