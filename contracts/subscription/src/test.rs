@@ -12,7 +12,7 @@ use payflow_plan_registry::{PlanRegistry, PlanRegistryClient as RegistryClient};
 use payflow_test_token::{TestToken, TestTokenClient};
 use payflow_vault::{Vault, VaultClient as RealVaultClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
     xdr::{ContractEventBody, Limits, ReadXdr, ScMap, ScSymbol, ScVal, WriteXdr},
     Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal,
@@ -277,6 +277,8 @@ fn property_long_running_subscription_regular() {
         .sub
         .subscribe(&subscriber, &plan_id, &3, &500_000, &None::<Address>);
 
+    let second_user = w.subscriber(100_000);
+    let next_id = mandate_id + 1;
     let second_id = w
         .sub
         .subscribe(&second_user, &plan_id, &0, &0, &None::<Address>);
@@ -1007,7 +1009,7 @@ fn property_long_running_subscription_failed_payments() {
         subscriber_balance, 0,
         "Subscriber should have no remaining balance"
     );
-    assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
+    assert_eq!(w.sub.get_mandate(&mandate_id).status, MandateStatus::Active);
 }
 
 #[test]
@@ -2421,7 +2423,7 @@ fn subscriber_mandate_summaries_reflects_status() {
             MandateStatus::Active => active_count += 1,
             MandateStatus::Paused => paused_count += 1,
             MandateStatus::Cancelled => cancelled_count += 1,
-            MandateStatus::Completed => {}
+            MandateStatus::Completed | MandateStatus::PastDue => {}
         }
     }
     assert_eq!(active_count, 1);
@@ -7864,6 +7866,113 @@ fn fresh_and_missing_mandates_are_untouched_by_access() {
     );
 }
 
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
 #[test]
 fn subscription_call_budgets_stay_within_committed_snapshots() {
     let mut measurements = std::vec::Vec::new();
@@ -9867,4 +9976,339 @@ fn subscribe_with_id_respects_protocol_paused_while_delete_mandate_works() {
     // Deletion of an already-closed mandate keeps working during protocol pause.
     w.sub.delete_mandate(&user, &id);
     assert!(w.sub.is_mandate_tombstoned(&id));
+}
+
+// ── Issue #37: merchant discounts ────────────────────────────────────────────
+
+#[test]
+fn attach_discount_reduces_charge_amount() {
+    let w = world();
+    let plan_id = w.plan();
+    // Fund enough for three charges.
+    let user = w.subscriber(PRICE * 3);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // 10% discount (1000 bps) for 2 charges.
+    w.sub.attach_discount(&w.merchant, &id, &1_000u32, &2u32);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.discount_bps, 1_000);
+    assert_eq!(mandate.discount_charges, 2);
+
+    let merchant_before = w.vault.balance(&w.merchant, &w.token);
+
+    // First discounted charge: 10% off PRICE.
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let expected_net = PRICE - (PRICE * 1_000 / BPS_DENOMINATOR as i128);
+    let merchant_after = w.vault.balance(&w.merchant, &w.token);
+
+    // Merchant received roughly (expected_net * (1 - FEE_BPS/10000)).
+    let fee_bps_i128 = i128::from(FEE_BPS);
+    let expected_fee = expected_net * fee_bps_i128 / BPS_DENOMINATOR as i128;
+    let expected_merchant = expected_net - expected_fee;
+    assert_eq!(merchant_after - merchant_before, expected_merchant);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.discount_charges, 1, "first charge decrements discount_charges");
+    assert_eq!(mandate.discount_bps, 1_000, "bps kept until exhausted");
+}
+
+#[test]
+fn discount_expires_after_n_charges() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 4);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // 500 bps (5%) discount for exactly 1 charge.
+    w.sub.attach_discount(&w.merchant, &id, &500u32, &1u32);
+
+    // Charge 1 — discounted.
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.discount_charges, 0, "discount exhausted");
+    assert_eq!(mandate.discount_bps, 0, "bps cleared when charges hit zero");
+
+    let merchant_before = w.vault.balance(&w.merchant, &w.token);
+
+    // Charge 2 — full price.
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    let merchant_after = w.vault.balance(&w.merchant, &w.token);
+    let fee_bps_i128 = i128::from(FEE_BPS);
+    let expected_fee = PRICE * fee_bps_i128 / BPS_DENOMINATOR as i128;
+    let expected_merchant = PRICE - expected_fee;
+    assert_eq!(
+        merchant_after - merchant_before,
+        expected_merchant,
+        "second charge at full price"
+    );
+}
+
+#[test]
+fn discount_cannot_exceed_full_price() {
+    let w = world();
+    let plan_id = w.plan();
+    // 10_000 bps is exactly 100% — not allowed; must be < 10_000.
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    assert_eq!(
+        w.sub
+            .try_attach_discount(&w.merchant, &id, &10_000u32, &1u32),
+        Err(Ok(Error::InvalidDiscount))
+    );
+    // 9_999 bps is allowed.
+    w.sub.attach_discount(&w.merchant, &id, &9_999u32, &1u32);
+}
+
+#[test]
+fn attach_discount_requires_merchant_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let impostor = Address::generate(&w.env);
+
+    // impostor is not the mandate's merchant.
+    assert_eq!(
+        w.sub
+            .try_attach_discount(&impostor, &id, &500u32, &1u32),
+        Err(Ok(Error::NotMerchant))
+    );
+}
+
+// ── Issue #34: past-due lifecycle ─────────────────────────────────────────────
+
+#[test]
+fn mark_past_due_transitions_mandate() {
+    let w = world();
+    let plan_id = w.plan();
+    // Fund less than one charge so vault can't cover.
+    let user = w.subscriber(1); // 1 stroop — not enough for PRICE
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Drain most of the vault so it can't cover PRICE.
+    // subscriber was given 1 in vault by w.subscriber().
+    // Withdraw all but nothing — vault balance is already just 1 stroop.
+
+    // Advance past due date.
+    w.advance(MONTH);
+
+    // mark_past_due must succeed now that vault can't cover the charge.
+    w.sub.mark_past_due(&id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert!(
+        matches!(mandate.status, MandateStatus::PastDue),
+        "mandate should be PastDue"
+    );
+}
+
+#[test]
+fn mark_past_due_fails_when_vault_can_cover() {
+    let w = world();
+    let plan_id = w.plan();
+    // Well-funded subscriber.
+    let user = w.subscriber(PRICE * 5);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.advance(MONTH);
+
+    // Vault CAN cover the charge, so mark_past_due should fail.
+    assert_eq!(
+        w.sub.try_mark_past_due(&id),
+        Err(Ok(Error::NotPastDue))
+    );
+}
+
+#[test]
+fn mark_past_due_fails_when_not_due() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(1); // can't cover, but not due yet
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Don't advance time — still within first period.
+    assert_eq!(
+        w.sub.try_mark_past_due(&id),
+        Err(Ok(Error::NotPastDue))
+    );
+}
+
+#[test]
+fn successful_charge_restores_active_from_past_due() {
+    let w = world();
+    let plan_id = w.plan();
+    // Start with minimal vault balance — can't cover.
+    let user = w.subscriber(1);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.advance(MONTH);
+    w.sub.mark_past_due(&id);
+
+    // Now top up so vault can cover.
+    w.minter.mint(&user, &(PRICE * 2));
+    w.vault.deposit(&user, &w.token, &(PRICE * 2));
+
+    // charge should succeed and restore Active.
+    w.sub.charge(&w.keeper, &id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert!(
+        matches!(mandate.status, MandateStatus::Active),
+        "mandate should be Active after successful charge"
+    );
+}
+
+#[test]
+fn expire_past_due_cancels_after_grace_period() {
+    let w = world();
+    let plan_id = w.plan();
+
+    // Set a 7-day grace period on the plan BEFORE subscribing.
+    w.registry
+        .set_plan_grace_period(&w.merchant, &plan_id, &WEEK);
+
+    let user = w.subscriber(1); // can't cover charge
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Mark past due.
+    w.advance(MONTH);
+    w.sub.mark_past_due(&id);
+
+    // Before grace period: expire_past_due must fail.
+    assert_eq!(
+        w.sub.try_expire_past_due(&id),
+        Err(Ok(Error::NotPastDue))
+    );
+
+    // Advance past grace period.
+    w.advance(WEEK + 1);
+    w.sub.expire_past_due(&id);
+
+    let mandate = w.sub.get_mandate(&id);
+    assert!(
+        matches!(mandate.status, MandateStatus::Cancelled),
+        "mandate should be Cancelled after expire"
+    );
+}
+
+#[test]
+fn expire_past_due_fails_without_grace_period() {
+    let w = world();
+    // Plan with no grace period.
+    let plan_id = w.plan();
+    let user = w.subscriber(1); // can't cover
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.advance(MONTH);
+    w.sub.mark_past_due(&id);
+    w.advance(WEEK);
+
+    // Grace period is 0 so expire_past_due always fails.
+    assert_eq!(
+        w.sub.try_expire_past_due(&id),
+        Err(Ok(Error::NotPastDue))
+    );
+}
+
+// ── Issue #35: metered billing ────────────────────────────────────────────────
+
+#[test]
+fn report_usage_stored_and_readable() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Before any report, pending_usage is 0.
+    assert_eq!(w.sub.pending_usage(&id), 0);
+
+    // Merchant reports usage of 5_000 (< PRICE, so within cap).
+    w.sub.report_usage(&w.merchant, &id, &5_000i128);
+
+    assert_eq!(w.sub.pending_usage(&id), 5_000);
+}
+
+#[test]
+fn report_usage_clears_after_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.report_usage(&w.merchant, &id, &5_000i128);
+
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    // pending_usage is cleared after charge.
+    assert_eq!(w.sub.pending_usage(&id), 0);
+}
+
+#[test]
+fn report_usage_twice_in_same_period_fails() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub.report_usage(&w.merchant, &id, &3_000i128);
+
+    assert_eq!(
+        w.sub.try_report_usage(&w.merchant, &id, &2_000i128),
+        Err(Ok(Error::UsageAlreadyReported))
+    );
+}
+
+#[test]
+fn report_usage_exceeding_cap_fails() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // For non-metered mandates, cap is mandate.amount (= PRICE).
+    assert_eq!(
+        w.sub
+            .try_report_usage(&w.merchant, &id, &(PRICE + 1)),
+        Err(Ok(Error::UsageExceedsMaxAmount))
+    );
+}
+
+#[test]
+fn report_usage_requires_merchant_auth() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 2);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let impostor = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub.try_report_usage(&impostor, &id, &1_000i128),
+        Err(Ok(Error::UsageNotForMerchant))
+    );
+}
+
+#[test]
+fn report_usage_can_be_reported_again_after_charge() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(PRICE * 3);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Period 1: report then charge.
+    w.sub.report_usage(&w.merchant, &id, &4_000i128);
+    w.advance(MONTH);
+    w.sub.charge(&w.keeper, &id);
+
+    // Period 2: report should work again (key was cleared by charge).
+    w.sub.report_usage(&w.merchant, &id, &6_000i128);
+    assert_eq!(w.sub.pending_usage(&id), 6_000);
 }

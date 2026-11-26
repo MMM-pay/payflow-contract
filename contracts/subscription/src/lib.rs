@@ -90,10 +90,10 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged,
-    MandateCompleted, MandateDeleted, MandateEnded, MandateTransferred, MandateUpdated,
-    MaxChargesChanged, PauseChanged, ProtocolPauseChanged, ReferralPaid, Refunded, SeatsChanged,
-    Subscribed, Upgraded,
+    Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, DiscountAttached,
+    FeeChanged, MandateCompleted, MandateDeleted, MandateEnded, MandateTransferred, MandateUpdated,
+    MarkedPastDue, MaxChargesChanged, PastDueExpired, PauseChanged, ProtocolPauseChanged,
+    ReferralPaid, Refunded, SeatsChanged, Subscribed, Upgraded, UsageReported,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
@@ -102,7 +102,6 @@ pub use types::{
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
-use payflow_common::{estimated_last_due, next_due_at, prorated_upgrade, split_mandate_fee};
 use soroban_sdk::{
     contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
 };
@@ -170,15 +169,16 @@ mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
         ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
-        ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
-        MandateDeleted, MandateEnded, MandateStatus, MandateSummary, MandateTransferred,
-        MandateUpdated, MaxChargesChanged, PauseChanged, Plan, PlanChargeTerms, PlanRegistryClient,
-        ProtocolPauseChanged, Refunded, SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded,
+        ContractUpgraded, DataKey, DiscountAttached, Env, Error, EstimatedEnd, FeeChanged,
+        Mandate, MandateCompleted, MandateDeleted, MandateEnded, MandateStatus, MandateSummary,
+        MandateTransferred, MandateUpdated, MarkedPastDue, MaxChargesChanged, PastDueExpired,
+        PauseChanged, Plan, PlanChargeTerms, PlanRegistryClient, ProtocolPauseChanged, ReferralPaid,
+        Refunded, SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, UsageReported,
         VaultClient, Vec, BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD,
         MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS,
         MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
-    use payflow_common::{load_instance_or_err, load_or_err};
+    use payflow_common::{estimated_last_due, load_instance_or_err, load_or_err, next_due_at, prorated_upgrade};
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -545,6 +545,9 @@ mod contract {
                 referrer: referrer.clone(),
                 referral_bps,
                 status: MandateStatus::Active,
+                discount_bps: 0,
+                discount_charges: 0,
+                max_amount: 0,
             };
 
             Self::write_mandate(&env, &mandate);
@@ -669,12 +672,17 @@ mod contract {
             if mandate.max_charges != 0 && mandate.charges_made >= mandate.max_charges {
                 return Err(Error::MaxChargesReached);
             }
+
+            // Determine the effective charge amount, applying metering (#35)
+            // and discount (#37) before the total-spend cap check.
+            let charge_amount = Self::effective_charge_amount(&env, &mandate);
+
             // A charge that would cross the total-spend cap is not settled at
             // all: a partial debit would bill the subscriber for something the
             // merchant never agreed to deliver.
             let next_total = mandate
                 .total_spent
-                .checked_add(mandate.amount)
+                .checked_add(charge_amount)
                 .ok_or(Error::AmountOverflow)?;
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
@@ -686,7 +694,7 @@ mod contract {
                 return Err(Error::PlanChargesPaused);
             }
 
-            let (fee, tip, referral, merchant_amount) = super::charge::split(&mandate)?;
+            let (fee, tip, referral, merchant_amount) = super::charge::split_amount(&mandate, charge_amount)?;
             let charges_made = mandate
                 .charges_made
                 .checked_add(1)
@@ -735,6 +743,27 @@ mod contract {
                 mandate.status = MandateStatus::Active;
                 mandate.paused_until = 0;
             }
+
+            // A successful charge on a past-due mandate restores it to Active (#34).
+            if mandate.status == MandateStatus::PastDue {
+                mandate.status = MandateStatus::Active;
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::PastDueSince(mandate_id));
+            }
+
+            // Consume one discount period (#37).
+            if mandate.discount_charges > 0 {
+                mandate.discount_charges -= 1;
+                if mandate.discount_charges == 0 {
+                    mandate.discount_bps = 0;
+                }
+            }
+
+            // Clear reported usage after charge (#35).
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PendingUsage(mandate_id));
 
             mandate.charges_made = charges_made;
             mandate.total_spent = next_total;
@@ -2477,6 +2506,254 @@ mod contract {
         pub fn vault(env: Env) -> Result<Address, Error> {
             Self::cfg_address(&env, DataKey::Vault)
         }
+
+        // ── Issue #37: Merchant discounts ────────────────────────────────────
+
+        /// Attach a discount to an open mandate (#37).
+        ///
+        /// The discount lowers the charge amount for the next `discount_charges`
+        /// billing periods. `discount_bps` is capped at 9_999 so the subscriber
+        /// always pays at least one stroop; a larger value is rejected with
+        /// [`Error::InvalidDiscount`]. Discounts never increase the price: if
+        /// a future `discount_bps` would exceed the mandate's current discount,
+        /// the call succeeds and the lower discount takes effect. Setting both
+        /// fields to 0 clears any active discount immediately.
+        ///
+        /// # Auth
+        /// Requires authorization from the mandate's merchant.
+        pub fn attach_discount(
+            env: Env,
+            merchant: Address,
+            mandate_id: u64,
+            discount_bps: u32,
+            discount_charges: u32,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+
+            if discount_bps >= BPS_DENOMINATOR as u32 {
+                return Err(Error::InvalidDiscount);
+            }
+
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.merchant != merchant {
+                return Err(Error::NotMerchant);
+            }
+            if !matches!(
+                mandate.status,
+                MandateStatus::Active | MandateStatus::Paused | MandateStatus::PastDue
+            ) {
+                return Err(Error::MandateNotActive);
+            }
+
+            mandate.discount_bps = discount_bps;
+            mandate.discount_charges = discount_charges;
+            Self::write_mandate(&env, &mandate);
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            DiscountAttached {
+                mandate_id,
+                merchant,
+                discount_bps,
+                discount_charges,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
+        // ── Issue #34: Past-due lifecycle ────────────────────────────────────
+
+        /// Mark a due mandate as past due when the subscriber's vault balance is
+        /// too low to settle it (#34).
+        ///
+        /// Any caller may invoke this. The mandate must be due (`now >= next_charge`)
+        /// and the vault must be unable to cover the charge (balance < amount).
+        /// On success the mandate transitions to `PastDue` and the timestamp is
+        /// recorded. A subsequent successful `charge` restores `Active`.
+        pub fn mark_past_due(env: Env, mandate_id: u64) -> Result<(), Error> {
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+
+            if !matches!(mandate.status, MandateStatus::Active | MandateStatus::Paused) {
+                return Err(Error::NotPastDue);
+            }
+
+            let now = env.ledger().timestamp();
+            if !super::lifecycle::active_at(&mandate, now) {
+                return Err(Error::NotPastDue);
+            }
+            if now < mandate.next_charge {
+                return Err(Error::NotPastDue);
+            }
+
+            // Verify the vault cannot currently cover the charge.
+            let vault_addr: Address = Self::cfg_address(&env, DataKey::Vault)?;
+            let vault = VaultClient::new(&env, &vault_addr);
+            let charge_amount = Self::effective_charge_amount(&env, &mandate);
+            if vault.can_debit(&mandate.subscriber, &mandate.token, &mandate_id, &charge_amount) {
+                return Err(Error::NotPastDue);
+            }
+
+            mandate.status = MandateStatus::PastDue;
+            Self::write_mandate(&env, &mandate);
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::PastDueSince(mandate_id), &now);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::PastDueSince(mandate_id), PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            MarkedPastDue {
+                mandate_id,
+                merchant: mandate.merchant,
+                subscriber: mandate.subscriber,
+                past_due_since: now,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
+        /// Cancel a past-due mandate after the merchant-set grace period has
+        /// elapsed (#34).
+        ///
+        /// Any caller may invoke this. Fails if the mandate is not `PastDue` or
+        /// if the grace period has not yet elapsed.
+        pub fn expire_past_due(env: Env, mandate_id: u64) -> Result<(), Error> {
+            let mut mandate = Self::read_mandate(&env, mandate_id)?;
+
+            if mandate.status != MandateStatus::PastDue {
+                return Err(Error::NotPastDue);
+            }
+
+            let past_due_since: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PastDueSince(mandate_id))
+                .unwrap_or(0);
+
+            let grace_period = env
+                .storage()
+                .persistent()
+                .get::<_, u64>(&DataKey::MandateGracePeriod(mandate_id))
+                .unwrap_or(0);
+
+            let now = env.ledger().timestamp();
+            if grace_period == 0 || now < past_due_since.saturating_add(grace_period) {
+                return Err(Error::NotPastDue);
+            }
+
+            mandate.status = MandateStatus::Cancelled;
+            Self::write_mandate(&env, &mandate);
+            Self::plan_open_dec(&env, mandate.plan_id);
+
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PastDueSince(mandate_id));
+
+            MandateUpdated {
+                mandate_id,
+                mandate: mandate.clone(),
+            }
+            .publish(&env);
+
+            PastDueExpired {
+                mandate_id,
+                subscriber: mandate.subscriber.clone(),
+                past_due_since,
+            }
+            .publish(&env);
+
+            Cancelled {
+                mandate_id,
+                subscriber: mandate.subscriber,
+                charges_made: mandate.charges_made,
+                reason: CANCEL_REASON_NONE,
+            }
+            .publish(&env);
+
+            Self::recompute_committed_revenue(&env, mandate.plan_id);
+            Ok(())
+        }
+
+        // ── Issue #35: Metered billing ───────────────────────────────────────
+
+        /// Enable metered billing for a mandate by setting its per-period ceiling
+        /// and report actual usage for the current billing period (#35).
+        ///
+        /// Only the mandate's merchant may call this. `amount` must be at most
+        /// `mandate.max_amount` when metering is enabled, or at most
+        /// `mandate.amount` when it is not (which effectively enables metering).
+        /// Only one report is accepted per period; a second call before the next
+        /// charge fails with [`Error::UsageAlreadyReported`].
+        pub fn report_usage(
+            env: Env,
+            merchant: Address,
+            mandate_id: u64,
+            amount: i128,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.merchant != merchant {
+                return Err(Error::UsageNotForMerchant);
+            }
+            if !matches!(
+                mandate.status,
+                MandateStatus::Active | MandateStatus::Paused | MandateStatus::PastDue
+            ) {
+                return Err(Error::MandateNotActive);
+            }
+
+            let cap = if mandate.max_amount > 0 {
+                mandate.max_amount
+            } else {
+                mandate.amount
+            };
+            if amount < 0 || amount > cap {
+                return Err(Error::UsageExceedsMaxAmount);
+            }
+
+            let usage_key = DataKey::PendingUsage(mandate_id);
+            if env.storage().persistent().has(&usage_key) {
+                return Err(Error::UsageAlreadyReported);
+            }
+
+            env.storage().persistent().set(&usage_key, &amount);
+            env.storage()
+                .persistent()
+                .extend_ttl(&usage_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            UsageReported {
+                mandate_id,
+                merchant,
+                amount,
+            }
+            .publish(&env);
+
+            Ok(())
+        }
+
+        /// Pending metered usage for `mandate_id` for the current billing
+        /// period, as reported by the merchant (#35). Returns 0 when no usage
+        /// has been reported yet.
+        pub fn pending_usage(env: Env, mandate_id: u64) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::PendingUsage(mandate_id))
+                .unwrap_or(0)
+        }
     }
 
     impl Subscription {
@@ -2598,6 +2875,28 @@ mod contract {
 
         fn has_mandate(env: &Env, id: u64) -> bool {
             env.storage().persistent().has(&DataKey::Mandate(id))
+        }
+
+        /// Effective charge amount for this mandate, applying metering (#35)
+        /// and discount (#37). Used by both `charge` and `mark_past_due`.
+        fn effective_charge_amount(env: &Env, mandate: &Mandate) -> i128 {
+            let base = if mandate.max_amount > 0 {
+                // Metered mandate: use reported usage, or 0 if none reported yet.
+                env.storage()
+                    .persistent()
+                    .get::<_, i128>(&DataKey::PendingUsage(mandate.id))
+                    .unwrap_or(0)
+            } else {
+                mandate.amount
+            };
+
+            if mandate.discount_charges > 0 && mandate.discount_bps > 0 {
+                base.saturating_sub(
+                    base.saturating_mul(i128::from(mandate.discount_bps)) / BPS_DENOMINATOR,
+                )
+            } else {
+                base
+            }
         }
 
         fn is_tombstoned(env: &Env, id: u64) -> bool {

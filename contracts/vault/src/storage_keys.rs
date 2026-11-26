@@ -41,4 +41,12 @@ pub enum DataKey {
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
+    /// Proposed new admin address awaiting acceptance (#238).
+    PendingAdmin,
+    /// Ordered list of mandate IDs that have a reserve for (user, token).
+    /// Used by `emergency_withdraw` to clear all reserves in one pass.
+    ReservedMandates(Address, Address),
+    /// Reserve cap in basis points, set at construction (#348). Absent means
+    /// the contract was deployed before reserve caps were introduced.
+    ReserveCapBps,
 }

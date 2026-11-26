@@ -28,6 +28,7 @@
 //! | `debit` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `debit_split` | 1 (Subscription) | 0 | 2 (Balance, SpendLimit/Window) | 2 (Balance, SpendWindow) | Subscription only, extends persistent TTLs |
 //! | `balance` | 0 | 0 | 1 (Balance) | 0 | |
+//! | `balances` | 0 | 0 | 1–20 (Balance) | 0 | At most 20 tokens; fails with TooManyTokens over cap |
 //! | `allowlist_enabled` | 1 (AllowlistEnabled) | 0 | 0 | 0 | |
 //! | `token_allowed` | 0 | 0 | 1 (TokenAllowed) | 0 | |
 //! | `can_deposit` | 1 (AllowlistEnabled) | 0 | 1 (TokenAllowed) | 0 | |
@@ -72,7 +73,7 @@ pub use events::{
 pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow, UpgradeRecord};
 
 use soroban_sdk::{
-    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String,
+    contract, contractimpl, token, Address, BytesN, ContractExecutable, Env, String, Vec,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -100,6 +101,10 @@ pub const VAULT_OPERATION_WINDOW_SECS: u64 = 60;
 /// rewrite the balance entry and spam events.
 pub const MAX_VAULT_OPERATIONS_PER_WINDOW: u32 = 8;
 
+/// Maximum number of tokens accepted in a single `balances` call (#38).
+/// Keeps the read path bounded to a predictable number of storage lookups.
+pub const MAX_BALANCES_PER_CALL: u32 = 20;
+
 /// Largest share of a subscriber's balance that may be earmarked as reserves,
 /// in basis points. A subscriber may reserve for each of their mandates, so
 /// without a ceiling many open mandates could lock the whole vault and leave
@@ -115,9 +120,9 @@ mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractUpgraded,
         DataKey, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, Env, Error,
-        OperationWindow, ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw,
+        OperationWindow, ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Vec, Withdraw,
         WithdrawTo, BPS_DENOMINATOR, DEFAULT_RESERVE_CAP_BPS, INSTANCE_BUMP, INSTANCE_THRESHOLD,
-        MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
+        MAX_BALANCES_PER_CALL, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
         VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
     use payflow_common::load_instance_or_err;
@@ -832,6 +837,20 @@ mod contract {
         /// not. See `unreserved_balance` for the part outside every reserve.
         pub fn balance(env: Env, user: Address, token: Address) -> i128 {
             Self::read_balance(&env, &user, &token)
+        }
+
+        /// Balances of `user` for each token in `tokens`, in the same order as
+        /// `tokens`. Missing entries are returned as 0. Fails with
+        /// `TooManyTokens` when `tokens` contains more than 20 entries (#38).
+        pub fn balances(env: Env, user: Address, tokens: Vec<Address>) -> Result<Vec<i128>, Error> {
+            if tokens.len() > MAX_BALANCES_PER_CALL {
+                return Err(Error::TooManyTokens);
+            }
+            let mut out = Vec::new(&env);
+            for token in tokens.iter() {
+                out.push_back(Self::read_balance(&env, &user, &token));
+            }
+            Ok(out)
         }
 
         /// Whether the token allowlist is enforced. Off unless the admin turned it

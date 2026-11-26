@@ -37,6 +37,9 @@ pub enum MandateStatus {
     Cancelled,
     /// Reached `max_charges` or `max_total`. Irreversible.
     Completed,
+    /// Due but vault balance insufficient; pending cancellation (#34).
+    /// A successful `charge` while in this state restores `Active`.
+    PastDue,
 }
 
 /// A standing authorization from a subscriber to a merchant, bounded in
@@ -111,6 +114,19 @@ pub struct Mandate {
     pub referral_bps: u32,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
+    /// Discount on the mandate's `amount` in basis points, set by the merchant.
+    /// A `discount_bps` of 1_000 means the subscriber pays 90% of the normal
+    /// price. 0 means no discount is active. Discounts can only lower the price.
+    pub discount_bps: u32,
+    /// Number of remaining charges for which the discount still applies. After
+    /// each charged period the counter decrements; at 0 the full `amount` is
+    /// restored. 0 means no discount is active.
+    pub discount_charges: u32,
+    /// Maximum metered amount per billing period (#35). 0 means this is a
+    /// standard (non-metered) mandate that always charges the fixed `amount`.
+    /// When non-zero, the merchant reports actual usage each period via
+    /// `report_usage`, and the charge takes that reported amount instead.
+    pub max_amount: i128,
 }
 
 /// Read-only preview of what `charge` would pay right now.

@@ -60,4 +60,15 @@ pub enum DataKey {
     /// cancellations, refunds and vault withdrawals keep working. Missing
     /// means `false`.
     ProtocolPaused,
+    /// Proposed new admin address awaiting acceptance (#238).
+    PendingAdmin,
+    /// Marks a mandate as deleted. `true` means the mandate has been
+    /// tombstoned and must not be re-opened. Used to prevent ID reuse.
+    MandateTombstone(u64),
+    /// Unix seconds when a mandate was first flagged as past due (#34).
+    /// Present only while the mandate is in the `PastDue` state.
+    PastDueSince(u64),
+    /// Metered usage amount reported by the merchant for the current billing
+    /// period of a mandate (#35). Absent means no usage has been reported yet.
+    PendingUsage(u64),
 }

@@ -134,6 +134,24 @@ pub enum Error {
     /// A configured address is the contract itself or otherwise invalid for
     /// this role (#282).
     InvalidAddress = 2047,
+    /// A `discount_bps` of 10_000 or greater would make the charge amount zero
+    /// or negative, which is not a valid price (#37).
+    InvalidDiscount = 2048,
+    /// A mandate has entered the `PastDue` lifecycle state: it has missed a
+    /// charge and the subscriber's vault balance is too low to settle it (#34).
+    MandatePastDue = 2049,
+    /// `mark_past_due` was called on a mandate that is not currently due, or
+    /// whose vault balance is sufficient to cover the charge (#34).
+    NotPastDue = 2050,
+    /// A mandate was submitted for `report_usage` but it does not belong to
+    /// the calling merchant (#35).
+    UsageNotForMerchant = 2051,
+    /// `report_usage` was called with an amount that exceeds the mandate's
+    /// `max_amount` ceiling set at subscription time (#35).
+    UsageExceedsMaxAmount = 2052,
+    /// `report_usage` was called more than once in the same billing period for
+    /// this mandate, which is not allowed (#35).
+    UsageAlreadyReported = 2053,
 }
 
 impl From<Error> for ErrorCode {

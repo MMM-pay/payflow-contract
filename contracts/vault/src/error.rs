@@ -73,6 +73,8 @@ pub enum Error {
     /// A configured address is the contract itself or otherwise invalid for
     /// this role (#282).
     InvalidAddress = 3022,
+    /// `balances` was given more than 20 tokens in a single call (#38).
+    TooManyTokens = 3023,
 }
 
 impl From<Error> for ErrorCode {
