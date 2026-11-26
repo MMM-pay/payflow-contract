@@ -4988,8 +4988,16 @@ fn referral_share_is_paid_to_the_referrer() {
 
     // The referrer and its rate are frozen into the mandate.
     let m = w.sub.get_mandate(&id);
-    assert_eq!(m.referrer, Some(referrer));
+    assert_eq!(m.referrer, Some(referrer.clone()));
     assert_eq!(m.referral_bps, REFERRAL_BPS);
+
+    let referral_event = event_by_topic(&w.env, "referral_paid");
+    assert!(referral_event.is_some(), "ReferralPaid event must be emitted on charge");
+    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(referral));
+    assert_eq!(
+        event_field_address(&w.env, "referral_paid", "referrer"),
+        Some(referrer)
+    );
 }
 
 #[test]
@@ -5006,6 +5014,7 @@ fn subscribing_without_a_referrer_pays_no_referral() {
     assert_eq!(w.token_client.balance(&referrer), 0);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - fee);
     assert_eq!(w.sub.get_mandate(&id).referrer, None);
+    assert!(event_by_topic(&w.env, "referral_paid").is_none());
 }
 
 #[test]
@@ -5024,6 +5033,7 @@ fn zero_referral_bps_disables_the_referral() {
     assert_eq!(w.token_client.balance(&referrer), 0);
     assert_eq!(w.token_client.balance(&w.merchant), PRICE - fee);
     assert_eq!(w.sub.get_mandate(&id).referral_bps, 0);
+    assert!(event_by_topic(&w.env, "referral_paid").is_none());
 }
 
 #[test]
