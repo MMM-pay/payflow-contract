@@ -946,18 +946,19 @@ mod contract {
                 ledger,
                 wasm_hash,
             };
+            let key = DataKey::UpgradeHistory;
             let mut history: soroban_sdk::Vec<UpgradeRecord> = env
                 .storage()
-                .instance()
-                .get(&DataKey::UpgradeHistory)
+                .persistent()
+                .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
             env.storage()
-                .instance()
-                .set(&DataKey::UpgradeHistory, &history);
+                .persistent()
+                .set(&key, &history);
             env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
         /// Get the contract's upgrade history.
@@ -968,7 +969,7 @@ mod contract {
         /// appear here.
         pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
             env.storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::UpgradeHistory)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
