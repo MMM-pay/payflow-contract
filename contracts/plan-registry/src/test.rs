@@ -37,6 +37,7 @@ fn batch_plan(env: &Env, token: &Address, amount: i128, name: &str) -> PlanParam
         referral_bps: 0,
         payout: None,
         max_subscribers: 0,
+        retry_window_ledgers: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn create_plan_assigns_sequential_ids() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let b = client.create_plan(
         &merchant,
@@ -90,6 +92,7 @@ fn create_plan_assigns_sequential_ids() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(a, 1);
@@ -151,6 +154,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(
         env.auths(),
@@ -230,6 +234,7 @@ fn create_plan_rejects_a_wrong_signer() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         )
         .is_err());
 }
@@ -254,6 +259,7 @@ fn create_plan_stores_fields() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let plan = client.get_plan(&id);
 
@@ -263,6 +269,49 @@ fn create_plan_stores_fields() {
     assert_eq!(plan.period, 604_800);
     assert!(plan.active);
     assert_eq!(plan.keeper_bps, 0);
+}
+
+#[test]
+fn create_plan_stores_the_retry_window() {
+    let (env, client, _admin) = setup();
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let with_window = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "Retry Plan"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+        &Some(12u32),
+    );
+    assert_eq!(client.get_plan(&with_window).retry_window_ledgers, Some(12));
+
+    let without_window = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &604_800,
+        &String::from_str(&env, "No Retry Plan"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+        &None::<u32>,
+    );
+    assert_eq!(client.get_plan(&without_window).retry_window_ledgers, None);
 }
 
 #[test]
@@ -285,6 +334,7 @@ fn create_plan_stores_the_keeper_tip() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).keeper_bps, MAX_KEEPER_BPS);
@@ -310,6 +360,7 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(res, Err(Ok(Error::KeeperBpsTooHigh)));
@@ -335,6 +386,7 @@ fn create_plan_rejects_zero_amount() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -358,6 +410,7 @@ fn create_plan_rejects_negative_amount() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::InvalidAmount)));
 }
@@ -381,6 +434,7 @@ fn create_plan_rejects_sub_minimum_period() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::InvalidPeriod)));
 }
@@ -410,6 +464,7 @@ fn set_plan_active_toggles() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.set_plan_active(&merchant, &id, &false);
@@ -442,6 +497,7 @@ fn set_plan_active_authorizes_exact_merchant_tree() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     env.mock_auths(&[MockAuth {
@@ -504,6 +560,7 @@ fn set_plan_active_rejects_non_owner() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let res = client.try_set_plan_active(&attacker, &id, &false);
@@ -529,6 +586,7 @@ fn set_plan_charges_paused_toggles_without_deactivating() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert!(!client.plan_charges_paused(&id));
@@ -615,6 +673,7 @@ fn set_plan_charges_paused_rejects_a_non_owner_and_missing_plan() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let attacker = Address::generate(&env);
@@ -651,6 +710,7 @@ fn set_plan_charges_paused_emits_the_change() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.set_plan_charges_paused(&merchant, &id, &true);
@@ -683,6 +743,7 @@ fn set_plan_grace_period_is_stored_and_defaults_to_zero() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.plan_grace_period(&id), 0);
@@ -724,6 +785,7 @@ fn set_plan_charges_paused_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     env.set_auths(&[]);
     assert!(client
@@ -751,6 +813,7 @@ fn set_plan_paused_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     env.set_auths(&[]);
     assert!(client.try_set_plan_paused(&merchant, &id, &true).is_err());
@@ -776,6 +839,7 @@ fn set_plan_grace_period_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     env.set_auths(&[]);
     assert!(client
@@ -812,6 +876,7 @@ fn create_plan_stores_the_name() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(
         client.get_plan(&id).name,
@@ -840,6 +905,7 @@ fn create_plan_accepts_an_empty_name() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&id).name.len(), 0);
 }
@@ -865,6 +931,7 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&id).name.len(), MAX_NAME_LEN);
 }
@@ -890,6 +957,7 @@ fn create_plan_rejects_an_overlong_name() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -916,6 +984,7 @@ fn merchant_plans_pages_are_bounded() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         );
     }
 
@@ -1080,6 +1149,7 @@ fn deactivate_page_turns_off_a_page_of_plans() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         ));
     }
 
@@ -1116,6 +1186,7 @@ fn deactivate_page_is_idempotent() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.deactivate_page(&merchant, &0, &10), 1);
@@ -1147,6 +1218,7 @@ fn deactivate_page_respects_the_page_cap() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         );
     }
 
@@ -1186,6 +1258,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let b_id = client.create_plan(
         &b,
@@ -1201,6 +1274,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.deactivate_page(&a, &0, &10);
@@ -1231,6 +1305,7 @@ fn deactivate_page_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // Drop every mocked authorization: the merchant must sign for itself.
@@ -1263,6 +1338,7 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::NameTooLong)));
 }
@@ -1291,6 +1367,7 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&id).name, String::from_str(&env, &name));
 }
@@ -1318,6 +1395,7 @@ fn set_successor_stores_the_replacement() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let new_id = client.create_plan(
         &merchant,
@@ -1333,6 +1411,7 @@ fn set_successor_stores_the_replacement() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // A freshly published plan has no successor yet.
@@ -1364,6 +1443,7 @@ fn set_successor_rejects_a_plan_that_is_its_own_successor() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let res = client.try_set_successor(&merchant, &id, &id);
@@ -1391,6 +1471,7 @@ fn set_successor_rejects_an_unknown_successor() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let res = client.try_set_successor(&merchant, &id, &999);
@@ -1418,6 +1499,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let other_id = client.create_plan(
         &other,
@@ -1433,6 +1515,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // The merchant may only point at plans it owns itself.
@@ -1461,6 +1544,7 @@ fn set_successor_rejects_a_different_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let other_id = client.create_plan(
         &merchant,
@@ -1476,6 +1560,7 @@ fn set_successor_rejects_a_different_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // A replacement denominated in another asset would reprice differently and
@@ -1507,6 +1592,7 @@ fn set_successor_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let replacement_id = client.create_plan(
         &merchant,
@@ -1522,6 +1608,7 @@ fn set_successor_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // The merchant signs the call itself, and the signature must cover the
@@ -1573,6 +1660,7 @@ fn set_successor_emits_plan_successor_set() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let new_id = client.create_plan(
         &merchant,
@@ -1588,6 +1676,7 @@ fn set_successor_emits_plan_successor_set() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.set_successor(&merchant, &old_id, &new_id);
@@ -1629,6 +1718,7 @@ fn create_plan_stores_the_description() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let plan = client.get_plan(&id);
@@ -1656,6 +1746,7 @@ fn an_empty_description_is_allowed() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).description, String::from_str(&env, ""));
@@ -1682,6 +1773,7 @@ fn a_description_at_the_limit_is_accepted() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).description, at_limit);
@@ -1708,6 +1800,7 @@ fn create_plan_rejects_an_overlong_description() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(res, Err(Ok(Error::DescriptionTooLong)));
 }
@@ -1746,6 +1839,7 @@ fn create_plan_indexes_by_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let plan_2 = client.create_plan(
         &merchant_b,
@@ -1761,6 +1855,7 @@ fn create_plan_indexes_by_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let plan_3 = client.create_plan(
         &merchant_a,
@@ -1776,6 +1871,7 @@ fn create_plan_indexes_by_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.token_plan_count(&token_usdc), 2);
@@ -1813,6 +1909,7 @@ fn token_plans_pages_are_bounded() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         );
     }
 
@@ -1849,6 +1946,7 @@ fn set_plan_name_renames_only_the_label() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let renamed = String::from_str(&env, "Pro");
@@ -1883,6 +1981,7 @@ fn set_plan_name_rejects_another_merchant_and_a_missing_plan() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let name = String::from_str(&env, "Mine now");
 
@@ -1915,6 +2014,7 @@ fn set_plan_name_rejects_a_name_over_the_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let long = String::from_str(&env, &"n".repeat(MAX_NAME_LEN as usize + 1));
@@ -1943,6 +2043,7 @@ fn set_plan_name_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     env.set_auths(&[]);
@@ -2049,6 +2150,7 @@ fn create_plan_requires_the_merchants_auth() {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         )
         .is_err());
 }
@@ -2072,6 +2174,7 @@ fn set_plan_active_requires_the_merchants_auth() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     env.set_auths(&[]);
     assert!(client.try_set_plan_active(&merchant, &id, &false).is_err());
@@ -2122,6 +2225,7 @@ fn create_plan_stores_the_terms_uri() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).terms_uri, terms);
@@ -2148,6 +2252,7 @@ fn create_plan_accepts_an_empty_terms_uri() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).terms_uri.len(), 0);
@@ -2174,6 +2279,7 @@ fn create_plan_accepts_a_terms_uri_at_the_byte_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).terms_uri, at_limit);
@@ -2200,6 +2306,7 @@ fn create_plan_rejects_an_overlong_terms_uri() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(res, Err(Ok(Error::UriTooLong)));
@@ -2233,6 +2340,7 @@ fn create_plan_rejects_a_multibyte_terms_uri_over_the_byte_limit() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(res, Err(Ok(Error::UriTooLong)));
@@ -2259,6 +2367,7 @@ fn plan_created_carries_the_terms_uri() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // The URI must be recoverable from the event alone: a frontend rendering
@@ -2286,6 +2395,7 @@ fn create_plan_stores_the_availability_cutoff() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let promo = client.create_plan(
         &merchant,
@@ -2301,6 +2411,7 @@ fn create_plan_stores_the_availability_cutoff() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&forever).available_until, 0);
@@ -2328,6 +2439,7 @@ fn plan_created_event_carries_the_availability_cutoff() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let mut seen = None;
@@ -2367,6 +2479,7 @@ fn create_plan_defaults_payout_to_the_merchant() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // "Pay me" is what a plain plan does.
@@ -2394,6 +2507,7 @@ fn create_plan_records_an_explicit_payout() {
         &0,
         &Some(treasury.clone()),
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).payout, treasury);
@@ -2421,6 +2535,7 @@ fn create_plan_stores_the_referral_share() {
         &1_337,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(client.get_plan(&id).referral_bps, 1_337);
@@ -2446,6 +2561,7 @@ fn create_plan_rejects_a_referral_share_above_the_cap() {
         &(MAX_REFERRAL_BPS + 1),
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(res, Err(Ok(Error::ReferralBpsTooHigh)));
@@ -2466,6 +2582,7 @@ fn create_plan_rejects_a_referral_share_above_the_cap() {
         &MAX_REFERRAL_BPS,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&id).referral_bps, MAX_REFERRAL_BPS);
 }
@@ -2490,6 +2607,7 @@ fn propose_and_accept_moves_the_plan_between_merchants() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.propose_plan_owner(&merchant, &id, &new_owner);
@@ -2534,6 +2652,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let middle = client.create_plan(
         &merchant,
@@ -2549,6 +2668,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let last = client.create_plan(
         &merchant,
@@ -2564,6 +2684,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.propose_plan_owner(&merchant, &middle, &new_owner);
@@ -2600,6 +2721,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(client.merchant_plan_count(&merchant), 3);
     assert!(client.merchant_plans(&merchant, &0, &10).contains(fourth));
@@ -2627,6 +2749,7 @@ fn only_the_owner_can_propose_a_transfer() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(
@@ -2665,6 +2788,7 @@ fn only_the_proposed_owner_can_accept() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     client.propose_plan_owner(&merchant, &id, &new_owner);
 
@@ -2709,6 +2833,7 @@ fn a_transfer_proposal_is_one_shot() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.propose_plan_owner(&merchant, &id, &new_owner);
@@ -2742,6 +2867,7 @@ fn a_new_proposal_replaces_the_old_one() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.propose_plan_owner(&merchant, &id, &wrong);
@@ -2778,6 +2904,7 @@ fn propose_requires_the_merchants_auth() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     // Drop every mocked authorization: the owner must sign the proposal.
@@ -2815,6 +2942,7 @@ fn accept_requires_the_new_owners_signature() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     client.propose_plan_owner(&merchant, &id, &new_owner);
 
@@ -2854,6 +2982,7 @@ fn transfer_emits_proposal_and_transfer_events() {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     client.propose_plan_owner(&merchant, &id, &new_owner);
@@ -2915,6 +3044,7 @@ fn create_plan_stores_max_subscribers() {
         &0u32,
         &None::<Address>,
         &25,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&seated).max_subscribers, 25);
 
@@ -2933,6 +3063,7 @@ fn create_plan_stores_max_subscribers() {
         &0u32,
         &None::<Address>,
         &0,
+        &None::<u32>,
     );
     assert_eq!(client.get_plan(&open).max_subscribers, 0);
 }
@@ -2957,6 +3088,7 @@ fn plan_created_event_carries_the_seat_cap() {
         &0u32,
         &None::<Address>,
         &7,
+        &None::<u32>,
     );
 
     // An indexer reading only events must be able to learn the cap without a
@@ -2983,6 +3115,7 @@ fn admin_can_upgrade_and_state_written_before_survives() {
         &0u32,
         &None::<Address>,
         &3,
+        &None::<u32>,
     );
 
     let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
@@ -3009,6 +3142,7 @@ fn admin_can_upgrade_and_state_written_before_survives() {
         &0u32,
         &None::<Address>,
         &0,
+        &None::<u32>,
     );
     assert_eq!(next, id + 1);
 }
@@ -3344,6 +3478,7 @@ fn owned_plan(env: &Env, client: &PlanRegistryClient) -> (u64, Address) {
         &0,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     (id, merchant)
 }
@@ -3911,6 +4046,7 @@ fn deterministic_extreme_plan_inputs_never_trap() {
             &None::<Address>,
             // Fuzz input: keep the low 32 bits of the random value on purpose.
             &u32::try_from(x & u64::from(u32::MAX)).unwrap(),
+            &None::<u32>,
         ));
     }
 }
@@ -3954,6 +4090,7 @@ fn simple_plan(env: &Env, client: &PlanRegistryClient, merchant: &Address, token
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     )
 }
 
@@ -4198,6 +4335,7 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
                     &p.referral_bps,
                     &p.payout,
                     &p.max_subscribers,
+                    &None::<u32>,
                 );
                 assert_eq!(id, before);
                 assert!(
@@ -4275,6 +4413,7 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
                         &0u32,
                         &None::<Address>,
                         &0u32,
+                        &None::<u32>,
                     )
                     .is_err());
                 assert_eq!(
@@ -4609,6 +4748,7 @@ fn create_plan_accepts_maximum_numeric_values() {
         &MAX_REFERRAL_BPS,
         &Some(payout.clone()),
         &u32::MAX,
+        &None::<u32>,
     );
 
     let plan = client.get_plan(&id);
@@ -4644,6 +4784,7 @@ fn create_plan_rejects_u32_maximum_basis_points_without_writing() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(keeper, Err(Ok(Error::KeeperBpsTooHigh)));
 
@@ -4661,6 +4802,7 @@ fn create_plan_rejects_u32_maximum_basis_points_without_writing() {
         &u32::MAX,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(referral, Err(Ok(Error::ReferralBpsTooHigh)));
     assert_eq!(client.merchant_plan_count(&merchant), 0);
@@ -4689,6 +4831,7 @@ fn create_plan_with_maximum_values_requires_the_merchants_auth() {
             &MAX_REFERRAL_BPS,
             &None::<Address>,
             &u32::MAX,
+            &None::<u32>,
         )
         .is_err());
     assert_eq!(client.merchant_plan_count(&merchant), 0);
@@ -4728,6 +4871,7 @@ fn plan_id_counter_accepts_the_last_ids_then_fails_with_a_typed_error() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     assert_eq!(result, Err(Ok(Error::PlanIdOverflow)));
     assert_eq!(client.next_plan_id(), u64::MAX);

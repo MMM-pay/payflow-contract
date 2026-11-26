@@ -43,6 +43,13 @@ change the contract interface.
   records CPU instructions and memory bytes for successful charge, missing
   keeper authorization, vault failure and charge simulation. CI fails when a
   measurement exceeds its baseline by more than 5%.
+- **#343: feat(subscription): configurable charge retry window per plan.** Plans
+  now support a `retry_window_ledgers` field that extends the charge window
+  before a mandate is marked failed. A plan can set ledger-count window that
+  is frozen into each mandate at sign-up, so later plan edits cannot shorten
+  what an open mandate was promised. The window gates `flag_failed_charge` so
+  failures inside the window are refused with `Error::RetryWindowActive`, and
+  `quote_charge` exposes `retry_window_ledgers` and `retry_at` in its output.
 - **#292: contract event contribution guide.** New
   [`docs/adding-events.md`](docs/adding-events.md) documents defining and
   emitting typed events, snapshotting their layouts, updating event references
