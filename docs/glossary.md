@@ -24,7 +24,7 @@ These are the terms the docs glossary defines, in the same order.
 
 | Docs term | Contract | On chain | Notes |
 |-----------|----------|----------|-------|
-| **Mandate** | subscription | `Mandate` struct, stored at `DataKey::Mandate(id)`; opened by `subscribe`, `subscribe_at`, `subscribe_with_deposit` | Ids come from `NextMandateId`, start at 1 and are never reused, even after the mandate ends. |
+| **Mandate** | subscription | `Mandate` struct, stored at `DataKey::Mandate(id)`; opened by `subscribe`, `subscribe_with_id`, `subscribe_at`, `subscribe_with_deposit`; closed records may be deleted by `delete_mandate` | Ids come from `NextMandateId` (or explicit `subscribe_with_id`), start at 1, and deleted ids are recorded in `MandateTombstone(id)` so ids are never reused. |
 | **Charge** | subscription | `charge(keeper, mandate_id)` returning `ChargeResult`; previewed by `quote_charge` returning `ChargeQuote` | At most one per period. Refused with `PlanChargesPaused` while the plan's charging is paused. |
 | **Plan** | plan-registry | `Plan` struct (defined once in `payflow-shared`), stored at `DataKey::Plan(id)`; created by `create_plan` / `create_plans` | Price, period and token are copied into the mandate at subscribe time. Ids come from `NextPlanId` and are never reused, even after the plan is retired. |
 | **Plan registry** | plan-registry | The `PlanRegistry` contract | See [drift](#where-the-docs-site-and-the-contracts-differ): it is no longer "immutable except for an on/off switch". |
@@ -36,8 +36,8 @@ These are the terms the docs glossary defines, in the same order.
 | **`next_charge` / `last_charge`** | subscription | `Mandate.next_charge`, `Mandate.last_charge` (Unix seconds) | `last_charge` is 0 until the first charge. `ChargeQuote.due_at` and `MandateSummary.next_charge` mirror `next_charge`. |
 | **`fee_bps`** | subscription | `Mandate.fee_bps` (frozen); the current rate at `DataKey::FeeBps`, read by `fee_bps()` and set by `set_fee_bps` | Capped at `MAX_FEE_BPS` = 1000 (10%). A change applies only to mandates opened afterwards. |
 | **Subscription contract** | subscription | The `Subscription` contract | Holds the addresses of the registry (`plan_registry()`) and vault (`vault()`). |
-| **Subscription admin** | subscription | `DataKey::Admin`; `admin()`, `update_admin`, `set_fee_bps`, `upgrade_wasm` | Also the only key that can upgrade the contract's code. |
-| **Vault admin** | vault | `DataKey::Admin`; `admin()`, `set_subscription`, `set_allowlist_enabled`, `set_token_allowed`, `set_deposit_cap`, `upgrade_wasm` | `set_subscription` is the custody risk the trust model describes. |
+| **Subscription admin** | subscription | `DataKey::Admin`; `admin()`, `propose_admin`, `accept_admin`, `set_fee_bps`, `upgrade_wasm` | Handover is two-step and recorded in `PendingAdmin` until the successor accepts. Also the only key that can upgrade the contract's code. |
+| **Vault admin** | vault | `DataKey::Admin`; `admin()`, `propose_admin`, `accept_admin`, `set_subscription`, `set_allowlist_enabled`, `set_token_allowed`, `set_deposit_cap`, `upgrade_wasm` | `set_subscription` is the custody risk the trust model describes; handover is two-step. |
 | **`MIN_PERIOD`** | plan-registry | `pub const MIN_PERIOD: u64 = 60` | `create_plan` rejects shorter periods with `InvalidPeriod`. |
 | **SEP-41** | vault | `soroban_sdk::token::TokenClient` calls in `deposit`, `withdraw*`, `debit*` | State is written before the transfer on every path. |
 

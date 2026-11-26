@@ -26,6 +26,9 @@ fn every_error_code_is_in_the_vault_range() {
         (Error::ZeroAddress, 17),
         (Error::ReserveCapExceeded, 18),
         (Error::InvalidReserveCap, 19),
+        (Error::PendingAdminNotFound, 20),
+        (Error::NotPendingAdmin, 21),
+        (Error::InvalidAddress, 22),
     ];
 
     let mut seen = std::vec::Vec::new();

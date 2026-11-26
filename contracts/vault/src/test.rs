@@ -1,4 +1,5 @@
 #![cfg(test)]
+extern crate std;
 
 use super::*;
 use payflow_test_token::{TestToken, TestTokenClient};
@@ -1473,23 +1474,84 @@ fn debits_stop_after_subscription_contract_is_replaced() {
 }
 
 #[test]
-fn update_admin_hands_the_role_over() {
+fn propose_admin_does_not_hand_over_until_the_successor_accepts() {
     let h = setup();
+    let admin = h.vault.admin();
     let next = Address::generate(&h.env);
 
-    h.vault.update_admin(&next);
+    h.vault.propose_admin(&next);
+    // Proposing alone moves no authority: the current admin still holds it.
+    assert_eq!(h.vault.admin(), admin);
+
+    h.vault.accept_admin(&next);
     assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
-fn update_admin_requires_the_current_admins_auth() {
+fn propose_admin_requires_the_current_admins_auth() {
     let h = setup();
     let before = h.vault.admin();
     let next = Address::generate(&h.env);
 
     h.env.set_auths(&[]);
-    assert!(h.vault.try_update_admin(&next).is_err());
+    assert!(h.vault.try_propose_admin(&next).is_err());
     assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_requires_the_proposed_admins_auth() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_accept_admin(&next).is_err());
+    assert_eq!(h.vault.admin(), before);
+}
+
+// Regression for #238: a direct takeover must fail. Without the two-step
+// handshake, accepting with no proposal would set the caller as admin.
+#[test]
+fn accept_admin_without_a_proposal_is_rejected() {
+    let h = setup();
+    let before = h.vault.admin();
+    let attacker = Address::generate(&h.env);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn accept_admin_rejects_an_address_that_was_not_proposed() {
+    let h = setup();
+    let before = h.vault.admin();
+    let next = Address::generate(&h.env);
+    let attacker = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&attacker),
+        Err(Ok(Error::NotPendingAdmin))
+    );
+    assert_eq!(h.vault.admin(), before);
+}
+
+#[test]
+fn a_consumed_admin_proposal_cannot_be_replayed() {
+    let h = setup();
+    let next = Address::generate(&h.env);
+    h.vault.propose_admin(&next);
+    h.vault.accept_admin(&next);
+
+    assert_eq!(
+        h.vault.try_accept_admin(&next),
+        Err(Ok(Error::PendingAdminNotFound))
+    );
+    assert_eq!(h.vault.admin(), next);
 }
 
 #[test]
@@ -1586,6 +1648,17 @@ fn set_subscription_requires_admin_auth() {
     h.env.set_auths(&[]);
     assert!(h.vault.try_set_subscription(&other).is_err());
     assert_eq!(h.vault.subscription(), h.subscription);
+}
+
+#[test]
+fn set_subscription_rejects_self_address() {
+    let h = setup();
+    let before = h.vault.subscription();
+    assert_eq!(
+        h.vault.try_set_subscription(&h.vault_id),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(h.vault.subscription(), before);
 }
 
 #[test]
@@ -1886,6 +1959,96 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     // And the new code still runs: deposits continue where they left off.
     h.vault.deposit(&user, &h.token, &1_000);
     assert_eq!(h.vault.balance(&user, &h.token), 5_000);
+}
+
+/// #237: every persistent and instance value written before an upgrade must
+/// still decode with the current types after the code is swapped.
+#[test]
+fn upgrade_preserves_every_stored_value() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    let pending_admin = Address::generate(&h.env);
+
+    h.vault.deposit(&user, &h.token, &4_000);
+    h.vault.set_deposit_cap(&user, &h.token, &8_000);
+    h.vault.set_allowlist_enabled(&true);
+    h.vault.set_token_allowed(&h.token, &true);
+    h.vault.set_spend_limit(&user, &h.token, &5_000, &3_600);
+    h.vault.set_reserve(&user, &h.token, &1, &1_500);
+    h.vault.propose_admin(&pending_admin);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    h.vault.upgrade_wasm(&wasm_hash);
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.deposit_cap(&user, &h.token), 8_000);
+    assert!(h.vault.token_allowed(&h.token));
+    assert!(h.vault.allowlist_enabled());
+    assert_eq!(h.vault.subscription(), h.subscription);
+    assert_eq!(
+        h.vault.spend_limit(&user, &h.token),
+        SpendLimit {
+            amount: 5_000,
+            window_secs: 3_600,
+        }
+    );
+    assert_eq!(h.vault.admin(), admin);
+
+    // Keys the committed upgrade target predates decode with the current
+    // types too: a code swap never rewrites or drops storage entries.
+    h.env.as_contract(&h.vault_id, || {
+        let p = h.env.storage().persistent();
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::Reserved(user.clone(), h.token.clone(), 1)),
+            Some(1_500)
+        );
+        assert_eq!(
+            p.get::<_, i128>(&DataKey::ReservedTotal(user.clone(), h.token.clone())),
+            Some(1_500)
+        );
+        let window = p
+            .get::<_, OperationWindow>(&DataKey::OperationWindow(user.clone(), h.token.clone()))
+            .unwrap();
+        assert!(window.operations >= 1);
+        assert_eq!(
+            h.env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::PendingAdmin),
+            Some(pending_admin.clone())
+        );
+    });
+
+    // The upgraded code still moves funds against the preserved balance entry.
+    h.vault.withdraw(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
+}
+
+#[test]
+fn rejected_upgrade_leaves_stored_values_intact() {
+    let h = setup();
+    let admin = h.vault.admin();
+    let user = funded_user(&h, 10_000);
+    h.vault.deposit(&user, &h.token, &4_000);
+
+    let wasm_hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&wasm_hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&wasm_hash).is_err());
+
+    // The failed call moved no state and recorded no upgrade.
+    assert_eq!(h.vault.balance(&user, &h.token), 4_000);
+    assert_eq!(h.vault.admin(), admin);
+    assert_eq!(h.vault.upgrade_history().len(), 0);
 }
 
 #[test]
@@ -3128,6 +3291,160 @@ fn deposit_for_signed_by_the_subscriber_instead_of_the_payer_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-call resource budgets (#250)
+// ---------------------------------------------------------------------------
+
+/// Resources the last top-level call consumed: CPU, memory and ledger writes.
+struct BudgetMeasurement {
+    call: &'static str,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    write_entries: u32,
+    write_bytes: u32,
+}
+
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
+fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
+    let budget = env.cost_estimate().budget();
+    let resources = env.cost_estimate().resources();
+    BudgetMeasurement {
+        call,
+        cpu_instructions: budget.cpu_instruction_cost(),
+        memory_bytes: budget.memory_bytes_cost(),
+        write_entries: resources.write_entries,
+        write_bytes: resources.write_bytes,
+    }
+}
+
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
+fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
+    let snapshot_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
+
+    std::println!("\n### {contract} per-call resource budgets");
+    std::println!("| Call | CPU instructions | Memory bytes | Write entries | Write bytes |");
+    std::println!("| --- | ---: | ---: | ---: | ---: |");
+    for measurement in measurements {
+        std::println!(
+            "| {} | {} | {} | {} | {} |",
+            measurement.call,
+            measurement.cpu_instructions,
+            measurement.memory_bytes,
+            measurement.write_entries,
+            measurement.write_bytes
+        );
+    }
+
+    if std::env::var("UPDATE_RESOURCE_BUDGETS").as_deref() == Ok("1") {
+        let mut snapshot = std::string::String::from(
+            "call,cpu_instructions,memory_bytes,write_entries,write_bytes\n",
+        );
+        for measurement in measurements {
+            std::fmt::Write::write_fmt(
+                &mut snapshot,
+                format_args!(
+                    "{},{},{},{},{}\n",
+                    measurement.call,
+                    measurement.cpu_instructions,
+                    measurement.memory_bytes,
+                    measurement.write_entries,
+                    measurement.write_bytes
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(&snapshot_path, snapshot).unwrap();
+        return;
+    }
+
+    let snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", snapshot_path.display()));
+    for measurement in measurements {
+        let line = snapshot
+            .lines()
+            .find(|line| line.starts_with(&std::format!("{},", measurement.call)))
+            .unwrap_or_else(|| panic!("missing budget snapshot for {}", measurement.call));
+        let mut fields = line.split(',');
+        let _ = fields.next();
+        let expected_cpu: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_memory: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_entries: u64 = fields.next().unwrap().parse().unwrap();
+        let expected_write_bytes: u64 = fields.next().unwrap().parse().unwrap();
+
+        let limit = |value: u64| value + (value / 20).max(1);
+        assert!(
+            measurement.cpu_instructions <= limit(expected_cpu),
+            "{} CPU budget grew from {expected_cpu} to {} instructions (5% tolerance: {})",
+            measurement.call,
+            measurement.cpu_instructions,
+            limit(expected_cpu)
+        );
+        assert!(
+            measurement.memory_bytes <= limit(expected_memory),
+            "{} memory budget grew from {expected_memory} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.memory_bytes,
+            limit(expected_memory)
+        );
+        assert!(
+            u64::from(measurement.write_entries) <= limit(expected_write_entries),
+            "{} write-entry budget grew from {expected_write_entries} to {} entries (5% tolerance: {})",
+            measurement.call,
+            measurement.write_entries,
+            limit(expected_write_entries)
+        );
+        assert!(
+            u64::from(measurement.write_bytes) <= limit(expected_write_bytes),
+            "{} write-byte budget grew from {expected_write_bytes} to {} bytes (5% tolerance: {})",
+            measurement.call,
+            measurement.write_bytes,
+            limit(expected_write_bytes)
+        );
+    }
+}
+
+#[test]
+fn vault_call_budgets_stay_within_committed_snapshots() {
+    let mut measurements = std::vec::Vec::new();
+
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.deposit(&user, &h.token, &10_000);
+    measurements.push(measure_call(&h.env, "deposit"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.withdraw(&user, &h.token, &1_000);
+    measurements.push(measure_call(&h.env, "withdraw"));
+
+    let merchant = Address::generate(&h.env);
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.debit_multi_mandate(
+        &user,
+        &h.token,
+        &1,
+        &soroban_sdk::vec![
+            &h.env,
+            (merchant, 700i128),
+            (h.subscription.clone(), 50i128),
+        ],
+    );
+    measurements.push(measure_call(&h.env, "debit_multi_mandate"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.set_spend_limit(&user, &h.token, &5_000, &86_400);
+    measurements.push(measure_call(&h.env, "set_spend_limit"));
+
+    h.env.cost_estimate().budget().reset_default();
+    h.vault.withdraw_all(&user, &h.token);
+    measurements.push(measure_call(&h.env, "withdraw_all"));
+
+    assert_within_committed_budgets("vault", &measurements);
+}
+
 // Numeric maximum values (#242)
 // ---------------------------------------------------------------------------
 
@@ -3208,4 +3525,139 @@ fn maximum_deposit_requires_the_users_auth() {
     assert_eq!(h.vault.balance(&user, &h.token), 0);
     assert_eq!(h.token_client.balance(&user), i128::MAX);
     assert_eq!(h.token_client.balance(&h.vault_id), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #341 / #369: Admin emergency_withdraw releases all per-mandate reserves.
+// ---------------------------------------------------------------------------
+
+fn last_emergency_withdraw_event(h: &Harness) -> Option<(Address, i128)> {
+    let mut found = None;
+    for event in h.env.events().all().events() {
+        let ContractEventBody::V0(body) = &event.body;
+        let is_emergency = matches!(
+            body.topics.first(),
+            Some(ScVal::Symbol(ScSymbol(name))) if name.to_utf8_string_lossy() == "emergency_withdraw"
+        );
+        if !is_emergency {
+            continue;
+        }
+        let Some(topic_addr @ ScVal::Address(_)) = body.topics.get(1) else {
+            continue;
+        };
+        let subscriber: Address = soroban_sdk::TryFromVal::try_from_val(&h.env, topic_addr).ok()?;
+        let ScVal::Map(Some(ScMap(entries))) = &body.data else {
+            continue;
+        };
+        for entry in entries {
+            let (ScVal::Symbol(ScSymbol(name)), ScVal::I128(parts)) = (&entry.key, &entry.val)
+            else {
+                continue;
+            };
+            if name.to_utf8_string_lossy() == "amount" {
+                let amount = (i128::from(parts.hi) << 64) | i128::from(parts.lo);
+                found = Some((subscriber.clone(), amount));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn emergency_withdraw_releases_all_reserves_and_emits_the_correct_event() {
+    let h = setup();
+    let user = depositor(&h, 1_500);
+    let other_user = depositor(&h, 600);
+    let mandate_1 = 10u64;
+    let mandate_2 = 20u64;
+    let mandate_3 = 30u64;
+
+    h.vault.set_reserve(&user, &h.token, &mandate_1, &200);
+    h.vault.set_reserve(&user, &h.token, &mandate_2, &350);
+    h.vault.set_reserve(&user, &h.token, &mandate_3, &450);
+    h.vault.set_reserve(&other_user, &h.token, &mandate_1, &400);
+
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 1_000);
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 500);
+
+    // Admin releases all reserves for `user` in one call.
+    let released = h.vault.emergency_withdraw(&user, &h.token);
+    assert_eq!(released, 1_000);
+
+    // The emitted event carries the subscriber and sum of released reserves.
+    // Must be checked before subsequent contract reads clear `events().all()`.
+    assert_eq!(
+        last_emergency_withdraw_event(&h),
+        Some((user.clone(), 1_000))
+    );
+
+    // All three per-mandate reserves and the aggregate total are now zero.
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_1), 0);
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_2), 0);
+    assert_eq!(h.vault.reserved(&user, &h.token, &mandate_3), 0);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 0);
+
+    // Other subscribers' reserves are unaffected.
+    assert_eq!(h.vault.reserved(&other_user, &h.token, &mandate_1), 400);
+
+    // The full balance is now withdrawable by the subscriber.
+    assert_eq!(h.vault.unreserved_balance(&user, &h.token), 1_500);
+    assert_eq!(h.vault.withdraw_all(&user, &h.token), 1_500);
+    assert_eq!(h.vault.balance(&user, &h.token), 0);
+    assert_eq!(h.token_client.balance(&user), 1_500);
+}
+
+#[test]
+fn emergency_withdraw_requires_admin_auth() {
+    let h = setup();
+    let user = depositor(&h, 1_000);
+    h.vault.set_reserve(&user, &h.token, &1, &300);
+    h.vault.set_reserve(&user, &h.token, &2, &400);
+
+    // A normal subscriber cannot call emergency_withdraw on their own behalf.
+    h.env.mock_auths(&[MockAuth {
+        address: &user,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "emergency_withdraw",
+            args: (&user, &h.token).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_emergency_withdraw(&user, &h.token).is_err());
+
+    // An unauthenticated call is also rejected.
+    h.env.set_auths(&[]);
+    assert!(h.vault.try_emergency_withdraw(&user, &h.token).is_err());
+
+    // All reserves remain untouched.
+    assert_eq!(h.vault.reserved(&user, &h.token, &1), 300);
+    assert_eq!(h.vault.reserved(&user, &h.token, &2), 400);
+    assert_eq!(h.vault.reserved_total(&user, &h.token), 700);
+}
+
+#[test]
+fn set_token_allowed_rejects_zero_and_self_addresses() {
+    let h = setup();
+    let zero_contract = Address::from_str(
+        &h.env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    );
+    let zero_account = Address::from_str(
+        &h.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    assert_eq!(
+        h.vault.try_set_token_allowed(&zero_contract, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(
+        h.vault.try_set_token_allowed(&zero_account, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
+    assert_eq!(
+        h.vault.try_set_token_allowed(&h.vault.address, &true),
+        Err(Ok(Error::InvalidAddress))
+    );
 }
