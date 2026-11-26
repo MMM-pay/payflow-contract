@@ -51,7 +51,10 @@ This produces three WASM files under `target/wasm32v1-none/release/`:
 The script deploys the contracts in dependency order:
 
 1. **plan-registry** — initialised with the deployer as admin.
-2. **vault** — initialised with the deployer as admin.
+2. **vault** — initialised with the deployer as admin and a reserve cap of
+   9000 bps (90 %): at most that share of a subscriber's balance may be
+   earmarked as reserves, so a free balance always stays withdrawable.
+   Override it with `RESERVE_CAP_BPS=<0-10000>`.
 3. **subscription** — initialised with references to the registry and vault, a
    default fee of 100 bps (1 %), and the deployer as fee recipient.
 4. **Debit rights** — the vault is told that the subscription contract may

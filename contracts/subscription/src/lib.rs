@@ -14,8 +14,10 @@
 //! |---|---|---|---|---|---|
 //! | `__constructor` | 0 | 6 (config keys) | 0 | 0 | Extends instance TTL |
 //! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
+//! | `subscribe_with_id` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Explicit ID checked against tombstones; extends TTLs |
 //! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
 //! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read and vault deposit; extends TTLs |
+//! | `delete_mandate` | 0 | 0 | 1 (Mandate) | 1 (MandateTombstone, removes Mandate + side keys) | Terminal mandates only; extends tombstone TTL |
 //! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
 //! | `upgrade` | 4 (config) | 0 | 2–4 (Mandate, Plan, pause view) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
 //! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
@@ -49,9 +51,11 @@
 //! | `plan_subscriber_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `set_max_charges` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
 //! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
-//! | `next_mandate_id` | 1 (NextMandateId) | 0 | 0 | 0 | |
+//! | `next_mandate_id` | 1 (NextMandateId) | 0 | 0–N (tombstone/mandate check) | 0 | |
+//! | `is_mandate_tombstoned` | 0 | 0 | 1 (MandateTombstone) | 0 | |
 //! | `fee_bps` | 1 (FeeBps) | 0 | 0 | 0 | |
-//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `propose_admin` | 1 (Admin) | 1 (PendingAdmin) | 0 | 0 | Extends instance TTL |
+//! | `accept_admin` | 2 (Admin, PendingAdmin) | 1 (Admin) | 0 | 0 | Removes PendingAdmin; extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
 //! | `plan_registry` | 1 (PlanRegistry) | 0 | 0 | 0 | |
 //! | `vault` | 1 (Vault) | 0 | 0 | 0 | |
@@ -85,13 +89,14 @@ mod test_events;
 pub use error::Error;
 pub use events::{
     Cancelled, ChargeFailed, Charged, CommittedRevenueChanged, ContractUpgraded, FeeChanged,
-    MandateCompleted, MandateEnded, MandateTransferred, MandateUpdated, MaxChargesChanged,
-    PauseChanged, ProtocolPauseChanged, Refunded, SeatsChanged, Subscribed, Upgraded,
+    MandateCompleted, MandateDeleted, MandateEnded, MandateTransferred, MandateUpdated,
+    MaxChargesChanged, PauseChanged, ProtocolPauseChanged, Refunded, SeatsChanged, Subscribed,
+    Upgraded,
 };
 pub use interfaces::{PlanRegistryClient, VaultClient};
 pub use types::{
     ChargeQuote, ChargeResult, ChargeSimulation, DataKey, EstimatedEnd, Mandate, MandateStatus,
-    MandateSummary, Plan, UpgradeRecord,
+    MandateSummary, Plan, PlanChargeTerms, UpgradeRecord,
 };
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
@@ -152,19 +157,26 @@ pub const MAX_START_OFFSET: u64 = 365 * 24 * 60 * 60;
 /// an expected ledger sequence for display (#287).
 pub const SECONDS_PER_LEDGER: u64 = 5;
 
+// Interface changes are published as spec JSON under `spec/` by CI. A PR that
+// changes a contract's public interface must update the committed spec file
+// and be labelled `interface-change`; list the change under `Unreleased` in
+// CHANGELOG.md and note any follow-up issues for payflow-backend,
+// payflow-frontend and payflow-docs in the PR.
+
 #[allow(missing_docs)]
 mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, Cancelled, ChargeFailed, ChargeQuote,
         ChargeResult, ChargeSimulation, Charged, CommittedRevenueChanged, ContractExecutable,
         ContractUpgraded, DataKey, Env, Error, EstimatedEnd, FeeChanged, Mandate, MandateCompleted,
-        MandateEnded, MandateStatus, MandateSummary, MandateTransferred, MandateUpdated,
-        MaxChargesChanged, PauseChanged, Plan, PlanRegistryClient, ProtocolPauseChanged, Refunded,
-        SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded, VaultClient, Vec,
-        BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_CANCEL_REASON,
-        MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS, MAX_START_OFFSET, PERSIST_BUMP,
-        PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
+        MandateDeleted, MandateEnded, MandateStatus, MandateSummary, MandateTransferred,
+        MandateUpdated, MaxChargesChanged, PauseChanged, Plan, PlanChargeTerms, PlanRegistryClient,
+        ProtocolPauseChanged, Refunded, SeatsChanged, String, Subscribed, UpgradeRecord, Upgraded,
+        VaultClient, Vec, BPS_DENOMINATOR, CANCEL_REASON_NONE, INSTANCE_BUMP, INSTANCE_THRESHOLD,
+        MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS,
+        MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -196,7 +208,9 @@ mod contract {
         /// Emits no events.
         ///
         /// # Errors
-        /// Returns [`Error::FeeTooHigh`] if `fee_bps > MAX_FEE_BPS`.
+        /// Returns [`Error::FeeTooHigh`] if `fee_bps > MAX_FEE_BPS`, or
+        /// [`Error::InvalidAddress`] if `plan_registry` or `vault` is this
+        /// contract, or if `vault` equals `plan_registry`.
         pub fn __constructor(
             env: Env,
             admin: Address,
@@ -207,6 +221,10 @@ mod contract {
         ) -> Result<(), Error> {
             if fee_bps > MAX_FEE_BPS {
                 return Err(Error::FeeTooHigh);
+            }
+            let self_addr = env.current_contract_address();
+            if plan_registry == self_addr || vault == self_addr || vault == plan_registry {
+                return Err(Error::InvalidAddress);
             }
 
             let s = env.storage().instance();
@@ -253,6 +271,53 @@ mod contract {
                 max_total,
                 now,
                 referrer,
+            )
+        }
+
+        /// Open a mandate against a published plan with an explicitly requested
+        /// `mandate_id` (#368).
+        ///
+        /// Behaves like [`Subscription::subscribe`], except the caller chooses
+        /// the mandate ID instead of using `NextMandateId`. Rejects `0`
+        /// ([`Error::InvalidMandateId`]), any tombstoned ID from a previously
+        /// deleted mandate ([`Error::MandateIdTombstoned`]), and any ID
+        /// currently held by an existing mandate
+        /// ([`Error::MandateAlreadyExists`]).
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateUpdated`] and [`Subscribed`].
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidMandateId`] if `mandate_id == 0`,
+        /// [`Error::MandateIdTombstoned`] if `mandate_id` has been tombstoned,
+        /// [`Error::MandateAlreadyExists`] if `mandate_id` already exists,
+        /// [`Error::InvalidMaxTotal`] if `max_total < 0`,
+        /// [`Error::PlanInactive`] if the target plan is inactive, or
+        /// [`Error::NotInitialized`] if configuration keys are missing.
+        pub fn subscribe_with_id(
+            env: Env,
+            subscriber: Address,
+            plan_id: u64,
+            mandate_id: u64,
+            max_charges: u32,
+            max_total: i128,
+            referrer: Option<Address>,
+        ) -> Result<u64, Error> {
+            subscriber.require_auth();
+            Self::require_not_protocol_paused(&env)?;
+            let now = env.ledger().timestamp();
+            Self::do_subscribe_at(
+                env,
+                subscriber,
+                plan_id,
+                max_charges,
+                max_total,
+                now,
+                referrer,
+                Some(mandate_id),
             )
         }
 
@@ -310,6 +375,7 @@ mod contract {
                 max_total,
                 now,
                 referrer,
+                None,
             )
         }
 
@@ -355,14 +421,17 @@ mod contract {
                 max_total,
                 start,
                 referrer,
+                None,
             )
         }
 
         /// Core mandate creation shared by `subscribe_at` (which authorizes the
-        /// subscriber first) and `subscribe_with_deposit` (whose single
+        /// subscriber first), `subscribe_with_id` (which authorizes and passes an
+        /// explicit `requested_id`), and `subscribe_with_deposit` (whose single
         /// top-level `require_auth` already covers it — re-authorizing here
         /// would add a second, uncovered auth entry). Not a contract entry
         /// point: it performs no authorization of its own.
+        #[allow(clippy::too_many_arguments)]
         fn do_subscribe_at(
             env: Env,
             subscriber: Address,
@@ -371,6 +440,7 @@ mod contract {
             max_total: i128,
             start: u64,
             referrer: Option<Address>,
+            requested_id: Option<u64>,
         ) -> Result<u64, Error> {
             if max_total < 0 {
                 return Err(Error::InvalidMaxTotal);
@@ -380,6 +450,18 @@ mod contract {
             let now = env.ledger().timestamp();
             if start < now || start - now > MAX_START_OFFSET {
                 return Err(Error::InvalidStart);
+            }
+
+            if let Some(req_id) = requested_id {
+                if req_id == 0 {
+                    return Err(Error::InvalidMandateId);
+                }
+                if Self::is_tombstoned(&env, req_id) {
+                    return Err(Error::MandateIdTombstoned);
+                }
+                if Self::has_mandate(&env, req_id) {
+                    return Err(Error::MandateAlreadyExists);
+                }
             }
 
             let registry: Address = Self::cfg_address(&env, DataKey::PlanRegistry)?;
@@ -400,11 +482,23 @@ mod contract {
                 return Err(Error::PlanFull);
             }
 
-            let id: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)?;
+            let next_id: u64 =
+                load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)?;
+            let (id, next_mandate_id) = if let Some(req_id) = requested_id {
+                let updated = if req_id == next_id {
+                    next_id.checked_add(1).ok_or(Error::AmountOverflow)?
+                } else {
+                    next_id
+                };
+                (req_id, updated)
+            } else {
+                let mut candidate = next_id;
+                while Self::is_tombstoned(&env, candidate) || Self::has_mandate(&env, candidate) {
+                    candidate = candidate.checked_add(1).ok_or(Error::AmountOverflow)?;
+                }
+                let updated = candidate.checked_add(1).ok_or(Error::AmountOverflow)?;
+                (candidate, updated)
+            };
 
             // Freeze the plan's current grace window into this mandate. The
             // registry is the source of truth, and existing mandates never
@@ -412,11 +506,7 @@ mod contract {
             // mandate was promised (#312).
             let grace_period_secs = Self::read_plan_grace_period(&env, &registry, plan_id)?;
 
-            let fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let fee_bps: u32 = load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             // The registry already caps this, but clamp again here: the mandate's
             // tip must never exceed MAX_KEEPER_BPS even if the registry contract
@@ -483,10 +573,9 @@ mod contract {
             // mandate is cancelled, ended or completed.
             Self::plan_open_inc(&env, plan_id);
 
-            env.storage().instance().set(
-                &DataKey::NextMandateId,
-                &id.checked_add(1).ok_or(Error::AmountOverflow)?,
-            );
+            env.storage()
+                .instance()
+                .set(&DataKey::NextMandateId, &next_mandate_id);
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -549,7 +638,8 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
-        /// [`Error::MandateNotActive`] if the mandate is not active,
+        /// [`Error::MandateNotActive`] if the mandate is cancelled, completed,
+        /// or otherwise not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if the mandate reached its cap,
         /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
@@ -559,6 +649,12 @@ mod contract {
             Self::require_not_protocol_paused(&env)?;
 
             let mut mandate = Self::read_mandate(&env, mandate_id)?;
+            if matches!(
+                mandate.status,
+                MandateStatus::Cancelled | MandateStatus::Completed
+            ) {
+                return Err(Error::MandateNotActive);
+            }
 
             let now = env.ledger().timestamp();
             if !super::lifecycle::active_at(&mandate, now) {
@@ -581,7 +677,10 @@ mod contract {
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
             }
-            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+            // One registry call yields both the paused flag checked here and
+            // the plan fields the committed-revenue refresh needs below.
+            let terms = Self::read_plan_charge_terms(&env, mandate.plan_id)?;
+            if terms.charges_paused {
                 return Err(Error::PlanChargesPaused);
             }
 
@@ -682,7 +781,13 @@ mod contract {
                 .publish(&env);
             }
 
-            Self::recompute_committed_revenue(&env, mandate.plan_id);
+            Self::recompute_committed_revenue_with(
+                &env,
+                mandate.plan_id,
+                &terms.merchant,
+                &terms.token,
+                terms.period,
+            );
 
             Ok(ChargeResult {
                 merchant_amount,
@@ -722,7 +827,8 @@ mod contract {
         ///
         /// # Errors
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
-        /// [`Error::MandateNotActive`] if it is not active,
+        /// [`Error::MandateNotActive`] if it is cancelled, completed, or not
+        /// active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if it reached a cap,
         /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
@@ -730,6 +836,12 @@ mod contract {
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
             let mandate = Self::read_mandate(&env, mandate_id)?;
+            if matches!(
+                mandate.status,
+                MandateStatus::Cancelled | MandateStatus::Completed
+            ) {
+                return Err(Error::MandateNotActive);
+            }
 
             // The same gates `charge` applies, in the same order, so a mandate
             // that `charge` would reject for timing, status or caps is
@@ -1161,19 +1273,19 @@ mod contract {
                 return Err(Error::MandateNotActive);
             }
 
-            let pending_owner: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingMandateOwner(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let pending_owner: Address = load_or_err(
+                &env,
+                &DataKey::PendingMandateOwner(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
             if pending_owner != new_subscriber {
                 return Err(Error::NotProposedOwner);
             }
-            let subscriber_position: u32 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::PendingSubscriberPosition(mandate_id))
-                .ok_or(Error::NoPendingTransfer)?;
+            let subscriber_position: u32 = load_or_err(
+                &env,
+                &DataKey::PendingSubscriberPosition(mandate_id),
+                Error::NoPendingTransfer,
+            )?;
 
             let old_subscriber = mandate.subscriber.clone();
             Self::index_len(
@@ -1254,6 +1366,53 @@ mod contract {
             .publish(&env);
 
             Self::recompute_committed_revenue(&env, mandate.plan_id);
+            Ok(())
+        }
+
+        /// Permanently delete a cancelled or completed mandate and record its ID
+        /// in the tombstone set so it can never be recycled (#368).
+        ///
+        /// Removes the mandate record and its auxiliary per-mandate keys from
+        /// storage while marking `mandate_id` as tombstoned in persistent
+        /// storage. Only terminal mandates (`Cancelled` or `Completed`) may be
+        /// deleted; open mandates must be cancelled or completed first.
+        ///
+        /// # Auth
+        /// Requires authorization from `subscriber`.
+        ///
+        /// # Events
+        /// Emits [`MandateDeleted`].
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
+        /// [`Error::NotSubscriber`] if the caller is not the subscriber, or
+        /// [`Error::MandateStillActive`] if the mandate is still active or paused.
+        pub fn delete_mandate(env: Env, subscriber: Address, mandate_id: u64) -> Result<(), Error> {
+            subscriber.require_auth();
+
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            if mandate.subscriber != subscriber {
+                return Err(Error::NotSubscriber);
+            }
+            if mandate.status != MandateStatus::Cancelled
+                && mandate.status != MandateStatus::Completed
+            {
+                return Err(Error::MandateStillActive);
+            }
+
+            let p = env.storage().persistent();
+            p.remove(&DataKey::Mandate(mandate_id));
+            p.remove(&DataKey::MandateGracePeriod(mandate_id));
+            p.remove(&DataKey::FirstFailedCharge(mandate_id));
+            Self::remove_pending_owner(&env, mandate_id);
+            Self::write_tombstone(&env, mandate_id);
+
+            MandateDeleted {
+                mandate_id,
+                subscriber,
+            }
+            .publish(&env);
+
             Ok(())
         }
 
@@ -1550,11 +1709,8 @@ mod contract {
                 return Err(Error::FeeTooHigh);
             }
 
-            let old_fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)?;
+            let old_fee_bps: u32 =
+                load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)?;
 
             env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
             env.storage()
@@ -1574,15 +1730,15 @@ mod contract {
         /// Pause or resume the whole protocol during an incident (#285).
         /// Admin only.
         ///
-        /// While paused, `subscribe`, `subscribe_at`, `subscribe_with_deposit`,
-        /// `charge` and `upgrade` fail with [`Error::ProtocolPaused`] before
-        /// touching any state. Everything that lets a subscriber or merchant
-        /// get out keeps working: every view, `cancel`, `cancel_page`,
-        /// `end_mandate`, per-mandate pausing, `refund`, and the vault's
-        /// withdrawals (the vault is a separate contract and never reads this
-        /// switch). A mandate that falls due during the pause is not lost: its
-        /// `next_charge` is unchanged, so it is chargeable as soon as the
-        /// protocol resumes.
+        /// While paused, `subscribe`, `subscribe_with_id`, `subscribe_at`,
+        /// `subscribe_with_deposit`, `charge` and `upgrade` fail with
+        /// [`Error::ProtocolPaused`] before touching any state. Everything that
+        /// lets a subscriber or merchant get out keeps working: every view,
+        /// `cancel`, `cancel_page`, `end_mandate`, `delete_mandate`,
+        /// per-mandate pausing, `refund`, and the vault's withdrawals (the vault
+        /// is a separate contract and never reads this switch). A mandate that
+        /// falls due during the pause is not lost: its `next_charge` is
+        /// unchanged, so it is chargeable as soon as the protocol resumes.
         ///
         /// Setting the switch to its current value is a no-op and emits no
         /// event; otherwise [`ProtocolPauseChanged`] is published.
@@ -1866,7 +2022,9 @@ mod contract {
                 let Some(mandate_id) = env.storage().persistent().get::<_, u64>(&slot) else {
                     continue;
                 };
-                let mut mandate = Self::read_mandate(&env, mandate_id)?;
+                let Some(mut mandate) = Self::read_mandate_opt(&env, mandate_id) else {
+                    continue;
+                };
                 if mandate.subscriber != subscriber {
                     return Err(Error::NotSubscriber);
                 }
@@ -2208,35 +2366,81 @@ mod contract {
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
 
-        /// The id the next opened mandate will get. Mandates are numbered from 1,
-        /// so `next_mandate_id() - 1` is the number of mandates opened so far.
+        /// The id the next opened mandate will get (skipping any tombstoned or
+        /// already-occupied ids). Mandates are numbered from 1.
         pub fn next_mandate_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextMandateId)
-                .ok_or(Error::NotInitialized)
+            let mut candidate: u64 =
+                load_instance_or_err(&env, &DataKey::NextMandateId, Error::NotInitialized)?;
+            while Self::is_tombstoned(&env, candidate) || Self::has_mandate(&env, candidate) {
+                candidate = candidate.checked_add(1).ok_or(Error::AmountOverflow)?;
+            }
+            Ok(candidate)
+        }
+
+        /// Whether `mandate_id` has been deleted and permanently tombstoned
+        /// (#368).
+        pub fn is_mandate_tombstoned(env: Env, mandate_id: u64) -> bool {
+            Self::is_tombstoned(&env, mandate_id)
         }
 
         /// Current protocol fee rate in basis points.
         pub fn fee_bps(env: Env) -> Result<u32, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::FeeBps)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::FeeBps, Error::NotInitialized)
         }
 
-        /// Hand the admin role to another address. Only the current admin may
-        /// call this, and the new admin takes effect immediately: the old one
-        /// keeps no authority. A deployment whose admin key is lost or
-        /// rotated is otherwise stuck with it for the life of the contract.
+        /// Propose handing the admin role to `new_admin` (#238).
+        ///
+        /// This is step one of a two-step handover. The current admin keeps
+        /// the role until `new_admin` accepts with `accept_admin`; proposing
+        /// alone changes no authority, so a mistyped or hostile proposal can
+        /// be replaced before anyone accepts it. A later proposal to another
+        /// address overwrites the pending one.
         ///
         /// # Auth
         /// Requires authorization from the current admin.
-        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
             let current: Address = Self::admin(env.clone())?;
             current.require_auth();
 
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingAdmin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
+        }
+
+        /// Accept a pending admin handover (#238). Step two of the handshake:
+        /// only the address the current admin proposed may accept, and the
+        /// role moves only when it does. The pending proposal is consumed, so
+        /// a second accept by the same address fails.
+        ///
+        /// # Auth
+        /// Requires authorization from `new_admin`.
+        ///
+        /// # Errors
+        /// Returns [`Error::PendingAdminNotFound`] if no handover is pending,
+        /// or [`Error::NotPendingAdmin`] if `new_admin` is not the proposed
+        /// successor.
+        pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            new_admin.require_auth();
+
+            let pending: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingAdmin)
+                .ok_or(Error::PendingAdminNotFound)?;
+            if pending != new_admin {
+                return Err(Error::NotPendingAdmin);
+            }
+
             env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&DataKey::PendingAdmin);
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -2285,6 +2489,28 @@ mod contract {
             }
         }
 
+        /// Read what `charge` needs from the plan in one registry call.
+        ///
+        /// A registry deployed before `plan_charge_terms` existed fails that
+        /// call; it is then answered from `plan_charges_paused` and `get_plan`
+        /// as before, so the two contracts can be upgraded in either order.
+        fn read_plan_charge_terms(env: &Env, plan_id: u64) -> Result<PlanChargeTerms, Error> {
+            let registry: Address = Self::cfg_address(env, DataKey::PlanRegistry)?;
+            if let Ok(Ok(terms)) =
+                PlanRegistryClient::new(env, &registry).try_plan_charge_terms(&plan_id)
+            {
+                return Ok(terms);
+            }
+            let charges_paused = Self::plan_charges_paused(env, plan_id)?;
+            let plan = Self::read_plan(env, &registry, plan_id)?;
+            Ok(PlanChargeTerms {
+                merchant: plan.merchant,
+                token: plan.token,
+                period: plan.period,
+                charges_paused,
+            })
+        }
+
         /// Read a plan from the registry, turning any cross-contract failure
         /// into a typed error instead of letting the client panic.
         fn read_plan(env: &Env, registry: &Address, plan_id: u64) -> Result<Plan, Error> {
@@ -2310,10 +2536,7 @@ mod contract {
         }
 
         fn cfg_address(env: &Env, key: DataKey) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&key)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &key, Error::NotInitialized)
         }
 
         /// Read a mandate and refresh its TTL when it is close to expiry (#247).
@@ -2358,6 +2581,24 @@ mod contract {
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
+        fn has_mandate(env: &Env, id: u64) -> bool {
+            env.storage().persistent().has(&DataKey::Mandate(id))
+        }
+
+        fn is_tombstoned(env: &Env, id: u64) -> bool {
+            env.storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::MandateTombstone(id))
+                .unwrap_or(false)
+        }
+
+        fn write_tombstone(env: &Env, id: u64) {
+            let key = DataKey::MandateTombstone(id);
+            let p = env.storage().persistent();
+            p.set(&key, &true);
+            p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        }
+
         fn validate_subscriber_index(
             env: &Env,
             subscriber: &Address,
@@ -2389,9 +2630,7 @@ mod contract {
             let storage = env.storage().persistent();
 
             if position != last_position {
-                let moved_id: u64 = storage
-                    .get(&last_key)
-                    .ok_or(Error::InvalidSubscriberIndex)?;
+                let moved_id: u64 = load_or_err(env, &last_key, Error::InvalidSubscriberIndex)?;
                 if moved_id == mandate_id {
                     return Err(Error::InvalidSubscriberIndex);
                 }
@@ -2503,7 +2742,6 @@ mod contract {
                 plan_id,
                 merchant: merchant.clone(),
                 token: token.clone(),
-                old_committed,
                 new_committed,
                 period,
             }
@@ -2523,7 +2761,25 @@ mod contract {
                 // that triggered the recomputation because a plan read failed.
                 return;
             };
+            Self::recompute_committed_revenue_with(
+                env,
+                plan_id,
+                &plan.merchant,
+                &plan.token,
+                plan.period,
+            );
+        }
 
+        /// [`Self::recompute_committed_revenue`] for a caller that already
+        /// holds the plan's merchant, token and period, so it does not read
+        /// the plan from the registry a second time.
+        fn recompute_committed_revenue_with(
+            env: &Env,
+            plan_id: u64,
+            merchant: &Address,
+            token: &Address,
+            period: u64,
+        ) {
             let len = Self::index_len(env, DataKey::PlanMandateCount(plan_id));
             let mut total: i128 = 0;
             let now = env.ledger().timestamp();
@@ -2535,7 +2791,7 @@ mod contract {
                 let Some(mandate) = Self::read_mandate_opt(env, mandate_id) else {
                     continue;
                 };
-                if mandate.token != plan.token
+                if mandate.token != *token
                     || !super::lifecycle::active_at(&mandate, now)
                     || mandate.period == 0
                 {
@@ -2544,12 +2800,12 @@ mod contract {
                 // Normalize to the plan's period. Equal periods need no
                 // multiplication: doing it anyway overflows for an amount near
                 // i128::MAX and silently reports zero committed revenue.
-                let contribution = if mandate.period == plan.period {
+                let contribution = if mandate.period == period {
                     mandate.amount
                 } else {
                     mandate
                         .amount
-                        .checked_mul(i128::from(plan.period))
+                        .checked_mul(i128::from(period))
                         .ok_or(Error::AmountOverflow)
                         .unwrap_or(0)
                         / i128::from(mandate.period)
@@ -2557,14 +2813,7 @@ mod contract {
                 total = total.checked_add(contribution).unwrap_or(total);
             }
 
-            Self::write_committed_revenue(
-                env,
-                plan_id,
-                &plan.merchant,
-                &plan.token,
-                plan.period,
-                total,
-            );
+            Self::write_committed_revenue(env, plan_id, merchant, token, period, total);
         }
 
         fn index_len(env: &Env, count_key: DataKey) -> u32 {

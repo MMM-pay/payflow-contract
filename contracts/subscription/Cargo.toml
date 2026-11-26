@@ -15,7 +15,7 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true }
 payflow-shared = { path = "../shared" }
-payflow-common = { path = "../common" }
+payflow-common = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
