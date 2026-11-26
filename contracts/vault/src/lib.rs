@@ -987,9 +987,7 @@ mod contract {
                 .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
-            env.storage()
-                .persistent()
-                .set(&key, &history);
+            env.storage().persistent().set(&key, &history);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);

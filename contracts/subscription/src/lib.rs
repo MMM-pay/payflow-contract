@@ -13,10 +13,10 @@
 //! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
 //! |---|---|---|---|---|---|
 //! | `__constructor` | 0 | 6 (config keys) | 0 | 0 | Extends instance TTL |
-//! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
-//! | `subscribe_with_id` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Explicit ID checked against tombstones; extends TTLs |
-//! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
-//! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read and vault deposit; extends TTLs |
+//! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–7 (Mandate, 3 index slots, 1 count, optional grace, optional retry window) | Plus registry grace read; extends TTLs |
+//! | `subscribe_with_id` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–7 (Mandate, 3 index slots, 1 count, optional grace, optional retry window) | Explicit ID checked against tombstones; extends TTLs |
+//! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–7 (Mandate, 3 index slots, 1 count, optional grace, optional retry window) | Plus registry grace read; extends TTLs |
+//! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–7 (Mandate, 3 index slots, 1 count, optional grace, optional retry window) | Plus registry grace read and vault deposit; extends TTLs |
 //! | `delete_mandate` | 0 | 0 | 1 (Mandate) | 1 (MandateTombstone, removes Mandate + side keys) | Terminal mandates only; extends tombstone TTL |
 //! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
 //! | `upgrade` | 4 (config) | 0 | 2–4 (Mandate, Plan, pause view) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
@@ -36,7 +36,7 @@
 //! | `get_mandate` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `estimated_end` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `is_due` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
-//! | `quote_charge` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
+//! | `quote_charge` | 0 | 0 | 1–3 (Mandate, Plan, retry window) | 0 | |
 //! | `is_in_grace_period` | 0 | 0 | 1–2 (Mandate, MandateGracePeriod) | 0 | |
 //! | `mandate_grace_period` | 0 | 0 | 2 (Mandate, MandateGracePeriod) | 0 | |
 //! | `due_mandates` | 0 | 0 | ≤100 (index + Mandates) | 0 | Page ≤50 |
@@ -178,7 +178,9 @@ mod contract {
         MAX_CANCEL_REASON, MAX_FEE_BPS, MAX_KEEPER_BPS, MAX_PAGE, MAX_REFERRAL_BPS,
         MAX_START_OFFSET, PERSIST_BUMP, PERSIST_THRESHOLD, SECONDS_PER_LEDGER,
     };
-    use payflow_common::{estimated_last_due, load_instance_or_err, load_or_err, next_due_at, prorated_upgrade};
+    use payflow_common::{
+        estimated_last_due, load_instance_or_err, load_or_err, next_due_at, prorated_upgrade,
+    };
 
     /// Billing engine for pull-based recurring payments.
     ///
@@ -554,6 +556,14 @@ mod contract {
             if grace_period_secs != 0 {
                 Self::write_grace_period(&env, id, grace_period_secs);
             }
+            // Freeze the plan's retry window the same way (#343): the registry
+            // is the source of truth at sign-up, and a later plan edit cannot
+            // shorten what this mandate was promised.
+            if let Some(ledgers) = plan.retry_window_ledgers {
+                if ledgers != 0 {
+                    Self::write_retry_window(&env, id, ledgers);
+                }
+            }
             Self::index_push(
                 &env,
                 DataKey::SubscriberMandateCount(subscriber.clone()),
@@ -701,8 +711,7 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             // A next due date past u64::MAX is a schedule overflow, not an
             // amount overflow (#290).
-            let next_charge = next_due_at(now, mandate.period)
-                .ok_or(Error::ScheduleOverflow)?;
+            let next_charge = next_due_at(now, mandate.period).ok_or(Error::ScheduleOverflow)?;
             let completed = (mandate.max_charges != 0 && charges_made >= mandate.max_charges)
                 || (mandate.max_total != 0 && next_total >= mandate.max_total);
 
@@ -875,6 +884,8 @@ mod contract {
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if it reached a cap,
         /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
+        /// [`Error::RetryWindowActive`] if the plan's frozen retry window has
+        /// not elapsed yet (#343),
         /// [`Error::ChargeWouldSucceed`] if the vault covers the charge, or
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
@@ -908,6 +919,14 @@ mod contract {
             }
             if Self::plan_charges_paused(&env, mandate.plan_id)? {
                 return Err(Error::PlanChargesPaused);
+            }
+
+            // A plan can extend the time a failed charge may be retried before
+            // it is marked failed (#343). Within that frozen window the retry
+            // deserves a chance to settle, so no failure is recorded yet.
+            let retry_window_ledgers = Self::read_retry_window(&env, mandate_id);
+            if now < Self::retry_ends_at(mandate.next_charge, retry_window_ledgers) {
+                return Err(Error::RetryWindowActive);
             }
 
             // The subscriber is debited exactly `amount` across all legs, so
@@ -1089,8 +1108,13 @@ mod contract {
             // Common math clamps the remaining period, charges only positive
             // upgrades and truncates towards zero in the subscriber's favour.
             let charged = prorated_upgrade(
-                old_amount, plan.amount, old_period, mandate.next_charge, now,
-            ).ok_or(Error::AmountOverflow)?;
+                old_amount,
+                plan.amount,
+                old_period,
+                mandate.next_charge,
+                now,
+            )
+            .ok_or(Error::AmountOverflow)?;
 
             if charged > 0 {
                 // The protocol fee on the difference, at the rate frozen into the
@@ -1889,9 +1913,9 @@ mod contract {
                 return Ok(Some(mandate.last_charge));
             }
 
-            let estimated_end = estimated_last_due(
-                mandate.next_charge, mandate.period, remaining_charges,
-            ).ok_or(Error::ScheduleOverflow)?;
+            let estimated_end =
+                estimated_last_due(mandate.next_charge, mandate.period, remaining_charges)
+                    .ok_or(Error::ScheduleOverflow)?;
 
             Ok(Some(estimated_end))
         }
@@ -1960,6 +1984,10 @@ mod contract {
         /// The split comes from the same private helper `charge` uses, so a
         /// client can display the exact integers settlement will move rather
         /// than reimplementing the rounding.
+        ///
+        /// `retry_window_ledgers` and `retry_at` expose the plan's retry window
+        /// frozen into this mandate (#343). While `now < retry_at`, a failed
+        /// charge cannot be marked failed and may still be retried.
         pub fn quote_charge(env: Env, mandate_id: u64) -> Result<ChargeQuote, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
             let (fee, _tip, _referral, merchant_amount) = super::charge::split(&m)?;
@@ -1969,6 +1997,7 @@ mod contract {
                 && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
                 && now >= m.next_charge
                 && !Self::plan_charges_paused(&env, m.plan_id)?;
+            let retry_window_ledgers = Self::read_retry_window(&env, mandate_id);
 
             Ok(ChargeQuote {
                 amount: m.amount,
@@ -1976,6 +2005,12 @@ mod contract {
                 merchant_amount,
                 due_at: m.next_charge,
                 chargeable,
+                retry_window_ledgers: if retry_window_ledgers == 0 {
+                    None
+                } else {
+                    Some(retry_window_ledgers)
+                },
+                retry_at: Self::retry_ends_at(m.next_charge, retry_window_ledgers),
             })
         }
 
@@ -2389,9 +2424,7 @@ mod contract {
                 .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
-            env.storage()
-                .persistent()
-                .set(&key, &history);
+            env.storage().persistent().set(&key, &history);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -2863,6 +2896,31 @@ mod contract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        }
+
+        /// Ledger-count retry window frozen into a mandate (#343). Missing means
+        /// zero, the historical behaviour where a due failure may be flagged at
+        /// once.
+        fn read_retry_window(env: &Env, id: u64) -> u32 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::MandateRetryWindow(id))
+                .unwrap_or(0)
+        }
+
+        fn write_retry_window(env: &Env, id: u64, ledgers: u32) {
+            let key = DataKey::MandateRetryWindow(id);
+            env.storage().persistent().set(&key, &ledgers);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+        }
+
+        /// Unix seconds at which a retry window starting at `next_charge`
+        /// closes. Zero ledgers means the window closes immediately, at the due
+        /// time itself.
+        fn retry_ends_at(next_charge: u64, ledgers: u32) -> u64 {
+            next_charge.saturating_add(u64::from(ledgers).saturating_mul(SECONDS_PER_LEDGER))
         }
 
         fn write_mandate(env: &Env, mandate: &Mandate) {

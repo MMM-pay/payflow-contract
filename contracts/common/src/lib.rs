@@ -61,8 +61,8 @@ pub fn split_mandate_fee(
 ) -> Option<(i128, i128, i128, i128)> {
     let fee = amount.checked_mul(i128::from(fee_bps))? / BPS_DENOMINATOR;
     let merchant_gross = amount - fee;
-    let tip = merchant_gross.checked_mul(i128::from(keeper_bps.min(max_keeper_bps)))?
-        / BPS_DENOMINATOR;
+    let tip =
+        merchant_gross.checked_mul(i128::from(keeper_bps.min(max_keeper_bps)))? / BPS_DENOMINATOR;
     let referral = if has_referrer {
         merchant_gross.checked_mul(i128::from(referral_bps.min(max_referral_bps)))?
             / BPS_DENOMINATOR
@@ -98,7 +98,7 @@ pub fn next_due_at(now: u64, period: u64) -> Option<u64> {
 }
 
 /// Calculate the estimated last due timestamp for remaining charges.
-/// The caller handles zero remaining charges (which uses last_charge).
+/// The caller handles zero remaining charges (which uses `last_charge`).
 pub fn estimated_last_due(next_charge: u64, period: u64, remaining_charges: u32) -> Option<u64> {
     let offset = u64::from(remaining_charges.saturating_sub(1)).checked_mul(period)?;
     next_charge.checked_add(offset)
@@ -142,9 +142,7 @@ pub fn is_valid_token_address(env: &soroban_sdk::Env, token: &soroban_sdk::Addre
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    *token != zero_contract
-        && *token != zero_account
-        && *token != env.current_contract_address()
+    *token != zero_contract && *token != zero_account && *token != env.current_contract_address()
 }
 
 #[cfg(test)]
@@ -153,10 +151,14 @@ mod mandate_math_tests {
 
     #[test]
     fn fee_split_preserves_integer_rounding_and_caps() {
-        assert_eq!(split_mandate_fee(10_001, 100, 100, 100, true, 50, 50),
-            Some((100, 49, 49, 9_803)));
-        assert_eq!(split_mandate_fee(100, 0, 0, 0, false, 50, 50),
-            Some((0, 0, 0, 100)));
+        assert_eq!(
+            split_mandate_fee(10_001, 100, 100, 100, true, 50, 50),
+            Some((100, 49, 49, 9_803))
+        );
+        assert_eq!(
+            split_mandate_fee(100, 0, 0, 0, false, 50, 50),
+            Some((0, 0, 0, 100))
+        );
         assert_eq!(split_mandate_fee(i128::MAX, 2, 0, 0, false, 50, 50), None);
     }
 

@@ -166,6 +166,12 @@ mod contract {
         /// mandate. It may be empty, is capped at `MAX_TERMS_LEN` bytes, and is
         /// self-declared by the merchant: the contract does not fetch or verify it.
         ///
+        /// `retry_window_ledgers` is how long a failed charge may be retried
+        /// before the subscription contract allows the failure to be marked
+        /// (#343). It is frozen into each mandate at sign-up, so changing the
+        /// plan later cannot shorten a window an open mandate was promised.
+        /// `None` disables the window.
+        ///
         /// # Auth
         /// Requires authorization from `merchant`.
         ///
@@ -197,6 +203,7 @@ mod contract {
             referral_bps: u32,
             payout: Option<Address>,
             max_subscribers: u32,
+            retry_window_ledgers: Option<u32>,
         ) -> Result<u64, Error> {
             merchant.require_auth();
             if !payflow_common::is_valid_token_address(&env, &token) {
@@ -216,6 +223,7 @@ mod contract {
                 referral_bps,
                 payout,
                 max_subscribers,
+                retry_window_ledgers,
             };
             Self::validate_plan(&params)?;
 
@@ -953,9 +961,7 @@ mod contract {
                 .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
-            env.storage()
-                .persistent()
-                .set(&key, &history);
+            env.storage().persistent().set(&key, &history);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
@@ -1139,6 +1145,7 @@ mod contract {
                 terms_uri: params.terms_uri.clone(),
                 available_until: params.available_until,
                 max_subscribers: params.max_subscribers,
+                retry_window_ledgers: params.retry_window_ledgers,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -1182,6 +1189,7 @@ mod contract {
                 referral_bps: params.referral_bps,
                 payout,
                 max_subscribers: params.max_subscribers,
+                retry_window_ledgers: params.retry_window_ledgers,
             }
             .publish(env);
         }

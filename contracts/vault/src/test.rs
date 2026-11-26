@@ -3743,3 +3743,41 @@ fn balances_exactly_at_cap_succeeds() {
         assert_eq!(result.get(i).unwrap(), 0i128);
     }
 }
+
+/// #280: v0.2.0 stored balances under Balance(user, token), with the
+/// subscription address in instance storage. Read the historical key/value
+/// representation without first depositing through the current implementation.
+#[test]
+fn legacy_vault_balance_and_subscription_pointer_remain_readable() {
+    let h = setup();
+    let user = Address::generate(&h.env);
+    h.env.as_contract(&h.vault_id, || {
+        h.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Balance(user.clone(), h.token.clone()), &4_321i128);
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::Subscription, &h.subscription);
+    });
+
+    assert_eq!(h.vault.balance(&user, &h.token), 4_321);
+    assert_eq!(h.vault.subscription(), h.subscription);
+    assert_eq!(h.vault.balance(&Address::generate(&h.env), &h.token), 0);
+
+    let hash = h.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let attacker = Address::generate(&h.env);
+    h.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &h.vault_id,
+            fn_name: "upgrade_wasm",
+            args: (&hash,).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h.vault.try_upgrade_wasm(&hash).is_err());
+    assert_eq!(h.vault.balance(&user, &h.token), 4_321);
+    assert_eq!(h.vault.subscription(), h.subscription);
+}

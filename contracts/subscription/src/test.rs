@@ -121,6 +121,7 @@ impl World<'_> {
             &referral_bps,
             &payout,
             &0u32,
+            &None::<u32>,
         )
     }
 
@@ -140,6 +141,7 @@ impl World<'_> {
             &0u32,
             &None::<Address>,
             &max_subscribers,
+            &None::<u32>,
         )
     }
 
@@ -164,6 +166,27 @@ impl World<'_> {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
+        )
+    }
+
+    /// A plan with a ledger-count retry window (#343).
+    fn plan_with_retry_window(&self, ledgers: u32) -> u64 {
+        self.registry.create_plan(
+            &self.merchant,
+            &self.token,
+            &PRICE,
+            &MONTH,
+            &String::from_str(&self.env, "Retry Plan"),
+            &String::from_str(&self.env, ""),
+            &0,
+            &Symbol::new(&self.env, ""),
+            &String::from_str(&self.env, ""),
+            &0u64,
+            &0u32,
+            &None::<Address>,
+            &0u32,
+            &Some(ledgers),
         )
     }
 
@@ -183,6 +206,7 @@ impl World<'_> {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         )
     }
 
@@ -216,6 +240,7 @@ impl World<'_> {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         )
     }
 }
@@ -233,14 +258,10 @@ fn simulate_billing_period(w: &World, mandate_id: u64) {
     // Check if charge is due
     assert!(w.sub.is_due(&mandate_id), "Mandate should be due");
 
-    // Attempt charge
-    let result = w.sub.charge(&w.keeper, &mandate_id);
-    // Charge may or may not complete depending on max_charges/max_total
-    // Just verify it doesn't panic and returns a result
-    assert!(
-        result.completed || !result.completed,
-        "Charge should return a result"
-    );
+    // Attempt charge. It may or may not complete depending on
+    // max_charges/max_total; settling without panicking is what this helper
+    // exercises, and the mandate checks below cover the outcome.
+    let _result = w.sub.charge(&w.keeper, &mandate_id);
 
     // Verify mandate state after charge
     let mandate = w.sub.get_mandate(&mandate_id);
@@ -277,12 +298,13 @@ fn property_long_running_subscription_regular() {
         .sub
         .subscribe(&subscriber, &plan_id, &3, &500_000, &None::<Address>);
 
-    let second_user = w.subscriber(100_000);
-    let next_id = mandate_id + 1;
+    let second_user = w.subscriber(150_000);
     let second_id = w
         .sub
         .subscribe(&second_user, &plan_id, &0, &0, &None::<Address>);
-    assert_eq!(second_id, next_id);
+    // Mandate ids are allocated sequentially, so the second mandate opened in
+    // this world is exactly one past the first.
+    assert_eq!(second_id, mandate_id + 1);
 }
 
 /// Pull a u32 field out of the data map of any emitted contract event.
@@ -951,11 +973,9 @@ fn property_long_running_subscription_with_upgrades() {
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &mandate_id);
 
-    // Upgrade to more expensive plan
-    let upgrade_result = w.sub.upgrade(&subscriber, &mandate_id, &plan_id_v2);
-    // Handle result - may fail if vault can't cover prorated amount
-    // Just verify it doesn't panic
-    let _ = upgrade_result;
+    // Upgrade to the more expensive plan. The prorated difference is debited
+    // from the subscriber's vault balance, which covers it here.
+    w.sub.upgrade(&subscriber, &mandate_id, &plan_id_v2);
 
     // Charge with new plan price
     w.advance(MONTH);
@@ -1374,6 +1394,7 @@ fn zero_fee_pays_merchant_in_full() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -1487,6 +1508,8 @@ fn quote_matches_charge_for_a_price_that_rounds() {
             merchant_amount: 100,
             due_at: w.env.ledger().timestamp(),
             chargeable: true,
+            retry_window_ledgers: None,
+            retry_at: w.env.ledger().timestamp(),
         }
     );
 
@@ -2462,6 +2485,7 @@ fn subscriber_mandate_summaries_across_merchants() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let user = w.subscriber(100_000);
 
@@ -2705,6 +2729,7 @@ fn fee_paid_to_address() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let user = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
@@ -3080,6 +3105,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     let user = w.subscriber(1_000_000);
@@ -3466,6 +3492,7 @@ fn fee_to_contract_address_receives_the_fee() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
     let user = Address::generate(&env);
     minter.mint(&user, &100_000);
@@ -3609,6 +3636,7 @@ impl FailingTokenWorld<'_> {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         )
     }
 
@@ -3939,6 +3967,7 @@ fn upgrade_rejects_a_plan_in_another_token() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(
@@ -3970,6 +3999,7 @@ fn upgrade_rejects_a_plan_from_another_merchant() {
         &0u32,
         &None::<Address>,
         &0u32,
+        &None::<u32>,
     );
 
     assert_eq!(
@@ -4974,6 +5004,11 @@ fn referral_share_is_paid_to_the_referrer() {
 
     w.sub.charge(&w.keeper, &id);
 
+    // The test env only exposes the events of the invocation that just ran, so
+    // read them before the balance and mandate views below run another call.
+    let referral_event = event_by_topic(&w.env, "referral_paid");
+    let event_amount = last_event_field_i128(&w.env, "amount");
+
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
     let referral = merchant_gross * i128::from(REFERRAL_BPS) / BPS_DENOMINATOR;
@@ -4993,11 +5028,13 @@ fn referral_share_is_paid_to_the_referrer() {
     assert_eq!(m.referrer, Some(referrer.clone()));
     assert_eq!(m.referral_bps, REFERRAL_BPS);
 
-    let referral_event = event_by_topic(&w.env, "referral_paid");
-    assert!(referral_event.is_some(), "ReferralPaid event must be emitted on charge");
-    assert_eq!(last_event_field_i128(&w.env, "amount"), Some(referral));
+    let body = referral_event.expect("ReferralPaid event must be emitted on charge");
+    assert_eq!(event_amount, Some(referral));
+    // `referrer` is a topic of the event, alongside the mandate id, so a
+    // dunning or rewards service can filter on it.
+    assert_eq!(body.topics.len(), 3);
     assert_eq!(
-        event_field_address(&w.env, "referral_paid", "referrer"),
+        Address::try_from_val(&w.env, &body.topics[2]).ok(),
         Some(referrer)
     );
 }
@@ -5062,6 +5099,7 @@ fn referral_split_loses_at_most_one_stroop() {
             &ODD_REFERRAL_BPS,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         );
         let funding = 1_000_000;
         let user = w.subscriber(funding);
@@ -5604,6 +5642,7 @@ fn upgrade_preserves_every_stored_value() {
         &REFERRAL_BPS,
         &Some(payout.clone()),
         &10u32,
+        &None::<u32>,
     );
     w.registry
         .set_plan_grace_period(&w.merchant, &plan_id, &86_400);
@@ -6146,6 +6185,56 @@ fn lapsed_mandate(w: &World) -> (Address, u64) {
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
     (user, id)
+}
+
+/// A plan's retry window delays the point at which a failed charge can be
+/// marked failed (#343): the quote exposes the deadline, the flag is refused
+/// inside it, and the same flag succeeds once it closes.
+#[test]
+fn retry_window_delays_failed_charge_marking() {
+    const LEDGERS: u32 = 12; // 60 seconds at the nominal 5-second ledger
+    let w = world();
+    let plan_id = w.plan_with_retry_window(LEDGERS);
+    let user = w.subscriber(PRICE);
+    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+
+    // Settle the first period so the vault is empty when the next one is due.
+    w.sub.charge(&w.keeper, &id);
+    w.advance(MONTH);
+    let due_at = w.sub.get_mandate(&id).next_charge;
+    let retry_at = due_at + u64::from(LEDGERS) * SECONDS_PER_LEDGER;
+
+    let quote = w.sub.quote_charge(&id);
+    assert_eq!(quote.due_at, due_at);
+    assert_eq!(quote.retry_window_ledgers, Some(LEDGERS));
+    assert_eq!(quote.retry_at, retry_at);
+
+    // Inside the window the failure is not recorded.
+    w.advance(u64::from(LEDGERS) * SECONDS_PER_LEDGER - 1);
+    assert_eq!(
+        w.sub.try_flag_failed_charge(&id),
+        Err(Ok(Error::RetryWindowActive))
+    );
+    assert_eq!(w.sub.first_failed_charge(&id), None);
+
+    // The window is exclusive at its end, exactly like the grace window.
+    w.advance(1);
+    assert_eq!(w.env.ledger().timestamp(), retry_at);
+    assert!(w.sub.flag_failed_charge(&id));
+    assert_eq!(w.sub.first_failed_charge(&id), Some(retry_at));
+}
+
+/// Without a retry window the historical behaviour is unchanged: a due,
+/// unfunded charge can be flagged immediately.
+#[test]
+fn no_retry_window_keeps_immediate_failure_marking() {
+    let w = world();
+    let (_user, id) = lapsed_mandate(&w);
+
+    let quote = w.sub.quote_charge(&id);
+    assert_eq!(quote.retry_window_ledgers, None);
+    assert_eq!(quote.retry_at, quote.due_at);
+    assert!(w.sub.flag_failed_charge(&id));
 }
 
 #[test]
@@ -7875,6 +7964,8 @@ struct BudgetMeasurement {
     write_bytes: u32,
 }
 
+/// Snapshot the resources the most recent call consumed. The caller resets the
+/// budget immediately before the measured call so every run starts level.
 fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
     let budget = env.cost_estimate().budget();
     let resources = env.cost_estimate().resources();
@@ -7887,6 +7978,9 @@ fn measure_call(env: &Env, call: &'static str) -> BudgetMeasurement {
     }
 }
 
+/// Print the measurements, then compare them with the committed snapshot and
+/// fail when any metric grows by more than 5%. `UPDATE_RESOURCE_BUDGETS=1`
+/// refreshes the snapshot instead; review the CSV diff before committing it.
 fn assert_within_committed_budgets(contract: &str, measurements: &[BudgetMeasurement]) {
     let snapshot_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_snapshots/budgets.csv");
@@ -8134,6 +8228,7 @@ mod interleaved_mandates {
             &0u32,
             &None::<Address>,
             &0u32,
+            &None::<u32>,
         );
 
         let user = w.subscriber(funding);
@@ -8980,6 +9075,7 @@ mod deterministic_ids {
                 referral_bps: 0,
                 payout: None,
                 max_subscribers,
+                retry_window_ledgers: None,
             }
         }
 
@@ -8992,7 +9088,7 @@ mod deterministic_ids {
             period: u64,
         ) -> soroban_sdk::Vec<Val> {
             let env = &self.w.env;
-            (
+            let mut args: soroban_sdk::Vec<Val> = (
                 merchant,
                 &self.w.token,
                 &amount,
@@ -9007,7 +9103,11 @@ mod deterministic_ids {
                 &None::<Address>,
                 &0u32,
             )
-                .into_val(env)
+                .into_val(env);
+            // `create_plan` also takes the optional retry window, one argument
+            // past the thirteen-element tuple conversion.
+            args.push_back(Option::<u32>::None.into_val(env));
+            args
         }
 
         fn try_publish(
@@ -9031,6 +9131,7 @@ mod deterministic_ids {
                 &0u32,
                 &None::<Address>,
                 &0u32,
+                &None::<u32>,
             )
         }
 

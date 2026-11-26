@@ -147,6 +147,13 @@ pub struct ChargeQuote {
     /// True when `charge` would pass its status, cap and timing checks right
     /// now. Vault balance is not considered, matching `is_due`.
     pub chargeable: bool,
+    /// Ledger-count retry window frozen into the mandate at sign-up (#343).
+    /// `None` means a failed charge may be flagged as soon as it is due.
+    pub retry_window_ledgers: Option<u32>,
+    /// Unix seconds at which the retry window closes, computed as `due_at`
+    /// plus the frozen window. Equals `due_at` when there is no window, so a
+    /// client can always compare one deadline.
+    pub retry_at: u64,
 }
 
 /// Exact settlement recipients and amounts for a prospective charge.

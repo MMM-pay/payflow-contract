@@ -60,11 +60,17 @@ pub enum DataKey {
     /// cancellations, refunds and vault withdrawals keep working. Missing
     /// means `false`.
     ProtocolPaused,
-    /// Proposed new admin address awaiting acceptance (#238).
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
     PendingAdmin,
-    /// Marks a mandate as deleted. `true` means the mandate has been
-    /// tombstoned and must not be re-opened. Used to prevent ID reuse.
+    /// Tombstone marker for mandate IDs that have been deleted (#368). Once
+    /// set, this ID can never be assigned to a new mandate.
     MandateTombstone(u64),
+    /// Ledger-count retry window frozen into a mandate at sign-up (#343).
+    /// Missing means `None`: no extended window before a failure may be
+    /// flagged. Appended last so the keys above keep their serialized
+    /// variant indices.
+    MandateRetryWindow(u64),
     /// Unix seconds when a mandate was first flagged as past due (#34).
     /// Present only while the mandate is in the `PastDue` state.
     PastDueSince(u64),

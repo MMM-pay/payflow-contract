@@ -35,18 +35,19 @@ pub enum DataKey {
     /// Sum of every `Reserved` entry for (user, token). Always at most the
     /// (user, token) balance, so the unreserved part never goes negative.
     ReservedTotal(Address, Address),
+    /// Largest share of a subscriber's balance that may be reserved, in basis
+    /// points; fixed when the contract is deployed (#348).
+    ReserveCapBps,
     /// Fixed-window counter for deposit/withdraw operations (#314): where the
     /// current window starts and how many operations it already contains.
     OperationWindow(Address, Address),
     /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
     /// Append-only; the initial deployment is not recorded.
     UpgradeHistory,
-    /// Proposed new admin address awaiting acceptance (#238).
+    /// Proposed successor admin awaiting their acceptance (#238). Missing
+    /// means no handover is pending.
     PendingAdmin,
-    /// Ordered list of mandate IDs that have a reserve for (user, token).
-    /// Used by `emergency_withdraw` to clear all reserves in one pass.
+    /// List of mandate IDs with non-zero reserves for (user, token), used by
+    /// `emergency_withdraw` (#341) to release every reserve in one call.
     ReservedMandates(Address, Address),
-    /// Reserve cap in basis points, set at construction (#348). Absent means
-    /// the contract was deployed before reserve caps were introduced.
-    ReserveCapBps,
 }
