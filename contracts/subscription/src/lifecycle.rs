@@ -2,7 +2,7 @@ use crate::{Mandate, MandateStatus};
 
 pub(super) fn active_at(mandate: &Mandate, now: u64) -> bool {
     match mandate.status {
-        MandateStatus::Active => true,
+        MandateStatus::Active | MandateStatus::PastDue => true,
         MandateStatus::Paused => mandate.paused_until != 0 && now >= mandate.paused_until,
         _ => false,
     }

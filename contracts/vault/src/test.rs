@@ -3662,6 +3662,88 @@ fn set_token_allowed_rejects_zero_and_self_addresses() {
     );
 }
 
+// ── Issue #38: balances batch query ──────────────────────────────────────────
+
+#[test]
+fn balances_returns_correct_amounts() {
+    let h = setup();
+    let user = funded_user(&h, 10_000);
+
+    // Fund vault with two separate token amounts (re-using the same SAC here for
+    // simplicity; in practice callers may pass different token addresses).
+    h.vault.deposit(&user, &h.token, &3_000);
+
+    let tokens = soroban_sdk::vec![&h.env, h.token.clone()];
+    let result = h.vault.balances(&user, &tokens);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.get(0).unwrap(), 3_000i128);
+}
+
+#[test]
+fn balances_returns_zero_for_unknown_token() {
+    let h = setup();
+    let user = funded_user(&h, 1_000);
+
+    let other_issuer = Address::generate(&h.env);
+    let other_sac = h.env.register_stellar_asset_contract_v2(other_issuer);
+    let other_token = other_sac.address();
+
+    // User has no balance for `other_token`.
+    let tokens = soroban_sdk::vec![&h.env, other_token.clone()];
+    let result = h.vault.balances(&user, &tokens);
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.get(0).unwrap(), 0i128);
+}
+
+#[test]
+fn balances_empty_list_returns_empty() {
+    let h = setup();
+    let user = funded_user(&h, 1_000);
+
+    let tokens: soroban_sdk::Vec<Address> = soroban_sdk::vec![&h.env];
+    let result = h.vault.balances(&user, &tokens);
+
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn balances_rejects_too_many_tokens() {
+    let h = setup();
+    let user = funded_user(&h, 1_000);
+
+    // Build a list of 21 dummy token addresses (> MAX_BALANCES_PER_CALL = 20).
+    let mut tokens: soroban_sdk::Vec<Address> = soroban_sdk::vec![&h.env];
+    for _ in 0..21 {
+        tokens.push_back(Address::generate(&h.env));
+    }
+
+    assert_eq!(
+        h.vault.try_balances(&user, &tokens),
+        Err(Ok(Error::TooManyTokens))
+    );
+}
+
+#[test]
+fn balances_exactly_at_cap_succeeds() {
+    let h = setup();
+    let user = funded_user(&h, 1_000);
+
+    // Exactly MAX_BALANCES_PER_CALL = 20 tokens must succeed.
+    let mut tokens: soroban_sdk::Vec<Address> = soroban_sdk::vec![&h.env];
+    for _ in 0..20 {
+        tokens.push_back(Address::generate(&h.env));
+    }
+
+    // All are unknown tokens → all balances are 0, but no error.
+    let result = h.vault.balances(&user, &tokens);
+    assert_eq!(result.len(), 20);
+    for i in 0..20 {
+        assert_eq!(result.get(i).unwrap(), 0i128);
+    }
+}
+
 /// #280: v0.2.0 stored balances under Balance(user, token), with the
 /// subscription address in instance storage. Read the historical key/value
 /// representation without first depositing through the current implementation.

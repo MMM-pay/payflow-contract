@@ -71,4 +71,10 @@ pub enum DataKey {
     /// flagged. Appended last so the keys above keep their serialized
     /// variant indices.
     MandateRetryWindow(u64),
+    /// Unix seconds when a mandate was first flagged as past due (#34).
+    /// Present only while the mandate is in the `PastDue` state.
+    PastDueSince(u64),
+    /// Metered usage amount reported by the merchant for the current billing
+    /// period of a mandate (#35). Absent means no usage has been reported yet.
+    PendingUsage(u64),
 }
