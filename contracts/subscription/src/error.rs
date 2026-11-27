@@ -156,6 +156,12 @@ pub enum Error {
     /// `report_usage` was called more than once in the same billing period for
     /// this mandate, which is not allowed (#35).
     UsageAlreadyReported = 2054,
+    /// No subscriber-authorized one-off charge is pending.
+    ExtraChargeNotAuthorized = 2041,
+    /// A one-off charge exceeds the subscriber-authorized cap.
+    ExtraChargeExceedsCap = 2042,
+    /// The mandate's one-time extra-charge authorization has already been used.
+    ExtraChargeAlreadyUsed = 2043,
 }
 
 impl From<Error> for ErrorCode {

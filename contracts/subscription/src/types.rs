@@ -127,6 +127,38 @@ pub struct Mandate {
     /// When non-zero, the merchant reports actual usage each period via
     /// `report_usage`, and the charge takes that reported amount instead.
     pub max_amount: i128,
+    /// Maximum amount a one-off charge may debit. Zero means no authorization
+    /// is pending; a successful one-off charge consumes the authorization.
+    pub extra_charge_cap: i128,
+    /// Merchant's net proceeds from the one-off charge, included in the refund
+    /// ceiling. Zero for mandates without a settled extra charge.
+    pub extra_charge_merchant_received: i128,
+    /// Whether this mandate's single one-off authorization has been used.
+    pub extra_charge_used: bool,
+}
+
+/// Frozen billing terms and current pause state for a mandate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateTerms {
+    /// Amount charged for each scheduled billing period.
+    pub amount: i128,
+    /// Billing period in seconds.
+    pub period: u64,
+    /// Protocol fee in basis points, frozen when the mandate was opened.
+    pub fee_bps: u32,
+    /// Maximum number of charges (0 = unlimited).
+    pub max_charges: u32,
+    /// Maximum lifetime debit (0 = unlimited).
+    pub max_total: i128,
+    /// Maximum continuous pause length in seconds (0 = unlimited).
+    pub max_pause_secs: u64,
+    /// Maximum amount of a pending one-off charge (0 = none).
+    pub extra_charge_cap: i128,
+    /// Whether a pause currently prevents charging.
+    pub paused: bool,
+    /// Unix seconds when the next scheduled charge falls due.
+    pub next_charge: u64,
 }
 
 /// Read-only preview of what `charge` would pay right now.

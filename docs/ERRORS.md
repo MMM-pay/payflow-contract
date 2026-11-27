@@ -40,6 +40,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1026 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 
 ## Subscription (2001–2047)
+## Subscription (2001–2043)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -90,6 +91,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2045 | `InvalidMandateId` | The requested mandate ID is invalid (mandate IDs start at 1). |
 | 2046 | `MandateStillActive` | An active or paused mandate cannot be deleted until it is cancelled or completed. |
 | 2047 | `InvalidAddress` | A configured address is the contract itself or invalid for the required role (for example, vault equals plan registry). |
+| 2041 | `ExtraChargeNotAuthorized` | No subscriber-authorized one-off charge is pending. |
+| 2042 | `ExtraChargeExceedsCap` | A one-off charge exceeds the subscriber-authorized cap. |
+| 2043 | `ExtraChargeAlreadyUsed` | The mandate's one-time extra-charge authorization was already consumed. |
 
 ## Vault (3001–3022)
 

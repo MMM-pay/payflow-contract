@@ -31,11 +31,15 @@ A PR cannot merge unless all CI jobs pass:
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test --all` |
 | `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
-| `build-wasm` | `stellar contract build` |
+| `build-wasm` | Two isolated `stellar contract build` runs; CI checks SHA-256 identity for `payflow_plan_registry.wasm`, `payflow_subscription.wasm` and `payflow_vault.wasm` |
 
 Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
 globally in CI, so any new warning will fail the build — fix warnings
 before pushing.
+
+The reproducibility job intentionally checks the three deployable contracts by
+name in both builds. A missing WASM fails the job rather than silently reducing
+the set under comparison; test fixtures are not part of this check.
 
 A separate `audit.yml` workflow runs `cargo audit` on a weekly schedule and
 opens an issue automatically when a new advisory affects the dependency tree.

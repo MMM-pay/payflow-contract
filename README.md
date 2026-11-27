@@ -104,6 +104,11 @@ subscriber pays.
   favour; a cheaper plan takes effect at the next charge and never refunds
   anything. See [Plan Upgrade and Downgrade Semantics](docs/plan-changes.md)
   and [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+  anything. See [ADR 0006](docs/adr/0006-prorated-upgrade-charging.md).
+- A subscriber can authorize one separate additional charge with
+  `set_extra_charge_cap`. Anyone may settle an amount up to that cap once;
+  it counts toward the mandate's charge and spend limits but does not move the
+  next recurring due date.
 - A merchant can pause charging for one plan without ending its mandates or
   closing it to new subscribers. Pausing only blocks settlement; resuming
   restores the same mandates.
@@ -132,6 +137,8 @@ ledger's entry size limit.
 take `start` and `limit` and return at most 50 ids (`MAX_PAGE`), because one
 transaction may touch at most 100 ledger entries. Each has a matching
 `*_count` function, and `next_plan_id` tells a client how many plans exist.
+`mandate_terms` returns a mandate's price, period, fee, charge/spend/pause
+caps, one-off cap, current pause state and next due time in one read.
 
 ## Sequence diagrams
 
@@ -139,6 +146,8 @@ transaction may touch at most 100 ledger entries. Each has a matching
 cross-contract calls (Subscription → PlanRegistry → Vault → token) for
 `subscribe`, `charge` and `cancel`, the errors each step can stop on, the
 events each flow emits, and what the protocol pause blocks.
+[`docs/settlement-threat-model.md`](docs/settlement-threat-model.md) explains
+the trust assumptions and attack surface for charge, vault debit and refund.
 
 See the [event contribution guide](docs/adding-events.md) to add or change a
 typed contract event, test its wire layout and regenerate bindings.

@@ -100,7 +100,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: wasm-${{ matrix.build }}
-          path: target/wasm32v1-none/release/*.wasm
+          path: |
+            target/wasm32v1-none/release/payflow_plan_registry.wasm
+            target/wasm32v1-none/release/payflow_subscription.wasm
+            target/wasm32v1-none/release/payflow_vault.wasm
+          if-no-files-found: error
 
   verify-wasm:
     name: verify-wasm-reproducibility
@@ -120,15 +124,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          expected_files=(
+            payflow_plan_registry.wasm
+            payflow_subscription.wasm
+            payflow_vault.wasm
+          )
           mapfile -t files_1 < <(find wasm-1 -type f -name '*.wasm' -printf '%P\n' | sort)
           mapfile -t files_2 < <(find wasm-2 -type f -name '*.wasm' -printf '%P\n' | sort)
-          if ((${#files_1[@]} == 0)); then
-            echo "No wasm files found in build 1" >&2
+          if [[ "${files_1[*]}" != "${expected_files[*]}" ]]; then
+            echo "Build 1 did not produce exactly the three deployable Payflow contracts" >&2
+            printf 'Expected: %s\nFound: %s\n' "${expected_files[*]}" "${files_1[*]}" >&2
             exit 1
           fi
-          if [[ "${files_1[*]}" != "${files_2[*]}" ]]; then
-            echo "Wasm file sets differ between builds" >&2
-            printf 'Build 1: %s\nBuild 2: %s\n' "${files_1[*]}" "${files_2[*]}" >&2
+          if [[ "${files_2[*]}" != "${expected_files[*]}" ]]; then
+            echo "Build 2 did not produce exactly the three deployable Payflow contracts" >&2
+            printf 'Expected: %s\nFound: %s\n' "${expected_files[*]}" "${files_2[*]}" >&2
             exit 1
           fi
 
@@ -137,7 +147,7 @@ jobs:
             echo '### Reproducible wasm build (SHA-256)'
             echo '| Artifact | Build 1 | Build 2 |'
             echo '| --- | --- | --- |'
-            for file in "${files_1[@]}"; do
+            for file in "${expected_files[@]}"; do
               hash_1=$(sha256sum "wasm-1/$file" | cut -d ' ' -f 1)
               hash_2=$(sha256sum "wasm-2/$file" | cut -d ' ' -f 1)
               printf '| `%s` | `%s` | `%s` |\n' "$file" "$hash_1" "$hash_2"
