@@ -490,6 +490,22 @@ export interface PlanChargesPausedChangedEvent {
  * `active` flag and its `successor_id` pointer: changing price, period or
  * keeper tip requires publishing a new plan so existing mandates can never be
  * repriced under a subscriber.
+ * Emitted when a plan's minimum commitment is changed.
+ */
+export interface PlanMinimumCommitmentSetEvent {
+  name: "PlanMinimumCommitmentSet";
+  data: {
+    merchant: string;
+    plan_id: bigint;
+    minimum_periods?: number;
+  };
+}
+
+/**
+ * A merchant-published charge template. Its billing terms are immutable:
+ * changing price, period or keeper tip requires publishing a new plan so
+ * existing mandates can never be repriced under a subscriber. The merchant
+ * may rename the plan or update its `active` flag and `successor_id`.
  */
 export interface Plan {
   /**
@@ -583,3 +599,30 @@ export interface Plan {
   token: string;
 }
     export type ContractEvent = PlanCreatedEvent | PlanRenamedEvent | PlansCreatedEvent | ProfileUpdatedEvent | PlanTransferredEvent | ContractUpgradedEvent | PlanSuccessorSetEvent | PlanStatusChangedEvent | PlanGracePeriodSetEvent | PlanOwnershipProposedEvent | PlanChargesPausedChangedEvent;
+
+/**
+ * Read-only deployment identity and wiring information.
+ */
+export interface ContractHealth {
+  /**
+   * Linked plan registry contract, if this contract knows one.
+   */
+  registry: string | null;
+  /**
+   * Linked subscription contract, if this contract knows one.
+   */
+  subscription: string | null;
+  /**
+   * Linked token contract, if the deployment has a single global token.
+   */
+  token: string | null;
+  /**
+   * Linked vault contract, if this contract knows one.
+   */
+  vault: string | null;
+  /**
+   * Contract semantic version.
+   */
+  version: string;
+}
+    export type ContractEvent = PlanCreatedEvent | PlanRenamedEvent | PlansCreatedEvent | ProfileUpdatedEvent | PlanTransferredEvent | ContractUpgradedEvent | PlanSuccessorSetEvent | PlanStatusChangedEvent | PlanGracePeriodSetEvent | PlanOwnershipProposedEvent | PlanChargesPausedChangedEvent | PlanMinimumCommitmentSetEvent;

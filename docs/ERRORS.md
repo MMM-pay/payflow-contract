@@ -41,6 +41,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 
 ## Subscription (2001–2047)
 ## Subscription (2001–2043)
+## Subscription (2001–2040)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -94,6 +95,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2041 | `ExtraChargeNotAuthorized` | No subscriber-authorized one-off charge is pending. |
 | 2042 | `ExtraChargeExceedsCap` | A one-off charge exceeds the subscriber-authorized cap. |
 | 2043 | `ExtraChargeAlreadyUsed` | The mandate's one-time extra-charge authorization was already consumed. |
+| 2040 | `MinimumCommitmentNotMet` | Cancellation or a mandate cap would end the mandate before its minimum committed number of billing periods. |
 
 ## Vault (3001–3022)
 

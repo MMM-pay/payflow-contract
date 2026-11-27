@@ -167,6 +167,17 @@ pub struct PlanRenamed {
     pub name: String,
 }
 
+/// Emitted when a plan's minimum commitment is changed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanMinimumCommitmentSet {
+    #[topic]
+    pub merchant: Address,
+    #[topic]
+    pub plan_id: u64,
+    pub minimum_periods: u32,
+}
+
 /// Emitted when the admin replaces this contract's wasm. Persistent state is
 /// untouched by an upgrade; the new code reads the keys the old code wrote.
 #[contractevent]

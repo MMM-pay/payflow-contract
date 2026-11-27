@@ -1,7 +1,8 @@
 //! Plan registry contract for Payflow subscriptions.
 //!
 //! Stores merchant plans and profiles. Plans are immutable templates defining
-//! pricing, billing periods, and keeper incentives.
+//! pricing, billing periods, and keeper incentives; merchants may rename them,
+//! change availability, and link a successor without changing their IDs.
 //!
 //! ## Resource costs
 //!
@@ -15,6 +16,8 @@
 //! | `create_plan` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 (Plan, 2 index slots, 2 counts) | Extends instance + persistent TTLs |
 //! | `create_plans` | 1 (NextPlanId) | 1 (NextPlanId) | 0 | 4–6 per plan | Batch ≤10; extends instance + persistent TTLs |
 //! | `set_plan_name` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
+//! | `set_plan_minimum_commitment` | 0 | 0 | 1 (Plan) | 1 (PlanMinimumCommitment) | Extends persistent TTL |
+//! | `plan_minimum_commitment` | 0 | 0 | 1–2 (Plan, PlanMinimumCommitment) | 0 | |
 //! | `set_plan_active` | 0 | 0 | 1 (Plan) | 1 (Plan) | Extends persistent TTL |
 //! | `set_plan_charges_paused` | 0 | 0 | 1 (Plan) | 1 (PlanChargesPaused) | Extends persistent TTL |
 //! | `set_plan_grace_period` | 0 | 0 | 1 (Plan) | 1 (PlanGracePeriod) | Extends persistent TTL |
@@ -66,10 +69,12 @@ mod test_events;
 pub use error::Error;
 pub use events::{
     ContractUpgraded, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet,
-    PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
-    PlansCreated, ProfileUpdated,
+    PlanMinimumCommitmentSet, PlanOwnershipProposed, PlanRenamed, PlanStatusChanged,
+    PlanSuccessorSet, PlanTransferred, PlansCreated, ProfileUpdated,
 };
 pub use types::{DataKey, Plan, PlanChargeTerms, PlanListing, PlanParams, Profile, UpgradeRecord};
+pub use payflow_shared::ContractHealth;
+pub use types::{DataKey, Plan, PlanListing, PlanParams, Profile, UpgradeRecord};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -127,6 +132,14 @@ mod contract {
         MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS, MAX_NAME_LEN, MAX_PAGE,
         MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT, MIN_PERIOD, PERSIST_BUMP,
         PERSIST_THRESHOLD,
+        contract, contractimpl, Address, BytesN, ContractExecutable, ContractHealth,
+        ContractUpgraded, DataKey, Env, Error, Plan, PlanChargesPausedChanged, PlanCreated,
+        PlanGracePeriodSet, PlanListing, PlanMinimumCommitmentSet, PlanOwnershipProposed,
+        PlanParams, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
+        PlansCreated, Profile, ProfileUpdated, String, Symbol, UpgradeRecord, Vec, INSTANCE_BUMP,
+        INSTANCE_THRESHOLD, MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS, MAX_NAME_LEN,
+        MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT, MIN_PERIOD,
+        PERSIST_BUMP, PERSIST_THRESHOLD,
     };
     use payflow_common::{load_instance_or_err, load_or_err};
 
@@ -140,6 +153,17 @@ mod contract {
         /// The version of this contract's crate.
         pub fn version(env: Env) -> String {
             String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        }
+
+        /// Read-only deployment identity and wiring information.
+        pub fn health(env: Env) -> ContractHealth {
+            ContractHealth {
+                version: String::from_str(&env, env!("CARGO_PKG_VERSION")),
+                registry: Some(env.current_contract_address()),
+                vault: None,
+                subscription: None,
+                token: None,
+            }
         }
 
         /// Runs once, in the same transaction that deploys the contract. With a
@@ -563,6 +587,59 @@ mod contract {
                 .storage()
                 .persistent()
                 .get(&DataKey::PlanGracePeriod(plan_id))
+                .unwrap_or(0))
+        }
+
+        /// Set the minimum number of billing periods a mandate must complete
+        /// before its subscriber may cancel it.
+        ///
+        /// `0` disables the commitment. Existing mandates keep the value copied
+        /// when they were opened; changing this setting does not reprice or
+        /// rewrite them.
+        ///
+        /// # Auth
+        /// Requires authorization from `merchant`.
+        ///
+        /// # Events
+        /// Emits [`PlanMinimumCommitmentSet`].
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist, or
+        /// [`Error::NotPlanOwner`] if `merchant` does not own it.
+        pub fn set_plan_minimum_commitment(
+            env: Env,
+            merchant: Address,
+            plan_id: u64,
+            minimum_periods: u32,
+        ) -> Result<(), Error> {
+            merchant.require_auth();
+            let plan = Self::get_plan(env.clone(), plan_id)?;
+            if plan.merchant != merchant {
+                return Err(Error::NotPlanOwner);
+            }
+
+            let key = DataKey::PlanMinimumCommitment(plan_id);
+            env.storage().persistent().set(&key, &minimum_periods);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+
+            PlanMinimumCommitmentSet {
+                merchant,
+                plan_id,
+                minimum_periods,
+            }
+            .publish(&env);
+            Ok(())
+        }
+
+        /// Minimum billing periods required before cancellation. Defaults to `0`.
+        pub fn plan_minimum_commitment(env: Env, plan_id: u64) -> Result<u32, Error> {
+            let _ = Self::get_plan(env.clone(), plan_id)?;
+            Ok(env
+                .storage()
+                .persistent()
+                .get(&DataKey::PlanMinimumCommitment(plan_id))
                 .unwrap_or(0))
         }
 

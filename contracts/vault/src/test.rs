@@ -73,6 +73,21 @@ fn version_matches_package_version() {
     );
 }
 
+#[test]
+fn health_reports_this_vault_and_its_subscription_wiring() {
+    let h = setup();
+    let health = h.vault.health();
+
+    assert_eq!(
+        health.version,
+        String::from_str(&h.env, env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(health.registry, None);
+    assert_eq!(health.vault, Some(h.vault_id.clone()));
+    assert_eq!(health.subscription, Some(h.subscription.clone()));
+    assert_eq!(health.token, None);
+}
+
 fn funded_user(h: &Harness, amount: i128) -> Address {
     let user = Address::generate(&h.env);
     h.token_admin.mint(&user, &amount);

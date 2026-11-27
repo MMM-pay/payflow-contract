@@ -53,6 +53,9 @@ export const Error = {
    * An amount calculation would overflow `i128`. `debit_split` rejects a
    * wrapped total rather than under-charging; `top_up_target` rejects a
    * wrapped funding target rather than reporting an incorrect shortfall.
+   * `amount_a + amount_b` passed to `debit_split` would overflow `i128`.
+   * The split is rejected rather than wrapped, because a wrapped total
+   * would under-charge the subscriber.
    */
   3011 : { message: "AmountOverflow" },
   /**
@@ -305,5 +308,32 @@ export interface ContractUpgradedEvent {
     admin: string;
     new_wasm_hash?: Uint8Array;
   };
+}
+    export type ContractEvent = DebitEvent | DepositEvent | WithdrawEvent | DepositForEvent | ReserveSetEvent | WithdrawToEvent | DepositCapSetEvent | ContractUpgradedEvent;
+
+/**
+ * Read-only deployment identity and wiring information.
+ */
+export interface ContractHealth {
+  /**
+   * Linked plan registry contract, if this contract knows one.
+   */
+  registry: string | null;
+  /**
+   * Linked subscription contract, if this contract knows one.
+   */
+  subscription: string | null;
+  /**
+   * Linked token contract, if the deployment has a single global token.
+   */
+  token: string | null;
+  /**
+   * Linked vault contract, if this contract knows one.
+   */
+  vault: string | null;
+  /**
+   * Contract semantic version.
+   */
+  version: string;
 }
     export type ContractEvent = DebitEvent | DepositEvent | WithdrawEvent | DepositForEvent | ReserveSetEvent | WithdrawToEvent | DepositCapSetEvent | ContractUpgradedEvent;

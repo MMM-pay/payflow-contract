@@ -89,6 +89,21 @@ fn version_matches_package_version() {
 }
 
 #[test]
+fn health_reports_this_registry_and_its_version() {
+    let (env, client, _) = setup();
+    let health = client.health();
+
+    assert_eq!(
+        health.version,
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(health.registry, Some(client.address.clone()));
+    assert_eq!(health.vault, None);
+    assert_eq!(health.subscription, None);
+    assert_eq!(health.token, None);
+}
+
+#[test]
 fn constructor_sets_admin() {
     let (_env, client, admin) = setup();
     assert_eq!(client.admin(), admin);
@@ -1990,6 +2005,14 @@ fn set_plan_name_renames_only_the_label() {
     let renamed = String::from_str(&env, "Pro");
     client.set_plan_name(&merchant, &id, &renamed);
 
+    assert_eq!(env.events().all().events().len(), 1);
+    let last = env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let ScVal::Symbol(ScSymbol(name)) = &body.topics[0] else {
+        panic!("topic 0 is not a symbol");
+    };
+    let expected: soroban_sdk::xdr::StringM<32> = "plan_renamed".try_into().unwrap();
+    assert_eq!(name, &expected);
     let plan = client.get_plan(&id);
     assert_eq!(plan.name, renamed);
     // Everything a mandate is priced from is frozen.
@@ -1997,6 +2020,53 @@ fn set_plan_name_renames_only_the_label() {
     assert_eq!(plan.period, 2_592_000);
     assert_eq!(plan.token, token);
     assert!(plan.active);
+}
+
+#[test]
+fn set_plan_minimum_commitment_is_merchant_controlled_and_emits_an_event() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token = Address::generate(&env);
+    let id = client.create_plan(
+        &merchant,
+        &token,
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Pro Monthly"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0u64,
+        &0u32,
+        &None::<Address>,
+        &0u32,
+    );
+
+    assert_eq!(client.plan_minimum_commitment(&id), 0);
+    client.set_plan_minimum_commitment(&merchant, &id, &3);
+    assert_eq!(env.events().all().events().len(), 1);
+    assert_eq!(event_field_u32(&env, "minimum_periods"), Some(3));
+    assert_eq!(client.plan_minimum_commitment(&id), 3);
+
+    assert_eq!(
+        client.try_set_plan_minimum_commitment(&other, &id, &1),
+        Err(Ok(Error::NotPlanOwner))
+    );
+    assert_eq!(
+        client.try_set_plan_minimum_commitment(&merchant, &(id + 1), &1),
+        Err(Ok(Error::PlanNotFound))
+    );
+    assert_eq!(
+        client.try_plan_minimum_commitment(&(id + 1)),
+        Err(Ok(Error::PlanNotFound))
+    );
+
+    env.set_auths(&[]);
+    assert!(client
+        .try_set_plan_minimum_commitment(&merchant, &id, &4)
+        .is_err());
 }
 
 #[test]

@@ -23,6 +23,8 @@ pub trait PlanRegistryInterface {
     /// Merchant, token, period and charges-paused flag in one call, so a
     /// settlement reads the plan once.
     fn plan_charge_terms(env: Env, plan_id: u64) -> PlanChargeTerms;
+    /// Minimum number of completed billing periods required before cancellation.
+    fn plan_minimum_commitment(env: Env, plan_id: u64) -> u32;
 }
 
 /// Debit side of `payflow-vault`.

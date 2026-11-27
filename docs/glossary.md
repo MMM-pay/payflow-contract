@@ -63,9 +63,12 @@ will meet them. They are candidates for the docs glossary.
 | **Payout** | plan-registry, subscription | `Plan.payout` (`None` = merchant), `Mandate.payout` (frozen) | Where the merchant's share is sent. |
 | **Keeper tip** | subscription | `Mandate.keeper_bps` | See *Keeper* above. |
 | **Referral** | subscription | `Mandate.referrer`, `Mandate.referral_bps` (at most `MAX_REFERRAL_BPS` = 2000) | Share of the merchant's money paid to a referrer on each charge. |
-| **Charge cap** | subscription | `Mandate.max_charges` (0 = open-ended); changed by `set_max_charges` | Lowering it to `charges_made` completes the mandate at once. Lowering it below `charges_made` is rejected with `InvalidMaxCharges`. |
+| **Minimum commitment** | plan-registry, subscription | `DataKey::PlanMinimumCommitment`, `Mandate.minimum_commitment`; `set_plan_minimum_commitment`, `mandate_minimum_commitment` | Merchant-set minimum number of completed billing periods before subscriber cancellation. Frozen when the mandate is opened; a conflicting mandate cap is rejected. |
+| **Charge cap** | subscription | `Mandate.max_charges` (0 = open-ended); changed by `set_max_charges` | Lowering it to `charges_made` completes the mandate at once, unless that would violate the mandate's minimum commitment. Lowering it below `charges_made` is rejected with `InvalidMaxCharges`. |
 | **Spend cap** | subscription | `Mandate.max_total` (0 = open-ended), `Mandate.total_spent` | Lifetime ceiling on debits. Reaching it completes the mandate. |
 | **One-off extra charge** | subscription | `set_extra_charge_cap`, `charge_extra`, `Mandate.extra_charge_cap` | Subscriber-authorized once, capped, and independent of the recurring due date. It counts toward `max_charges` and `max_total`; settlement consumes the authorization. |
+| **Committed revenue** | subscription | `plan_committed_per_period`, `CommittedRevenueChanged` | Active mandates' per-period amounts, normalized to the plan's billing period. |
+| **Health view** | all three | `health`, `ContractHealth` | Read-only contract version and known wiring addresses. Token is absent when a deployment does not have one global token. |
 | **Seats** | subscription | `Mandate.seats`; changed by `set_seats` | `amount` already equals the per-seat price times `seats`. |
 | **Seat cap** | plan-registry, subscription | `Plan.max_subscribers` (0 = unlimited); `plan_subscriber_count` | Counts open mandates only. A cancelled or completed mandate frees its seat. |
 | **Pause** | subscription | `set_paused`, `pause_until`, `Mandate.paused_until`, `Mandate.max_pause_secs` | Subscriber-side. Not the same as a plan's charges being paused. |
@@ -96,7 +99,8 @@ contract change.
 1. **"Plan registry — immutable except for an on/off switch."** A plan's price,
    period and token are still immutable. But a merchant can now also rename a
    plan (`set_plan_name`), pause its charges (`set_plan_charges_paused`), set
-   its grace period (`set_plan_grace_period`), link a successor
+   its grace period (`set_plan_grace_period`), set its minimum commitment
+   (`set_plan_minimum_commitment`), link a successor
    (`set_successor`) and transfer it (`propose_plan_owner` /
    `accept_plan_owner`).
 2. **"The terms are copied into the mandate at `subscribe` time and never

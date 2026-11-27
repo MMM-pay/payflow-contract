@@ -71,6 +71,7 @@ pub use events::{
     ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, ReserveSet,
     Withdraw, WithdrawTo,
 };
+pub use payflow_shared::ContractHealth;
 pub use types::{DataKey, OperationWindow, SpendLimit, SpendWindow, UpgradeRecord};
 
 use soroban_sdk::{
@@ -125,6 +126,11 @@ mod contract {
         WithdrawTo, BPS_DENOMINATOR, DEFAULT_RESERVE_CAP_BPS, INSTANCE_BUMP, INSTANCE_THRESHOLD,
         MAX_BALANCES_PER_CALL, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
         VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
+        contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractHealth,
+        ContractUpgraded, DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error,
+        OperationWindow, ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw,
+        WithdrawTo, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_VAULT_OPERATIONS_PER_WINDOW,
+        PERSIST_BUMP, PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS,
     };
     use payflow_common::load_instance_or_err;
 
@@ -143,6 +149,18 @@ mod contract {
         /// The version of this contract's crate.
         pub fn version(env: Env) -> String {
             String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        }
+
+        /// Read-only deployment identity and wiring information.
+        pub fn health(env: Env) -> ContractHealth {
+            let subscription = env.storage().instance().get(&DataKey::Subscription);
+            ContractHealth {
+                version: String::from_str(&env, env!("CARGO_PKG_VERSION")),
+                registry: None,
+                vault: Some(env.current_contract_address()),
+                subscription,
+                token: None,
+            }
         }
 
         /// Runs once, in the same transaction that deploys the contract. With a

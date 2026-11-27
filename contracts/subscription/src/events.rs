@@ -37,6 +37,8 @@ pub struct Subscribed {
     /// The referral rate frozen into this mandate, in basis points of the
     /// merchant's share.
     pub referral_bps: u32,
+    /// Minimum number of billing periods frozen into this mandate.
+    pub minimum_commitment: u32,
 }
 
 /// Emitted when a batch of mandates is opened in a single call by
