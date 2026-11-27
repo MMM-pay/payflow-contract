@@ -38,23 +38,24 @@ sequenceDiagram
     participant V as Vault
     participant T as Token
 
-    S->>Sub: subscribe / subscribe_at(plan_id, max_charges, max_total, start, referrer)
+    S->>Sub: subscribe / subscribe_at(plan_id, token, max_charges, max_total, start, referrer)
     Note over Sub: subscriber.require_auth()
     Sub--xS: ProtocolPaused, if the admin paused the protocol (#285)
     opt subscribe_with_deposit only
-        Sub->>Reg: get_plan(plan_id), for the plan's token
-        Sub->>V: deposit(subscriber, plan.token, deposit)
+        Sub->>Reg: get_plan(plan_id), validate token is accepted
+        Sub->>V: deposit(subscriber, token, deposit)
         V->>T: transfer(subscriber → vault, deposit)
         Note over Sub,V: a rejected deposit fails the call with VaultCallFailed
     end
-    Note over Sub: check max_total ≥ 0 and start in [now, now + 1 year]<br/>(InvalidMaxTotal, InvalidStart)
+    Note over Sub: check max_total ≥ 0, token accepted, and start in [now, now + 1 year]<br/>(InvalidMaxTotal, InvalidStart, TokenNotAccepted)
     Sub->>Reg: get_plan(plan_id)
-    Reg-->>Sub: Plan (price, period, token, merchant, keeper/referral bps, seat cap)
+    Reg-->>Sub: Plan (price, period, accepted_tokens, merchant, keeper/referral bps, seat cap)
     Note over Sub: plan must be active and not full<br/>(PlanNotFound, PlanInactive, PlanFull)
     Sub->>Reg: plan_grace_period(plan_id)
     Reg-->>Sub: grace window, frozen into the mandate
     Note over Sub: write Mandate, MandateGracePeriod (if non-zero),<br/>subscriber / merchant / plan index slots,<br/>open-seat count and committed revenue
     Sub-->>S: mandate id
+    Note over Sub: Mandate.token is the subscriber's selected token
     Note over Sub: events: Subscribed, MandateUpdated,<br/>CommittedRevenueChanged (when the total moves)
 ```
 

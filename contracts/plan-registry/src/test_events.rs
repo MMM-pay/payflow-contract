@@ -80,7 +80,7 @@ fn plan_created_layout() {
         &super::PlanCreated {
             merchant: a.clone(),
             plan_id: 7,
-            token: a.clone(),
+            accepted_tokens: soroban_sdk::vec![&env, a.clone()],
             amount: 12_345,
             period: 86_400,
             name: String::from_str(&env, "sample-plan"),

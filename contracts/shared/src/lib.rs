@@ -184,8 +184,8 @@ mod plan {
         /// subscribers next to the name. At most `MAX_DESCRIPTION_LEN` bytes;
         /// may be empty.
         pub description: String,
-        /// SEP-41 token this plan is denominated in.
-        pub token: Address,
+        /// SEP-41 tokens this plan accepts for subscription and settlement.
+        pub accepted_tokens: soroban_sdk::Vec<Address>,
         /// Amount charged per period, in the token's smallest unit. This is what
         /// the subscriber pays in total; the protocol fee and the keeper tip are
         /// both taken out of it before the merchant is paid.

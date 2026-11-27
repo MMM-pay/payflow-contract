@@ -60,6 +60,8 @@ export const Error = {
   /**
    * The replacement plan is denominated in a different token than the plan
    * it replaces, so the pointer would be meaningless.
+   * The replacement plan has no accepted token in common with the plan it
+   * replaces, so a subscriber cannot carry its mandate token to it.
    */
   1014 : { message: "SuccessorTokenMismatch" },
   /**
@@ -111,6 +113,10 @@ export const Error = {
    * The plan token address is a reserved Payflow contract address.
    */
   1025 : { message: "InvalidToken" }
+   * `create_plan` was given no accepted tokens or listed a token more than
+   * once.
+   */
+  1025 : { message: "InvalidAcceptedTokens" }
 }
 
 /**
@@ -140,6 +146,10 @@ export interface Profile {
  * every plan in it; everything else that defines a plan is carried here.
  */
 export interface PlanParams {
+  /**
+   * SEP-41 token contract addresses this plan accepts.
+   */
+  accepted_tokens: Array<string>;
   /**
    * Amount charged per billing period, in the token's smallest unit.
    */
@@ -197,9 +207,18 @@ export interface PlanParams {
 /**
  * One row of a plan listing (#288). Carries the settlement `token` alongside
  * the price so a catalogue mixing tokens is unambiguous without a follow-up
+}
+
+/**
+ * One row of a plan listing (#288). Carries the accepted tokens alongside the
+ * price so a catalogue can show every settlement option without a follow-up
  * `get_plan` per row.
  */
 export interface PlanListing {
+  /**
+   * SEP-41 tokens accepted by the plan.
+   */
+  accepted_tokens: Array<string>;
   /**
    * Whether the plan accepts new subscribers.
    */
@@ -266,6 +285,9 @@ export interface PlanCreatedEvent {
      * Token contract address this plan is denominated in.
      */
     token?: string;
+     * SEP-41 token contract addresses accepted by the plan.
+     */
+    accepted_tokens?: Array<string>;
     /**
      * Amount charged per billing period.
      */
@@ -520,6 +542,13 @@ export interface PlanMinimumCommitmentSetEvent {
  */
 export interface Plan {
   /**
+ */
+export interface Plan {
+  /**
+   * SEP-41 tokens this plan accepts for subscription and settlement.
+   */
+  accepted_tokens: Array<string>;
+  /**
    * Whether the plan accepts new subscriptions. Inactive plans cannot be subscribed to.
    */
   active: boolean;
@@ -637,3 +666,5 @@ export interface ContractHealth {
   version: string;
 }
     export type ContractEvent = PlanCreatedEvent | PlanRenamedEvent | PlansCreatedEvent | ProfileUpdatedEvent | PlanTransferredEvent | ContractUpgradedEvent | PlanSuccessorSetEvent | PlanStatusChangedEvent | PlanGracePeriodSetEvent | PlanOwnershipProposedEvent | PlanChargesPausedChangedEvent | PlanMinimumCommitmentSetEvent;
+}
+    export type ContractEvent = PlanCreatedEvent | PlanRenamedEvent | PlansCreatedEvent | ProfileUpdatedEvent | PlanTransferredEvent | ContractUpgradedEvent | PlanSuccessorSetEvent | PlanStatusChangedEvent | PlanGracePeriodSetEvent | PlanOwnershipProposedEvent | PlanChargesPausedChangedEvent;

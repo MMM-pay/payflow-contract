@@ -210,6 +210,9 @@ export const Error = {
    * charge for a new mandate.
    */
   2041 : { message: "InsufficientBalance" }
+   * The selected token is not accepted by the requested plan.
+   */
+  2041 : { message: "TokenNotAccepted" }
 }
 /**
  * A standing authorization from a subscriber to a merchant, bounded in

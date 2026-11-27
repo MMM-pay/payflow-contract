@@ -26,7 +26,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1011 | `KeeperBpsTooHigh` | Keeper basis points exceed the configured maximum. |
 | 1012 | `SuccessorNotFound` | The proposed successor profile cannot be found. |
 | 1013 | `SelfSuccessor` | The owner attempted to set itself as successor. |
-| 1014 | `SuccessorTokenMismatch` | The successor uses a different token. |
+| 1014 | `SuccessorTokenMismatch` | The plans have no accepted token in common. |
 | 1015 | `DescriptionTooLong` | A plan description exceeds the maximum length. |
 | 1016 | `PlanNameTooLong` | A plan name exceeds the maximum length. |
 | 1017 | `UriTooLong` | A plan URI exceeds the maximum length. |
@@ -44,6 +44,8 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 ## Subscription (2001–2043)
 ## Subscription (2001–2040)
 | 1025 | `InvalidToken` | The token address is the plan-registry or configured subscription contract itself. |
+
+| 1025 | `InvalidAcceptedTokens` | A plan has no accepted tokens or lists the same token more than once. |
 
 ## Subscription (2001–2041)
 
@@ -100,6 +102,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2042 | `ExtraChargeExceedsCap` | A one-off charge exceeds the subscriber-authorized cap. |
 | 2043 | `ExtraChargeAlreadyUsed` | The mandate's one-time extra-charge authorization was already consumed. |
 | 2040 | `MinimumCommitmentNotMet` | Cancellation or a mandate cap would end the mandate before its minimum committed number of billing periods. |
+| 2041 | `TokenNotAccepted` | The selected token is not on the plan's accepted-token list. |
 
 ## Vault (3001–3022)
 | 2041 | `InsufficientBalance` | The unreserved vault balance cannot cover one period's charge for a new mandate. |
