@@ -9,11 +9,12 @@ This page is the integration reference for the errors returned by the contracts 
 The Rust enums remain the source of truth: [plan-registry errors](../contracts/plan-registry/src/error.rs), [subscription errors](../contracts/subscription/src/error.rs), and [vault errors](../contracts/vault/src/error.rs). Error variants are append-only so existing client mappings remain stable.
 
 ## Plan registry (1001–1026)
+## Plan registry (1001–1025)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
 | 1001 | `AlreadyInitialized` | Initialization has already been completed. |
-| 1002 | `NotInitialized` | A method requires initialization, but it has not happened. |
+| 1002 | `NotInitialized` | A method requires initialization or subscription-address wiring, but it has not happened. |
 | 1003 | `PlanNotFound` | The requested plan does not exist. |
 | 1004 | `NotPlanOwner` | The caller is not the plan owner. |
 | 1005 | `InvalidAmount` | An amount is zero or otherwise invalid for the operation. |
@@ -42,6 +43,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 ## Subscription (2001–2047)
 ## Subscription (2001–2043)
 ## Subscription (2001–2040)
+| 1025 | `InvalidToken` | The token address is the plan-registry or configured subscription contract itself. |
+
+## Subscription (2001–2041)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -98,6 +102,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2040 | `MinimumCommitmentNotMet` | Cancellation or a mandate cap would end the mandate before its minimum committed number of billing periods. |
 
 ## Vault (3001–3022)
+| 2041 | `InsufficientBalance` | The unreserved vault balance cannot cover one period's charge for a new mandate. |
+
+## Vault (3001–3020)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -123,5 +130,8 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3020 | `PendingAdminNotFound` | No admin handover is pending, or the proposal was already accepted. |
 | 3021 | `NotPendingAdmin` | The accepting address is not the one the current admin proposed. |
 | 3022 | `InvalidAddress` | A configured address is the contract itself or invalid for the required role. |
+| 3018 | `EmptyReserveBatch` | A bulk reserve update contains no entries. |
+| 3019 | `ReserveBatchTooLarge` | A bulk reserve update exceeds the configured maximum. |
+| 3020 | `DuplicateReserve` | A bulk reserve update contains a mandate more than once. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.

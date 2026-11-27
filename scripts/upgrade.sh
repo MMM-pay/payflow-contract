@@ -45,4 +45,11 @@ echo "    new wasm hash: $HASH"
 stellar contract invoke --id "$ID" --source "$SOURCE" --network "$NETWORK" \
   -- upgrade --new_wasm_hash "$HASH"
 
+if [[ "$CONTRACT" == "plan-registry" ]]; then
+  : "${SUBSCRIPTION_ID:?missing SUBSCRIPTION_ID in $ENV_FILE}"
+  echo "==> wiring the subscription address for plan-token validation"
+  stellar contract invoke --id "$ID" --source "$SOURCE" --network "$NETWORK" \
+    -- set_subscription_contract --subscription "$SUBSCRIPTION_ID"
+fi
+
 echo "==> done. Verify with: stellar contract invoke --id $ID --network $NETWORK -- admin"

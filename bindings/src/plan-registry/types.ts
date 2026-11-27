@@ -10,6 +10,7 @@ export const Error = {
   1001 : { message: "AlreadyInitialized" },
   /**
    * The contract has not been initialized with an admin and counter.
+   * The contract or its subscription address has not been initialized.
    */
   1002 : { message: "NotInitialized" },
   /**
@@ -100,6 +101,16 @@ export const Error = {
    * `create_plans` was given more plans than `MAX_BATCH_PLANS`.
    */
   1023 : { message: "BatchTooLarge" }
+  1023 : { message: "BatchTooLarge" },
+  /**
+   * The next plan ID cannot be represented: the counter is at `u64::MAX`,
+   * or a batch would carry it past `u64::MAX`. No plan is written.
+   */
+  1024 : { message: "PlanIdOverflow" },
+  /**
+   * The plan token address is a reserved Payflow contract address.
+   */
+  1025 : { message: "InvalidToken" }
 }
 
 /**

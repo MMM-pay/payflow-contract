@@ -79,6 +79,30 @@ export const Error = {
    * window rolls over.
    */
   3015 : { message: "RateLimitExceeded" }
+  3015 : { message: "RateLimitExceeded" },
+  /**
+   * A token transfer did not move exactly the requested amount, so the
+   * token is not safe for the vault's exact-amount accounting (for example
+   * a fee-on-transfer token). The whole operation is rolled back.
+   */
+  3016 : { message: "UnexpectedTransferAmount" },
+  /**
+   * A transfer destination is the zero/unset address: the all-zero contract
+   * or account strkey. Sending funds there would burn them (#236).
+   */
+  3017 : { message: "ZeroAddress" },
+  /**
+   * A bulk reserve update contains no entries.
+   */
+  3018 : { message: "EmptyReserveBatch" },
+  /**
+   * A bulk reserve update exceeds `MAX_RESERVE_UPDATES`.
+   */
+  3019 : { message: "ReserveBatchTooLarge" },
+  /**
+   * A bulk reserve update contains the same mandate more than once.
+   */
+  3020 : { message: "DuplicateReserve" }
 }
 
 /**
@@ -96,6 +120,20 @@ export interface SpendLimit {
    * Window length in seconds. Meaningful only when `amount > 0`.
    */
   window_secs: bigint;
+}
+
+/**
+ * One mandate's requested reserve in a bulk reserve update.
+ */
+export interface ReserveUpdate {
+  /**
+   * New reserved amount; zero releases the reserve.
+   */
+  amount: bigint;
+  /**
+   * Mandate whose reserve is being replaced.
+   */
+  mandate_id: bigint;
 }
 
 /**

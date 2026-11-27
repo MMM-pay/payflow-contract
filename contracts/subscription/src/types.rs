@@ -43,6 +43,19 @@ pub enum MandateStatus {
     PastDue,
 }
 
+/// Plan terms captured when a mandate is opened or upgraded. The registry's
+/// mutable state (such as charging pause status) remains authoritative.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanSnapshot {
+    /// Plan name at the time the subscriber agreed to its terms.
+    pub name: String,
+    /// Total charge per billing period.
+    pub amount: i128,
+    /// Billing period in seconds.
+    pub period: u64,
+}
+
 /// A standing authorization from a subscriber to a merchant, bounded in
 /// amount, frequency, total number of charges and total spend.
 #[contracttype]
@@ -163,6 +176,38 @@ pub struct MandateTerms {
     /// Minimum number of billing periods to complete before subscriber
     /// cancellation. Mandates opened before this field existed decode to 0.
     pub minimum_commitment: u32,
+    /// Plan terms copied at sign-up.
+    pub plan_snapshot: PlanSnapshot,
+}
+
+/// Persisted mandate layout before plan snapshots were introduced.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyMandate {
+    pub id: u64,
+    pub subscriber: Address,
+    pub plan_id: u64,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub period: u64,
+    pub created_at: u64,
+    pub next_charge: u64,
+    pub last_charge: u64,
+    pub charges_made: u32,
+    pub max_charges: u32,
+    pub fee_bps: u32,
+    pub keeper_bps: u32,
+    pub paused_until: u64,
+    pub refunded: i128,
+    pub seats: u32,
+    pub max_total: i128,
+    pub total_spent: i128,
+    pub max_pause_secs: u64,
+    pub payout: Address,
+    pub referrer: Option<Address>,
+    pub referral_bps: u32,
+    pub status: MandateStatus,
 }
 
 /// Read-only preview of what `charge` would pay right now.

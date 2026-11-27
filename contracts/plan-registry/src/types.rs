@@ -80,6 +80,8 @@ pub enum DataKey {
     Admin,
     /// Counter storing the next sequential plan ID to be allocated.
     NextPlanId,
+    /// Subscription contract address forbidden as a plan token.
+    SubscriptionContract,
     /// A published plan record stored by its unique ID.
     Plan(u64),
     /// Number of plans a merchant has published.
