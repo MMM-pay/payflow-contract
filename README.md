@@ -149,6 +149,7 @@ Detailed lifecycle guides:
 
 - [`docs/plan-changes.md`](docs/plan-changes.md) — plan upgrade proration, downgrade behaviour, and state transitions for `Subscription::upgrade`
 - [`docs/vault-reserves.md`](docs/vault-reserves.md) — per-mandate vault reserve lifecycle, reserve delta table, and expired vs. cancelled mandate behaviour
+- [`docs/storage-ttl.md`](docs/storage-ttl.md) — storage TTLs, archival, which entries can expire, and how callers keep a mandate alive
 
 ## Architecture decision records
 
