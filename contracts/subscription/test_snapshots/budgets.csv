@@ -1,5 +1,6 @@
-call,cpu_instructions,memory_bytes
-charge_success,1235951,432723
-charge_missing_auth,31697,25501
-charge_vault_failure,394393,204015
-simulate_charge,262869,147389
+call,cpu_instructions,memory_bytes,write_entries,write_bytes
+subscribe,1139103,415899,11,2704
+charge_success,1359340,472470,7,2016
+charge_missing_auth,31715,25569,0,0
+charge_vault_failure,410111,208959,1,0
+simulate_charge,265532,148797,0,0

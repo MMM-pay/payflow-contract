@@ -1,0 +1,6 @@
+call,cpu_instructions,memory_bytes,write_entries,write_bytes
+deposit,457379,163460,5,944
+withdraw,482471,157996,5,944
+debit_multi_mandate,759380,220744,5,928
+set_spend_limit,105855,53606,3,320
+withdraw_all,507796,163056,5,944

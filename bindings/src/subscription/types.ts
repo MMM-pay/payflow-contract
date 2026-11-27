@@ -1,4 +1,5 @@
 import {Address} from '@stellar/stellar-sdk';
+
     /**
  * Errors returned by the subscription contract.
  */
@@ -191,11 +192,51 @@ export const Error = {
    */
   2040 : { message: "UnexpectedTransferAmount" },
   /**
+   * `accept_admin` was called with no pending admin handover, or after the
+   * proposal was already accepted (#238).
+   */
+  2041 : { message: "PendingAdminNotFound" },
+  /**
+   * The address accepting the admin role is not the one the current admin
+   * proposed in `propose_admin` (#238).
+   */
+  2042 : { message: "NotPendingAdmin" },
+  /**
+   * The requested mandate ID has been tombstoned after deletion and cannot
+   * be reused (#368).
+   */
+  2043 : { message: "MandateIdTombstoned" },
+  /**
+   * The requested mandate ID is already assigned to an existing mandate (#368).
+   */
+  2044 : { message: "MandateAlreadyExists" },
+  /**
+   * The requested mandate ID is invalid (mandate IDs start at 1) (#368).
+   */
+  2045 : { message: "InvalidMandateId" },
+  /**
+   * An active or paused mandate cannot be deleted until it is cancelled or
+   * completed (#368).
+   */
+  2046 : { message: "MandateStillActive" },
+  /**
+   * A configured address is the contract itself or otherwise invalid for
+   * this role (#282).
+   */
+  2047 : { message: "InvalidAddress" },
+  /**
+   * `flag_failed_charge` was called inside the plan's frozen retry window
+   * (#343). The charge may still succeed, so no failure is recorded until
+   * the window closes.
+   */
+  2048 : { message: "RetryWindowActive" },
+  /**
    * The subscriber's unreserved vault balance cannot cover one period's
    * charge for a new mandate.
    */
-  2041 : { message: "InsufficientBalance" }
+  2049 : { message: "InsufficientBalance" }
 }
+
 /**
  * A standing authorization from a subscriber to a merchant, bounded in
  * amount, frequency, total number of charges and total spend.
@@ -349,6 +390,17 @@ export interface ChargeQuote {
    * The merchant's share after both the protocol fee and the keeper tip.
    */
   merchant_amount: bigint;
+  /**
+   * Unix seconds at which the retry window closes, computed as `due_at`
+   * plus the frozen window. Equals `due_at` when there is no window, so a
+   * client can always compare one deadline.
+   */
+  retry_at: bigint;
+  /**
+   * Ledger-count retry window frozen into the mandate at sign-up (#343).
+   * `None` means a failed charge may be flagged as soon as it is due.
+   */
+  retry_window_ledgers: number | null;
 }
 
 /**
@@ -934,6 +986,31 @@ export interface PauseChangedEvent {
 }
 
 /**
+ * Emitted when a referral share is paid out to a referrer on a successful charge (#364).
+ */
+export interface ReferralPaidEvent {
+  name: "ReferralPaid";
+  data: {
+    /**
+     * ID of the charged mandate.
+     */
+    mandate_id: bigint;
+    /**
+     * Account receiving the referral reward.
+     */
+    referrer: string;
+    /**
+     * SEP-41 token the reward was paid in.
+     */
+    token?: string;
+    /**
+     * Amount paid to the referrer out of the merchant share.
+     */
+    amount?: bigint;
+  };
+}
+
+/**
  * Emitted when a subscriber changes the seat count on their mandate.
  *
  * The new seat count takes effect from the next charge; no money moves at the
@@ -958,6 +1035,24 @@ export interface SeatsChangedEvent {
      * Seat count after the change, effective from the next charge.
      */
     new_seats?: number;
+  };
+}
+
+/**
+ * Emitted when a subscriber deletes a cancelled or completed mandate,
+ * removing its record from storage and permanently tombstoning its ID (#368).
+ */
+export interface MandateDeletedEvent {
+  name: "MandateDeleted";
+  data: {
+    /**
+     * ID of the deleted and tombstoned mandate.
+     */
+    mandate_id: bigint;
+    /**
+     * Account of the subscriber who deleted the mandate.
+     */
+    subscriber: string;
   };
 }
 
@@ -1094,10 +1189,6 @@ export interface CommittedRevenueChangedEvent {
      */
     token?: string;
     /**
-     * Previous committed amount per period.
-     */
-    old_committed?: bigint;
-    /**
      * New committed amount per period.
      */
     new_committed?: bigint;
@@ -1107,4 +1198,4 @@ export interface CommittedRevenueChangedEvent {
     period?: bigint;
   };
 }
-    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | SeatsChangedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;
+    export type ContractEvent = ChargedEvent | RefundedEvent | UpgradedEvent | CancelledEvent | FeeChangedEvent | SubscribedEvent | ChargeFailedEvent | MandateEndedEvent | PauseChangedEvent | ReferralPaidEvent | SeatsChangedEvent | MandateDeletedEvent | MandateUpdatedEvent | ContractUpgradedEvent | MandateCompletedEvent | MaxChargesChangedEvent | MandateTransferredEvent | ProtocolPauseChangedEvent | CommittedRevenueChangedEvent;

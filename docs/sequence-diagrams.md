@@ -128,9 +128,9 @@ When the admin calls `set_protocol_paused(true)`:
 
 | Flow | Behaviour |
 |---|---|
-| `subscribe`, `subscribe_at`, `subscribe_with_deposit` | Fail with `ProtocolPaused` before any call to the registry or the vault |
+| `subscribe`, `subscribe_with_id`, `subscribe_at`, `subscribe_with_deposit` | Fail with `ProtocolPaused` before any call to the registry or the vault |
 | `charge` | Fails with `ProtocolPaused`; the mandate's `next_charge` is unchanged, so it is chargeable as soon as the protocol resumes |
 | `upgrade` | Fails with `ProtocolPaused` |
-| `cancel`, `cancel_page`, `end_mandate`, `set_paused`, `pause_until`, `refund` | Unaffected |
+| `cancel`, `cancel_page`, `end_mandate`, `delete_mandate`, `set_paused`, `pause_until`, `refund` | Unaffected |
 | Every view, `extend_merchant_mandates_ttl` | Unaffected |
 | Vault `withdraw`, `withdraw_to`, `withdraw_all` | Unaffected: the vault never reads the switch |

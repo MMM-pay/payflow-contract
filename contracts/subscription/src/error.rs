@@ -115,9 +115,32 @@ pub enum Error {
     /// so the token is unsafe for exact-amount accounting (for example a
     /// fee-on-transfer token). The refund is rolled back.
     UnexpectedTransferAmount = 2040,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 2041,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 2042,
+    /// The requested mandate ID has been tombstoned after deletion and cannot
+    /// be reused (#368).
+    MandateIdTombstoned = 2043,
+    /// The requested mandate ID is already assigned to an existing mandate (#368).
+    MandateAlreadyExists = 2044,
+    /// The requested mandate ID is invalid (mandate IDs start at 1) (#368).
+    InvalidMandateId = 2045,
+    /// An active or paused mandate cannot be deleted until it is cancelled or
+    /// completed (#368).
+    MandateStillActive = 2046,
+    /// A configured address is the contract itself or otherwise invalid for
+    /// this role (#282).
+    InvalidAddress = 2047,
+    /// `flag_failed_charge` was called inside the plan's frozen retry window
+    /// (#343). The charge may still succeed, so no failure is recorded until
+    /// the window closes.
+    RetryWindowActive = 2048,
     /// The subscriber's unreserved vault balance cannot cover one period's
     /// charge for a new mandate.
-    InsufficientBalance = 2041,
+    InsufficientBalance = 2049,
 }
 
 impl From<Error> for ErrorCode {

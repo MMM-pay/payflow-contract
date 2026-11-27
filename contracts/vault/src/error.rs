@@ -57,12 +57,28 @@ pub enum Error {
     /// A transfer destination is the zero/unset address: the all-zero contract
     /// or account strkey. Sending funds there would burn them (#236).
     ZeroAddress = 3017,
+    /// The reserve would take the subscriber's total reserve above the cap the
+    /// vault was deployed with (#348). A minimum free balance therefore stays
+    /// withdrawable no matter how many mandates the subscriber reserves for.
+    ReserveCapExceeded = 3018,
+    /// `__constructor` was given a reserve cap above 10,000 basis points
+    /// (100% of the balance), which is not a meaningful cap (#348).
+    InvalidReserveCap = 3019,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 3020,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 3021,
+    /// A configured address is the contract itself or otherwise invalid for
+    /// this role (#282).
+    InvalidAddress = 3022,
     /// A bulk reserve update contains no entries.
-    EmptyReserveBatch = 3018,
+    EmptyReserveBatch = 3023,
     /// A bulk reserve update exceeds `MAX_RESERVE_UPDATES`.
-    ReserveBatchTooLarge = 3019,
+    ReserveBatchTooLarge = 3024,
     /// A bulk reserve update contains the same mandate more than once.
-    DuplicateReserve = 3020,
+    DuplicateReserve = 3025,
 }
 
 impl From<Error> for ErrorCode {

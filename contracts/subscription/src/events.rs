@@ -383,10 +383,39 @@ pub struct CommittedRevenueChanged {
     pub merchant: Address,
     /// Token the plan is denominated in.
     pub token: Address,
-    /// Previous committed amount per period.
-    pub old_committed: i128,
+    // The previous value is the last new_committed for this plan, or zero
+    // before the first event; do not duplicate it in every event.
     /// New committed amount per period.
     pub new_committed: i128,
     /// Billing period in seconds.
     pub period: u64,
+}
+
+/// Emitted when a subscriber deletes a cancelled or completed mandate,
+/// removing its record from storage and permanently tombstoning its ID (#368).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateDeleted {
+    /// ID of the deleted and tombstoned mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber who deleted the mandate.
+    #[topic]
+    pub subscriber: Address,
+}
+
+/// Emitted when a referral share is paid out to a referrer on a successful charge (#364).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferralPaid {
+    /// ID of the charged mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account receiving the referral reward.
+    #[topic]
+    pub referrer: Address,
+    /// SEP-41 token the reward was paid in.
+    pub token: Address,
+    /// Amount paid to the referrer out of the merchant share.
+    pub amount: i128,
 }

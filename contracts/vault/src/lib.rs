@@ -15,7 +15,7 @@
 //!
 //! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
 //! |---|---|---|---|---|---|
-//! | `__constructor` | 0 | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `__constructor` | 0 | 2 (Admin, ReserveCapBps) | 0 | 0 | Extends instance TTL |
 //! | `set_subscription` | 1 (Admin) | 1 (Subscription) | 0 | 0 | Admin only, extends instance TTL |
 //! | `set_allowlist_enabled` | 1 (Admin) | 1 (AllowlistEnabled) | 0 | 0 | Admin only, extends instance TTL |
 //! | `set_token_allowed` | 1 (Admin) | 0 | 0 | 1 (TokenAllowed) | Admin only, extends persistent TTL |
@@ -37,7 +37,9 @@
 //! | `set_reserve` | 0 | 0 | 3 (Reserved, ReservedTotal, Balance) | 2 (Reserved, ReservedTotal) | Replaces one reserve |
 //! | `set_reserves` | 0 | 0 | N+2 (Reserved, ReservedTotal, Balance) | N+1 (Reserved, ReservedTotal) | One aggregate total write and one event per mandate |
 //! | `spend_limit` | 0 | 0 | 1 (SpendLimit) | 0 | |
-//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `emergency_withdraw` | 1 (Admin) | 0 | 1–2 (ReservedTotal, ReservedMandates) | 1+ (clears Reserved keys) | Admin only, releases all reserves |
+//! | `propose_admin` | 1 (Admin) | 1 (PendingAdmin) | 0 | 0 | Extends instance TTL |
+//! | `accept_admin` | 2 (Admin, PendingAdmin) | 1 (Admin) | 0 | 0 | Removes PendingAdmin; extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
 //! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
 
@@ -53,6 +55,8 @@ mod error;
 #[allow(missing_docs)]
 mod events;
 #[allow(missing_docs)]
+mod storage_keys;
+#[allow(missing_docs)]
 mod types;
 
 #[cfg(test)]
@@ -64,7 +68,8 @@ mod test_events;
 
 pub use error::Error;
 pub use events::{
-    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, ReserveSet, Withdraw, WithdrawTo,
+    ContractUpgraded, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, ReserveSet,
+    Withdraw, WithdrawTo,
 };
 pub use types::{DataKey, OperationWindow, ReserveUpdate, SpendLimit, SpendWindow, UpgradeRecord};
 
@@ -99,17 +104,27 @@ pub const MAX_VAULT_OPERATIONS_PER_WINDOW: u32 = 8;
 
 /// Maximum number of mandate reserves updated by one `set_reserves` call.
 pub const MAX_RESERVE_UPDATES: u32 = 50;
+/// Largest share of a subscriber's balance that may be earmarked as reserves,
+/// in basis points. A subscriber may reserve for each of their mandates, so
+/// without a ceiling many open mandates could lock the whole vault and leave
+/// nothing withdrawable (#348). `9_000` keeps 10% free; `10_000` allows the
+/// whole balance and `0` forbids reserves.
+pub const DEFAULT_RESERVE_CAP_BPS: u32 = 9_000;
+
+/// Basis-point denominator used by the reserve cap.
+pub const BPS_DENOMINATOR: u32 = 10_000;
 
 #[allow(missing_docs)]
 mod contract {
     use super::{
         contract, contractimpl, token, Address, BytesN, ContractExecutable, ContractUpgraded,
-        DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
-        ReserveSet, ReserveUpdate, SpendLimit, SpendWindow, String, UpgradeRecord, Vec, Withdraw,
-        WithdrawTo, INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_RESERVE_UPDATES,
-        MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP, PERSIST_THRESHOLD,
-        VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
+        DataKey, Debit, Deposit, DepositCapSet, DepositFor, EmergencyWithdraw, Env, Error,
+        OperationWindow, ReserveSet, ReserveUpdate, SpendLimit, SpendWindow, String, UpgradeRecord,
+        Vec, Withdraw, WithdrawTo, BPS_DENOMINATOR, DEFAULT_RESERVE_CAP_BPS, INSTANCE_BUMP,
+        INSTANCE_THRESHOLD, MAX_RESERVE_UPDATES, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP,
+        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
+    use payflow_common::load_instance_or_err;
 
     /// Custody for subscriber funds.
     ///
@@ -131,11 +146,27 @@ mod contract {
         /// Runs once, in the same transaction that deploys the contract. With a
         /// separate `initialize` call, anyone watching the ledger could call it
         /// between the deploy and the owner's own call and make themselves admin.
-        pub fn __constructor(env: Env, admin: Address) {
+        ///
+        /// `reserve_cap_bps` is fixed here, in basis points of a subscriber's
+        /// balance: the largest share that may be earmarked as reserves across
+        /// all of their mandates (#348). `9_000` keeps 10% free, `0` forbids
+        /// reserves entirely and `10_000` allows reserving the whole balance.
+        ///
+        /// # Errors
+        /// Returns [`Error::InvalidReserveCap`] if `reserve_cap_bps > 10_000`.
+        pub fn __constructor(env: Env, admin: Address, reserve_cap_bps: u32) -> Result<(), Error> {
+            if reserve_cap_bps > BPS_DENOMINATOR {
+                return Err(Error::InvalidReserveCap);
+            }
+
             env.storage().instance().set(&DataKey::Admin, &admin);
             env.storage()
                 .instance()
+                .set(&DataKey::ReserveCapBps, &reserve_cap_bps);
+            env.storage()
+                .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+            Ok(())
         }
 
         /// Point the vault at the subscription contract allowed to debit it.
@@ -147,9 +178,13 @@ mod contract {
         /// Emits no events.
         ///
         /// # Errors
-        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        /// Returns [`Error::NotInitialized`] if no admin is configured, or
+        /// [`Error::InvalidAddress`] if `subscription` is this vault contract.
         pub fn set_subscription(env: Env, subscription: Address) -> Result<(), Error> {
             Self::require_admin(&env)?;
+            if subscription == env.current_contract_address() {
+                return Err(Error::InvalidAddress);
+            }
 
             env.storage()
                 .instance()
@@ -198,6 +233,9 @@ mod contract {
         /// Returns [`Error::NotInitialized`] if no admin is configured.
         pub fn set_token_allowed(env: Env, token: Address, allowed: bool) -> Result<(), Error> {
             Self::require_admin(&env)?;
+            if allowed && !payflow_common::is_valid_token_address(&env, &token) {
+                return Err(Error::InvalidAddress);
+            }
 
             let key = DataKey::TokenAllowed(token);
             env.storage().persistent().set(&key, &allowed);
@@ -703,9 +741,11 @@ mod contract {
         /// Emits [`ReserveSet`].
         ///
         /// # Errors
-        /// Returns [`Error::InvalidAmount`] if `amount < 0`, or
+        /// Returns [`Error::InvalidAmount`] if `amount < 0`,
         /// [`Error::ReserveExceedsBalance`] if the subscriber's total reserve
-        /// for `token` would exceed their balance.
+        /// for `token` would exceed their balance, or
+        /// [`Error::ReserveCapExceeded`] if it would exceed the deploy-time cap
+        /// (#348). Reducing or releasing a reserve is always allowed.
         pub fn set_reserve(
             env: Env,
             user: Address,
@@ -723,8 +763,15 @@ mod contract {
             let new_total = (total - old)
                 .checked_add(amount)
                 .ok_or(Error::ReserveExceedsBalance)?;
-            if new_total > Self::read_balance(&env, &user, &token) {
+            let balance = Self::read_balance(&env, &user, &token);
+            if new_total > balance {
                 return Err(Error::ReserveExceedsBalance);
+            }
+            // The cap only blocks a reservation that grows the total: a
+            // subscriber must always be able to reduce or release a reserve,
+            // even when the balance has since fallen below an existing total.
+            if new_total > total && new_total > Self::reserve_cap(&env, balance) {
+                return Err(Error::ReserveCapExceeded);
             }
 
             Self::write_reserved(&env, &user, &token, mandate_id, amount);
@@ -759,7 +806,8 @@ mod contract {
         /// [`Error::DuplicateReserve`] for repeated mandate IDs,
         /// [`Error::InvalidAmount`] for a negative amount, or
         /// [`Error::ReserveExceedsBalance`] if the resulting aggregate exceeds
-        /// the user's balance.
+        /// the user's balance, or [`Error::ReserveCapExceeded`] if the batch
+        /// grows the total beyond the deploy-time reserve cap.
         pub fn set_reserves(
             env: Env,
             user: Address,
@@ -794,8 +842,12 @@ mod contract {
                     .ok_or(Error::ReserveExceedsBalance)?;
                 planned.push_back((update.mandate_id, old, update.amount));
             }
-            if new_total > Self::read_balance(&env, &user, &token) {
+            let balance = Self::read_balance(&env, &user, &token);
+            if new_total > balance {
                 return Err(Error::ReserveExceedsBalance);
+            }
+            if new_total > initial_total && new_total > Self::reserve_cap(&env, balance) {
+                return Err(Error::ReserveCapExceeded);
             }
 
             let mut event_total = initial_total;
@@ -824,6 +876,12 @@ mod contract {
         /// Total reserved by `user` in `token` across every mandate.
         pub fn reserved_total(env: Env, user: Address, token: Address) -> i128 {
             Self::read_reserved_total(&env, &user, &token)
+        }
+
+        /// The largest share of a subscriber's balance that may be reserved,
+        /// in basis points, as fixed when this vault was deployed (#348).
+        pub fn reserve_cap_bps(env: Env) -> u32 {
+            Self::read_reserve_cap_bps(&env)
         }
 
         /// The part of `user`'s `token` balance not reserved for any mandate:
@@ -884,24 +942,62 @@ mod contract {
 
         /// Address of the subscription contract currently allowed to debit funds.
         pub fn subscription(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Subscription)
-                .ok_or(Error::SubscriptionNotSet)
+            load_instance_or_err(&env, &DataKey::Subscription, Error::SubscriptionNotSet)
         }
 
-        /// Hand the admin role to another address. Only the current admin may
-        /// call this, and the new admin takes effect immediately: the old one
-        /// keeps no authority. A deployment whose admin key is lost or
-        /// rotated is otherwise stuck with it for the life of the contract.
+        /// Propose handing the admin role to `new_admin` (#238).
+        ///
+        /// This is step one of a two-step handover. The current admin keeps
+        /// the role until `new_admin` accepts with `accept_admin`; proposing
+        /// alone changes no authority, so a mistyped or hostile proposal can
+        /// be replaced before anyone accepts it. A later proposal to another
+        /// address overwrites the pending one.
         ///
         /// # Auth
         /// Requires authorization from the current admin.
-        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
             let current: Address = Self::admin(env.clone())?;
             current.require_auth();
 
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingAdmin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
+        }
+
+        /// Accept a pending admin handover (#238). Step two of the handshake:
+        /// only the address the current admin proposed may accept, and the
+        /// role moves only when it does. The pending proposal is consumed, so
+        /// a second accept by the same address fails.
+        ///
+        /// # Auth
+        /// Requires authorization from `new_admin`.
+        ///
+        /// # Errors
+        /// Returns [`Error::PendingAdminNotFound`] if no handover is pending,
+        /// or [`Error::NotPendingAdmin`] if `new_admin` is not the proposed
+        /// successor.
+        pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            new_admin.require_auth();
+
+            let pending: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingAdmin)
+                .ok_or(Error::PendingAdminNotFound)?;
+            if pending != new_admin {
+                return Err(Error::NotPendingAdmin);
+            }
+
             env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&DataKey::PendingAdmin);
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -911,10 +1007,7 @@ mod contract {
 
         /// Admin address configured for this vault.
         pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::Admin, Error::NotInitialized)
         }
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
@@ -923,11 +1016,8 @@ mod contract {
         /// Records the upgrade in the contract's upgrade history, which can be
         /// queried via `upgrade_history` for transparency.
         pub fn upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)?;
+            let admin: Address =
+                load_instance_or_err(&env, &DataKey::Admin, Error::NotInitialized)?;
             admin.require_auth();
 
             env.deployer()
@@ -954,18 +1044,17 @@ mod contract {
                 ledger,
                 wasm_hash,
             };
+            let key = DataKey::UpgradeHistory;
             let mut history: soroban_sdk::Vec<UpgradeRecord> = env
                 .storage()
-                .instance()
-                .get(&DataKey::UpgradeHistory)
+                .persistent()
+                .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
+            env.storage().persistent().set(&key, &history);
             env.storage()
-                .instance()
-                .set(&DataKey::UpgradeHistory, &history);
-            env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
         /// Get the contract's upgrade history.
@@ -976,7 +1065,7 @@ mod contract {
         /// appear here.
         pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
             env.storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::UpgradeHistory)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
@@ -1037,6 +1126,53 @@ mod contract {
                     amount: 0,
                     window_secs: 0,
                 })
+        }
+
+        /// Release all per-mandate reserves held for `subscriber` in `token`
+        /// (#341), making their full vault balance withdrawable when a merchant
+        /// becomes unresponsive.
+        ///
+        /// Moves no tokens out of the vault — the admin still has no path to
+        /// user funds — and emits [`EmergencyWithdraw`] with the total released
+        /// reserve amount.
+        ///
+        /// # Auth
+        /// Requires authorization from the contract admin.
+        ///
+        /// # Events
+        /// Emits [`EmergencyWithdraw`].
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn emergency_withdraw(
+            env: Env,
+            subscriber: Address,
+            token: Address,
+        ) -> Result<i128, Error> {
+            Self::require_admin(&env)?;
+
+            let released = Self::read_reserved_total(&env, &subscriber, &token);
+            let list_key = DataKey::ReservedMandates(subscriber.clone(), token.clone());
+            let p = env.storage().persistent();
+            if let Some(mandate_ids) = p.get::<_, soroban_sdk::Vec<u64>>(&list_key) {
+                for mandate_id in mandate_ids.iter() {
+                    p.remove(&DataKey::Reserved(
+                        subscriber.clone(),
+                        token.clone(),
+                        mandate_id,
+                    ));
+                }
+                p.remove(&list_key);
+            }
+            Self::write_reserved_total(&env, &subscriber, &token, 0);
+
+            EmergencyWithdraw {
+                subscriber,
+                amount: released,
+            }
+            .publish(&env);
+
+            Ok(released)
         }
     }
 
@@ -1261,11 +1397,8 @@ mod contract {
         }
 
         fn require_subscription(env: &Env) -> Result<(), Error> {
-            let subscription: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::Subscription)
-                .ok_or(Error::SubscriptionNotSet)?;
+            let subscription: Address =
+                load_instance_or_err(env, &DataKey::Subscription, Error::SubscriptionNotSet)?;
             subscription.require_auth();
             Ok(())
         }
@@ -1360,12 +1493,45 @@ mod contract {
             amount: i128,
         ) {
             let key = DataKey::Reserved(user.clone(), token.clone(), mandate_id);
+            let list_key = DataKey::ReservedMandates(user.clone(), token.clone());
             let p = env.storage().persistent();
+            let mut mandate_ids: soroban_sdk::Vec<u64> = p
+                .get(&list_key)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
             if amount == 0 {
                 p.remove(&key);
+                let mut idx: Option<u32> = None;
+                for i in 0..mandate_ids.len() {
+                    if mandate_ids.get_unchecked(i) == mandate_id {
+                        idx = Some(i);
+                        break;
+                    }
+                }
+                if let Some(pos) = idx {
+                    mandate_ids.remove(pos);
+                    if mandate_ids.is_empty() {
+                        p.remove(&list_key);
+                    } else {
+                        p.set(&list_key, &mandate_ids);
+                        p.extend_ttl(&list_key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                    }
+                }
             } else {
                 p.set(&key, &amount);
                 p.extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
+                let mut found = false;
+                for i in 0..mandate_ids.len() {
+                    if mandate_ids.get_unchecked(i) == mandate_id {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    mandate_ids.push_back(mandate_id);
+                    p.set(&list_key, &mandate_ids);
+                }
+                p.extend_ttl(&list_key, PERSIST_THRESHOLD, PERSIST_BUMP);
             }
         }
 
@@ -1390,12 +1556,24 @@ mod contract {
             }
         }
 
-        fn require_admin(env: &Env) -> Result<Address, Error> {
-            let admin: Address = env
-                .storage()
+        fn read_reserve_cap_bps(env: &Env) -> u32 {
+            env.storage()
                 .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)?;
+                .get(&DataKey::ReserveCapBps)
+                .unwrap_or(DEFAULT_RESERVE_CAP_BPS)
+        }
+
+        /// Largest total reserve allowed for `balance` under the deploy-time
+        /// cap. The balance is split before multiplying so the product cannot
+        /// overflow `i128` for a very large balance.
+        fn reserve_cap(env: &Env, balance: i128) -> i128 {
+            let bps = i128::from(Self::read_reserve_cap_bps(env));
+            let denominator = i128::from(BPS_DENOMINATOR);
+            (balance / denominator) * bps + (balance % denominator) * bps / denominator
+        }
+
+        fn require_admin(env: &Env) -> Result<Address, Error> {
+            let admin: Address = load_instance_or_err(env, &DataKey::Admin, Error::NotInitialized)?;
             admin.require_auth();
             Ok(admin)
         }

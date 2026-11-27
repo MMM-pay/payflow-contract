@@ -26,6 +26,7 @@
 //! | `get_plan` | 0 | 0 | 1 (Plan) | 0 | |
 //! | `plan_charges_paused` | 0 | 0 | 2 (Plan, PlanChargesPaused) | 0 | |
 //! | `plan_grace_period` | 0 | 0 | 2 (Plan, PlanGracePeriod) | 0 | |
+//! | `plan_charge_terms` | 0 | 0 | 2 (Plan, PlanChargesPaused) | 0 | What `charge` needs in one call |
 //! | `merchant_plan_count` | 0 | 0 | 1 (count) | 0 | |
 //! | `merchant_plans` | 0 | 0 | ≤50 (index slots) | 0 | Page size ≤50 |
 //! | `token_plan_count` | 0 | 0 | 1 (count) | 0 | |
@@ -33,7 +34,8 @@
 //! | `merchant_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
 //! | `token_plan_listings` | 0 | 0 | ≤100 (index slots + Plans) | 0 | Page size ≤50 |
 //! | `next_plan_id` | 1 (NextPlanId) | 0 | 0 | 0 | |
-//! | `update_admin` | 1 (Admin) | 1 (Admin) | 0 | 0 | Extends instance TTL |
+//! | `propose_admin` | 1 (Admin) | 1 (PendingAdmin) | 0 | 0 | Extends instance TTL |
+//! | `accept_admin` | 2 (Admin, PendingAdmin) | 1 (Admin) | 0 | 0 | Removes PendingAdmin; extends instance TTL |
 //! | `admin` | 1 (Admin) | 0 | 0 | 0 | |
 //! | `upgrade_wasm` | 1 (Admin) | 0 | 0 | 0 | Extends instance TTL |
 //! | `propose_plan_owner` | 0 | 0 | 1 (Plan) | 1 (Proposal) | Extends persistent TTL |
@@ -51,6 +53,8 @@ mod error;
 #[allow(missing_docs)]
 mod events;
 #[allow(missing_docs)]
+mod storage_keys;
+#[allow(missing_docs)]
 mod types;
 
 #[cfg(test)]
@@ -66,7 +70,7 @@ pub use events::{
     PlanOwnershipProposed, PlanRenamed, PlanStatusChanged, PlanSuccessorSet, PlanTransferred,
     PlansCreated, ProfileUpdated,
 };
-pub use types::{DataKey, Plan, PlanListing, PlanParams, Profile, UpgradeRecord};
+pub use types::{DataKey, Plan, PlanChargeTerms, PlanListing, PlanParams, Profile, UpgradeRecord};
 
 use payflow_shared::{MAX_KEEPER_BPS, MAX_REFERRAL_BPS};
 use soroban_sdk::{
@@ -117,13 +121,15 @@ pub const MIN_CHARGE_AMOUNT: i128 = payflow_shared::MIN_CHARGE_AMOUNT;
 mod contract {
     use super::{
         contract, contractimpl, Address, BytesN, ContractExecutable, ContractUpgraded, DataKey,
-        Env, Error, Plan, PlanChargesPausedChanged, PlanCreated, PlanGracePeriodSet, PlanListing,
-        PlanOwnershipProposed, PlanParams, PlanRenamed, PlanStatusChanged, PlanSuccessorSet,
-        PlanTransferred, PlansCreated, Profile, ProfileUpdated, String, Symbol, UpgradeRecord, Vec,
-        INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS,
-        MAX_NAME_LEN, MAX_PAGE, MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT,
-        MIN_PERIOD, PERSIST_BUMP, PERSIST_THRESHOLD,
+        Env, Error, Plan, PlanChargeTerms, PlanChargesPausedChanged, PlanCreated,
+        PlanGracePeriodSet, PlanListing, PlanOwnershipProposed, PlanParams, PlanRenamed,
+        PlanStatusChanged, PlanSuccessorSet, PlanTransferred, PlansCreated, Profile,
+        ProfileUpdated, String, Symbol, UpgradeRecord, Vec, INSTANCE_BUMP, INSTANCE_THRESHOLD,
+        MAX_BATCH_PLANS, MAX_DESCRIPTION_LEN, MAX_KEEPER_BPS, MAX_NAME_LEN, MAX_PAGE,
+        MAX_REFERRAL_BPS, MAX_TERMS_LEN, MAX_URL_LEN, MIN_CHARGE_AMOUNT, MIN_PERIOD, PERSIST_BUMP,
+        PERSIST_THRESHOLD,
     };
+    use payflow_common::{load_instance_or_err, load_or_err};
 
     /// Contract implementation for publishing and managing subscription plans.
     #[contract]
@@ -190,6 +196,12 @@ mod contract {
         /// mandate. It may be empty, is capped at `MAX_TERMS_LEN` bytes, and is
         /// self-declared by the merchant: the contract does not fetch or verify it.
         ///
+        /// `retry_window_ledgers` is how long a failed charge may be retried
+        /// before the subscription contract allows the failure to be marked
+        /// (#343). It is frozen into each mandate at sign-up, so changing the
+        /// plan later cannot shorten a window an open mandate was promised.
+        /// `None` disables the window.
+        ///
         /// # Auth
         /// Requires authorization from `merchant`.
         ///
@@ -224,6 +236,7 @@ mod contract {
             referral_bps: u32,
             payout: Option<Address>,
             max_subscribers: u32,
+            retry_window_ledgers: Option<u32>,
         ) -> Result<u64, Error> {
             merchant.require_auth();
 
@@ -240,6 +253,7 @@ mod contract {
                 referral_bps,
                 payout,
                 max_subscribers,
+                retry_window_ledgers,
             };
             let subscription = Self::read_subscription_contract(&env)?;
             Self::validate_plan(&env, &params, &subscription)?;
@@ -543,6 +557,27 @@ mod contract {
                 .unwrap_or(false))
         }
 
+        /// The plan fields that settling a charge needs (merchant, token,
+        /// period and the charges-paused flag), in one call. The plan entry is
+        /// loaded once, where `plan_charges_paused` followed by `get_plan`
+        /// loads it twice.
+        ///
+        /// # Errors
+        /// Returns [`Error::PlanNotFound`] if the plan does not exist.
+        pub fn plan_charge_terms(env: Env, plan_id: u64) -> Result<PlanChargeTerms, Error> {
+            let plan = Self::read_plan(&env, plan_id).ok_or(Error::PlanNotFound)?;
+            Ok(PlanChargeTerms {
+                merchant: plan.merchant,
+                token: plan.token,
+                period: plan.period,
+                charges_paused: env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PlanChargesPaused(plan_id))
+                    .unwrap_or(false),
+            })
+        }
+
         /// Alias for [`PlanRegistry::plan_charges_paused`].
         pub fn plan_paused(env: Env, plan_id: u64) -> Result<bool, Error> {
             Self::plan_charges_paused(env, plan_id)
@@ -691,10 +726,7 @@ mod contract {
 
         /// `merchant`'s self-declared profile, if one has been set.
         pub fn profile(env: Env, merchant: Address) -> Result<Profile, Error> {
-            env.storage()
-                .persistent()
-                .get(&DataKey::Profile(merchant))
-                .ok_or(Error::ProfileNotFound)
+            load_or_err(&env, &DataKey::Profile(merchant), Error::ProfileNotFound)
         }
 
         /// Deactivate up to `limit` of `merchant`'s plans, starting at position
@@ -853,24 +885,62 @@ mod contract {
         /// The id the next published plan will get. Plans are numbered from 1, so
         /// `next_plan_id() - 1` is the number of plans published so far.
         pub fn next_plan_id(env: Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
-        /// Hand the admin role to another address. Only the current admin may
-        /// call this, and the new admin takes effect immediately: the old one
-        /// keeps no authority. A deployment whose admin key is lost or
-        /// rotated is otherwise stuck with it for the life of the contract.
+        /// Propose handing the admin role to `new_admin` (#238).
+        ///
+        /// This is step one of a two-step handover. The current admin keeps
+        /// the role until `new_admin` accepts with `accept_admin`; proposing
+        /// alone changes no authority, so a mistyped or hostile proposal can
+        /// be replaced before anyone accepts it. A later proposal to another
+        /// address overwrites the pending one.
         ///
         /// # Auth
         /// Requires authorization from the current admin.
-        pub fn update_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        ///
+        /// # Errors
+        /// Returns [`Error::NotInitialized`] if no admin is configured.
+        pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
             let current: Address = Self::admin(env.clone())?;
             current.require_auth();
 
+            env.storage()
+                .instance()
+                .set(&DataKey::PendingAdmin, &new_admin);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+
+            Ok(())
+        }
+
+        /// Accept a pending admin handover (#238). Step two of the handshake:
+        /// only the address the current admin proposed may accept, and the
+        /// role moves only when it does. The pending proposal is consumed, so
+        /// a second accept by the same address fails.
+        ///
+        /// # Auth
+        /// Requires authorization from `new_admin`.
+        ///
+        /// # Errors
+        /// Returns [`Error::PendingAdminNotFound`] if no handover is pending,
+        /// or [`Error::NotPendingAdmin`] if `new_admin` is not the proposed
+        /// successor.
+        pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+            new_admin.require_auth();
+
+            let pending: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::PendingAdmin)
+                .ok_or(Error::PendingAdminNotFound)?;
+            if pending != new_admin {
+                return Err(Error::NotPendingAdmin);
+            }
+
             env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&DataKey::PendingAdmin);
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
@@ -880,10 +950,7 @@ mod contract {
 
         /// Address of the contract administrator.
         pub fn admin(env: Env) -> Result<Address, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::Admin)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(&env, &DataKey::Admin, Error::NotInitialized)
         }
 
         /// Replace this contract's wasm with code at `new_wasm_hash`. Only the
@@ -919,18 +986,17 @@ mod contract {
                 ledger,
                 wasm_hash,
             };
+            let key = DataKey::UpgradeHistory;
             let mut history: soroban_sdk::Vec<UpgradeRecord> = env
                 .storage()
-                .instance()
-                .get(&DataKey::UpgradeHistory)
+                .persistent()
+                .get(&key)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(env));
             history.push_back(record);
+            env.storage().persistent().set(&key, &history);
             env.storage()
-                .instance()
-                .set(&DataKey::UpgradeHistory, &history);
-            env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
         /// Get the contract's upgrade history.
@@ -941,7 +1007,7 @@ mod contract {
         /// appear here.
         pub fn upgrade_history(env: Env) -> soroban_sdk::Vec<UpgradeRecord> {
             env.storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::UpgradeHistory)
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         }
@@ -988,11 +1054,8 @@ mod contract {
             new_owner.require_auth();
 
             let proposal_key = DataKey::PlanOwnerProposal(plan_id);
-            let proposed: Address = env
-                .storage()
-                .persistent()
-                .get(&proposal_key)
-                .ok_or(Error::PendingOwnershipNotFound)?;
+            let proposed: Address =
+                load_or_err(&env, &proposal_key, Error::PendingOwnershipNotFound)?;
             if proposed != new_owner {
                 return Err(Error::NotPendingOwner);
             }
@@ -1053,10 +1116,7 @@ mod contract {
         }
 
         fn read_next_plan_id(env: &Env) -> Result<u64, Error> {
-            env.storage()
-                .instance()
-                .get(&DataKey::NextPlanId)
-                .ok_or(Error::NotInitialized)
+            load_instance_or_err(env, &DataKey::NextPlanId, Error::NotInitialized)
         }
 
         fn set_next_plan_id(env: &Env, next: u64) {
@@ -1080,6 +1140,9 @@ mod contract {
         ) -> Result<(), Error> {
             if params.token == env.current_contract_address() || &params.token == subscription {
                 return Err(Error::InvalidToken);
+            }
+            if !payflow_common::is_valid_token_address(env, &params.token) {
+                return Err(Error::InvalidAddress);
             }
             if params.amount <= 0 {
                 return Err(Error::InvalidAmount);
@@ -1131,6 +1194,7 @@ mod contract {
                 terms_uri: params.terms_uri.clone(),
                 available_until: params.available_until,
                 max_subscribers: params.max_subscribers,
+                retry_window_ledgers: params.retry_window_ledgers,
             };
 
             env.storage().persistent().set(&DataKey::Plan(id), &plan);
@@ -1174,6 +1238,7 @@ mod contract {
                 referral_bps: params.referral_bps,
                 payout,
                 max_subscribers: params.max_subscribers,
+                retry_window_ledgers: params.retry_window_ledgers,
             }
             .publish(env);
         }

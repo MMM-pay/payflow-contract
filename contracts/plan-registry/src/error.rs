@@ -61,8 +61,16 @@ pub enum Error {
     /// The next plan ID cannot be represented: the counter is at `u64::MAX`,
     /// or a batch would carry it past `u64::MAX`. No plan is written.
     PlanIdOverflow = 1024,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 1025,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 1026,
+    /// A configured token address is zero/burn or otherwise invalid (#235).
+    InvalidAddress = 1027,
     /// The plan token address is a reserved Payflow contract address.
-    InvalidToken = 1025,
+    InvalidToken = 1028,
 }
 
 impl From<Error> for ErrorCode {

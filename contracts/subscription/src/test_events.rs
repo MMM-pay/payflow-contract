@@ -248,3 +248,44 @@ fn protocol_pause_changed_layout() {
         },
     );
 }
+
+#[test]
+fn committed_revenue_event_excludes_derivable_previous_value() {
+    use soroban_sdk::xdr::{Limits, WriteXdr};
+
+    let env = Env::default();
+    let event = super::CommittedRevenueChanged {
+        plan_id: 7,
+        merchant: address(&env),
+        token: address(&env),
+        new_committed: 12_000,
+        period: 86_400,
+    };
+    let encoded = event
+        .to_xdr(&env, &address(&env))
+        .to_xdr(Limits::none())
+        .unwrap();
+    assert!(!encoded.is_empty());
+
+    let spec = super::CommittedRevenueChanged::spec_xdr();
+    assert!(!spec
+        .windows(b"old_committed".len())
+        .any(|w| w == b"old_committed"));
+    assert!(spec
+        .windows(b"new_committed".len())
+        .any(|w| w == b"new_committed"));
+}
+
+#[test]
+fn mandate_deleted_layout() {
+    let env = Env::default();
+    snapshot(
+        &env,
+        "mandate_deleted",
+        super::MandateDeleted::spec_xdr(),
+        &super::MandateDeleted {
+            mandate_id: 11,
+            subscriber: address(&env),
+        },
+    );
+}

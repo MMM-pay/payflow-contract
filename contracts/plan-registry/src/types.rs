@@ -13,7 +13,7 @@ use soroban_sdk::{contracttype, Address, String, Symbol};
 /// `payflow-shared`; this crate re-exports that definition, so no local
 /// change to the struct is required here. The subscription contract's mirror
 /// of `Plan` must be updated in lockstep with `payflow-shared`.
-pub use payflow_shared::Plan;
+pub use payflow_shared::{Plan, PlanChargeTerms};
 
 /// The mutable inputs shared by `create_plan` and `create_plans`.
 ///
@@ -50,6 +50,10 @@ pub struct PlanParams {
     pub payout: Option<Address>,
     /// Maximum number of simultaneously-open mandates; 0 means unlimited.
     pub max_subscribers: u32,
+    /// Ledgers after a charge falls due during which a failed charge may be
+    /// retried before the mandate is marked failed (#343). `None` disables the
+    /// window. Frozen into each new mandate at sign-up.
+    pub retry_window_ledgers: Option<u32>,
 }
 
 /// A merchant's self-declared profile, shown to subscribers alongside the
@@ -66,43 +70,8 @@ pub struct Profile {
     pub url: String,
 }
 
-/// Storage keys used to partition instance and persistent storage for the plan registry.
-#[contracttype]
-#[derive(Clone)]
-pub enum DataKey {
-    /// Contract administrator address.
-    Admin,
-    /// Counter storing the next sequential plan ID to be allocated.
-    NextPlanId,
-    /// Subscription contract address forbidden as a plan token.
-    SubscriptionContract,
-    /// A published plan record stored by its unique ID.
-    Plan(u64),
-    /// Number of plans a merchant has published.
-    MerchantPlanCount(Address),
-    /// The n-th plan a merchant published (0-based).
-    MerchantPlan(Address, u32),
-    /// A merchant's self-declared profile.
-    Profile(Address),
-    /// Number of plans priced in a given token.
-    TokenPlanCount(Address),
-    /// The n-th plan priced in a given token (0-based).
-    TokenPlan(Address, u32),
-    /// Position of a plan within its merchant's `MerchantPlan` index, so an
-    /// ownership transfer can remove it in constant time.
-    PlanIndex(u64),
-    /// Pending ownership proposal for a plan: the address the current owner
-    /// proposed as the new owner, awaiting their acceptance.
-    PlanOwnerProposal(u64),
-    /// Whether charging is paused for a plan (#315). Missing means not paused.
-    PlanChargesPaused(u64),
-    /// Grace window for plans opened after the setting was changed (#312).
-    /// Missing means zero.
-    PlanGracePeriod(u64),
-    /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
-    /// Append-only; the initial deployment is not recorded.
-    UpgradeHistory,
-}
+// Keep the historical types::DataKey path available to existing consumers.
+pub use crate::storage_keys::DataKey;
 
 /// A single contract upgrade record.
 #[contracttype]
