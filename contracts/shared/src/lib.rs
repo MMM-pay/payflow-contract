@@ -230,9 +230,33 @@ mod plan {
         /// Maximum number of simultaneously-open mandates the plan accepts; 0
         /// means unlimited. Frozen into the plan, checked on each new sign-up.
         pub max_subscribers: u32,
+        /// Number of ledgers after a charge falls due during which a failed
+        /// charge may be retried before the mandate is marked failed (#343).
+        /// Frozen into each mandate at sign-up. `None` keeps the historical
+        /// behaviour: a failure can be flagged as soon as the charge is due.
+        pub retry_window_ledgers: Option<u32>,
+    }
+
+    /// The slice of a plan that settling a charge needs, returned by the
+    /// registry's `plan_charge_terms` in one call. `charge` used to make two
+    /// registry calls per settlement (`plan_charges_paused`, then `get_plan`
+    /// for the committed-revenue refresh), and each one loaded the whole
+    /// `Plan` entry. `merchant` is read live, not cached by the caller,
+    /// because a plan-ownership transfer changes it.
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PlanChargeTerms {
+        /// Current owner of the plan.
+        pub merchant: Address,
+        /// SEP-41 token the plan is denominated in.
+        pub token: Address,
+        /// Billing period in seconds.
+        pub period: u64,
+        /// Whether the merchant has paused charging for the plan (#315).
+        pub charges_paused: bool,
     }
 }
-pub use plan::Plan;
+pub use plan::{Plan, PlanChargeTerms};
 
 #[cfg(test)]
 mod test {

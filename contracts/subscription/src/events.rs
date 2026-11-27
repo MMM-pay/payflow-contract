@@ -383,10 +383,100 @@ pub struct CommittedRevenueChanged {
     pub merchant: Address,
     /// Token the plan is denominated in.
     pub token: Address,
-    /// Previous committed amount per period.
-    pub old_committed: i128,
+    // The previous value is the last new_committed for this plan, or zero
+    // before the first event; do not duplicate it in every event.
     /// New committed amount per period.
     pub new_committed: i128,
     /// Billing period in seconds.
     pub period: u64,
+}
+
+/// Emitted when a subscriber deletes a cancelled or completed mandate,
+/// removing its record from storage and permanently tombstoning its ID (#368).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateDeleted {
+    /// ID of the deleted and tombstoned mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account of the subscriber who deleted the mandate.
+    #[topic]
+    pub subscriber: Address,
+}
+
+/// Emitted when a merchant attaches a discount to a mandate (#37).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscountAttached {
+    /// ID of the mandate receiving the discount.
+    #[topic]
+    pub mandate_id: u64,
+    /// Merchant who attached the discount.
+    #[topic]
+    pub merchant: Address,
+    /// Discount in basis points of the mandate's amount (e.g. 1000 = 10% off).
+    pub discount_bps: u32,
+    /// Number of charges for which the discount applies.
+    pub discount_charges: u32,
+}
+
+/// Emitted when a mandate transitions into the `PastDue` state (#34).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkedPastDue {
+    /// ID of the mandate that is past due.
+    #[topic]
+    pub mandate_id: u64,
+    /// Merchant owed the missed charge.
+    #[topic]
+    pub merchant: Address,
+    /// Subscriber whose vault balance was insufficient.
+    #[topic]
+    pub subscriber: Address,
+    /// Unix seconds when the mandate was marked past due.
+    pub past_due_since: u64,
+}
+
+/// Emitted when a past-due mandate is cancelled after the grace period (#34).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PastDueExpired {
+    /// ID of the cancelled mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Subscriber whose mandate was cancelled.
+    #[topic]
+    pub subscriber: Address,
+    /// Unix seconds when the mandate was first marked past due.
+    pub past_due_since: u64,
+}
+
+/// Emitted when a merchant reports metered usage for a mandate (#35).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageReported {
+    /// ID of the mandate for which usage was reported.
+    #[topic]
+    pub mandate_id: u64,
+    /// Merchant reporting the usage.
+    #[topic]
+    pub merchant: Address,
+    /// Amount of usage reported for the current billing period.
+    pub amount: i128,
+}
+
+/// Emitted when a referral share is paid out to a referrer on a successful charge (#364).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferralPaid {
+    /// ID of the charged mandate.
+    #[topic]
+    pub mandate_id: u64,
+    /// Account receiving the referral reward.
+    #[topic]
+    pub referrer: Address,
+    /// SEP-41 token the reward was paid in.
+    pub token: Address,
+    /// Amount paid to the referrer out of the merchant share.
+    pub amount: i128,
 }

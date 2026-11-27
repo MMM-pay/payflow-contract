@@ -23,7 +23,7 @@ pub struct ChargeResult {
 /// A field added to or removed from the registry's plan therefore changes the
 /// type this contract decodes, and the subscription build fails instead of
 /// silently failing to decode `get_plan` at runtime.
-pub use payflow_shared::Plan;
+pub use payflow_shared::{Plan, PlanChargeTerms};
 
 /// Lifecycle status of a subscription mandate.
 #[contracttype]
@@ -37,6 +37,9 @@ pub enum MandateStatus {
     Cancelled,
     /// Reached `max_charges` or `max_total`. Irreversible.
     Completed,
+    /// Due but vault balance insufficient; pending cancellation (#34).
+    /// A successful `charge` while in this state restores `Active`.
+    PastDue,
 }
 
 /// A standing authorization from a subscriber to a merchant, bounded in
@@ -111,6 +114,19 @@ pub struct Mandate {
     pub referral_bps: u32,
     /// Current lifecycle state of the mandate.
     pub status: MandateStatus,
+    /// Discount on the mandate's `amount` in basis points, set by the merchant.
+    /// A `discount_bps` of 1_000 means the subscriber pays 90% of the normal
+    /// price. 0 means no discount is active. Discounts can only lower the price.
+    pub discount_bps: u32,
+    /// Number of remaining charges for which the discount still applies. After
+    /// each charged period the counter decrements; at 0 the full `amount` is
+    /// restored. 0 means no discount is active.
+    pub discount_charges: u32,
+    /// Maximum metered amount per billing period (#35). 0 means this is a
+    /// standard (non-metered) mandate that always charges the fixed `amount`.
+    /// When non-zero, the merchant reports actual usage each period via
+    /// `report_usage`, and the charge takes that reported amount instead.
+    pub max_amount: i128,
 }
 
 /// Read-only preview of what `charge` would pay right now.
@@ -131,6 +147,13 @@ pub struct ChargeQuote {
     /// True when `charge` would pass its status, cap and timing checks right
     /// now. Vault balance is not considered, matching `is_due`.
     pub chargeable: bool,
+    /// Ledger-count retry window frozen into the mandate at sign-up (#343).
+    /// `None` means a failed charge may be flagged as soon as it is due.
+    pub retry_window_ledgers: Option<u32>,
+    /// Unix seconds at which the retry window closes, computed as `due_at`
+    /// plus the frozen window. Equals `due_at` when there is no window, so a
+    /// client can always compare one deadline.
+    pub retry_at: u64,
 }
 
 /// Exact settlement recipients and amounts for a prospective charge.
@@ -223,58 +246,5 @@ pub struct UpgradeRecord {
     pub wasm_hash: soroban_sdk::BytesN<32>,
 }
 
-/// Storage keys used by the subscription contract.
-#[contracttype]
-#[derive(Clone)]
-pub enum DataKey {
-    /// Admin address authorized to change configuration.
-    Admin,
-    /// Address of the plan registry contract.
-    PlanRegistry,
-    /// Address of the vault contract.
-    Vault,
-    /// Current protocol fee rate in basis points.
-    FeeBps,
-    /// Recipient address for protocol fees.
-    FeeTo,
-    /// Counter for generating sequential mandate IDs.
-    NextMandateId,
-    /// Mandate stored by its unique mandate ID.
-    Mandate(u64),
-    /// Number of mandates a subscriber has opened.
-    SubscriberMandateCount(Address),
-    /// The mandate at this subscriber's current index position (0-based).
-    SubscriberMandate(Address, u32),
-    /// Proposed new owner for a mandate awaiting acceptance.
-    PendingMandateOwner(u64),
-    /// Subscriber index position captured with the pending ownership proposal.
-    PendingSubscriberPosition(u64),
-    /// Number of mandates opened against a merchant's plans.
-    MerchantMandateCount(Address),
-    /// The n-th mandate opened against a merchant's plans (0-based).
-    MerchantMandate(Address, u32),
-    /// Number of mandates opened against a plan.
-    PlanMandateCount(u64),
-    /// The n-th mandate opened against a plan (0-based).
-    PlanMandate(u64, u32),
-    /// Count of simultaneously-open mandates against a plan, checked against
-    /// the plan's `max_subscribers` seat cap.
-    PlanSubscriberCount(u64),
-    /// Committed revenue per period for a plan (sum of active mandates' per-period amounts).
-    PlanCommittedRevenue(u64),
-    /// Ledger timestamp at which the mandate's current run of failed charges
-    /// was first flagged by `flag_failed_charge` (#296). Cleared by the next
-    /// successful `charge`, so the following failure notifies again.
-    FirstFailedCharge(u64),
-    /// Grace window in seconds frozen into a mandate at sign-up (#312).
-    /// Missing means zero.
-    MandateGracePeriod(u64),
-    /// Ordered list of contract upgrades: (version, ledger, `wasm_hash`).
-    /// Append-only; the initial deployment is not recorded.
-    UpgradeHistory,
-    /// Protocol-wide pause switch set by the admin (#285). While `true`, new
-    /// subscriptions, charges and plan upgrades are refused; reads,
-    /// cancellations, refunds and vault withdrawals keep working. Missing
-    /// means `false`.
-    ProtocolPaused,
-}
+// Keep the historical types::DataKey path available to existing consumers.
+pub use crate::storage_keys::DataKey;

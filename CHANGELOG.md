@@ -7,8 +7,33 @@ change the contract interface.
 
 ## Unreleased
 
+### Changed
+
+- **#271: lean committed-revenue events.** Omit the previous committed amount
+  from `CommittedRevenueChanged`; indexers derive it from their preceding
+  projection. No contract state transitions or transfer amounts change.
+  Event decoders must regenerate bindings; see `docs/event-payload-audit-271.md`.
+
 ### Added
 
+- **CI: contract interface spec.** Each contract's spec JSON is generated in
+  CI and committed under `spec/`. A PR that changes a contract interface
+  without updating `spec/` fails CI, and the spec diff is shown in the job
+  summary. Interface-changing PRs are labelled `interface-change`. Follow-up
+  issues are needed in `payflow-backend`, `payflow-frontend` and
+  `payflow-docs` to consume the published spec.
+- **#237: upgrade storage-layout coverage (all contracts).** New tests write
+  every persistent and instance value (plans and indexes, vault balances, caps,
+  allowlist, spend limits, reserves and operation windows, mandates, indexes,
+  grace and failed-charge keys, and pending admin proposals), upgrade the code,
+  and assert every value still decodes with the current types. Each suite also
+  asserts a rejected upgrade leaves storage and the upgrade history untouched.
+- **#247: TTL refresh on access for hot mandate and plan keys.** Reading a
+  mandate (`subscription`) or plan (`plan-registry`) now extends its persistent
+  TTL when it is within a day of expiry, so entries that are used often but
+  rarely written cannot expire mid-life. Vault mandate reserves are refreshed
+  the same way. A fresh entry is untouched, so views remain side-effect free
+  and no events or interface changes are involved.
 - **#293: `subscription:simulate_charge(keeper, mandate_id)`.** A read-only
   preview returns the exact token, subscriber, payout, fee, keeper-tip and
   referral recipients and amounts, plus whether timing, caps, mandate status
@@ -18,6 +43,13 @@ change the contract interface.
   records CPU instructions and memory bytes for successful charge, missing
   keeper authorization, vault failure and charge simulation. CI fails when a
   measurement exceeds its baseline by more than 5%.
+- **#343: feat(subscription): configurable charge retry window per plan.** Plans
+  now support a `retry_window_ledgers` field that extends the charge window
+  before a mandate is marked failed. A plan can set ledger-count window that
+  is frozen into each mandate at sign-up, so later plan edits cannot shorten
+  what an open mandate was promised. The window gates `flag_failed_charge` so
+  failures inside the window are refused with `Error::RetryWindowActive`, and
+  `quote_charge` exposes `retry_window_ledgers` and `retry_at` in its output.
 - **#292: contract event contribution guide.** New
   [`docs/adding-events.md`](docs/adding-events.md) documents defining and
   emitting typed events, snapshotting their layouts, updating event references
@@ -159,6 +191,12 @@ change the contract interface.
 
 ### Changed
 
+- **#238: two-step admin handover (all contracts).** `update_admin` is replaced
+  by `propose_admin(new_admin)` followed by `accept_admin(new_admin)`, so the
+  role moves only after the proposed address accepts. New errors
+  `PendingAdminNotFound` and `NotPendingAdmin` are appended per contract, and
+  the pending address is stored under `DataKey::PendingAdmin`. See
+  [`SECURITY.md`](SECURITY.md) for the client-visible change.
 - **#291: subscription module organization.** Charge splitting and merchant
   proceeds calculations, mandate lifecycle/grace rules, and due-state
   calculations now live in focused `charge`, `lifecycle` and `views` modules.

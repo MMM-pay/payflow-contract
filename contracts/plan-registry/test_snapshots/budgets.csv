@@ -1,0 +1,6 @@
+call,cpu_instructions,memory_bytes,write_entries,write_bytes
+create_plan,335094,135952,8,1664
+create_plans_batch_10,4328534,1209389,44,11416
+get_plan,91903,53359,0,0
+merchant_plans_page_10,335101,133452,0,0
+set_plan_active,197403,80261,2,756

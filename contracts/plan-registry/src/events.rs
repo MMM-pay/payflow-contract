@@ -41,6 +41,9 @@ pub struct PlanCreated {
     /// Seat cap frozen into the plan; 0 means unlimited. Carried in the event
     /// so indexers need no follow-up contract read.
     pub max_subscribers: u32,
+    /// Ledgers after a charge falls due during which a failure may be retried
+    /// before it is flagged (#343). `None` means the plan has no retry window.
+    pub retry_window_ledgers: Option<u32>,
 }
 
 /// Emitted once after a successful `create_plans` batch. Individual

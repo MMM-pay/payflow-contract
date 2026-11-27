@@ -1,5 +1,5 @@
 # Contributing to Payflow Contracts
-
+test
 # # Before you start
 
 Comment on the issue you want to take so two people do not build the same thing.
@@ -55,8 +55,10 @@ opens an issue automatically when a new advisory affects the dependency tree.
 - **No floating point.** All proportional math is integer basis points against
   `BPS_DENOMINATOR` (10 000).
 - **No panics for control flow.** Use `Result<T, Error>` and add a variant.
-- **Storage.** Config goes in `instance` storage; per-entity records go in
-  `persistent`. Every persistent write must extend TTL.
+ - **Storage.** Config goes in `instance` storage; per-entity records go in
+   `persistent`. Every persistent write must extend TTL, and reads of hot
+   mandate/plan/reserve keys must extend it too (#247). Use the contract's
+   central `read_*` helper so the bump cannot be forgotten.
 - **Events.** Use the `#[contractevent]` macro, never the deprecated
   `env.events().publish` tuple form. Indexers depend on the typed shape.
   Follow the [event contribution guide](docs/adding-events.md) when adding or
@@ -95,41 +97,29 @@ not `test_charge_3`.
 Test both directions: the happy path and the specific error variant returned on
 the unhappy path, using `try_*` client methods.
 
-### Per-contract coverage
+### Resource budgets
 
-`scripts/check_coverage.py` is the local equivalent of the `coverage` CI job.
-It measures `plan-registry`, `subscription` and `vault` **separately** with
-`cargo llvm-cov -p <crate> --lib --branch`, writes one HTML report per crate to
-`target/llvm-cov/html/<crate>/`, prints a summary table and exits non-zero if a
-crate is below its floor. The pinned stable toolchain is used throughout; the
-script sets `RUSTC_BOOTSTRAP=1` only to unlock LLVM's branch counters, not any
-unstable language feature. `src/test*.rs` modules are excluded from the
-percentages because they are harness code.
+Each contract commits per-call resource snapshots under
+`contracts/<contract>/test_snapshots/budgets.csv` for representative entry
+points: plan creation and reads in `plan-registry`, deposits, withdrawals,
+debits and spend-limit writes in `vault`, and subscription plus charge paths
+(including missing authorization and vault failures) in `subscription`.
 
-```bash
-python3 scripts/check_coverage.py
-# quick, single-crate inspection without the gate:
-cargo llvm-cov -p payflow-vault --lib --branch \
-  --ignore-filename-regex '/src/(test|test_errors|test_events)\.rs$'
-```
+Every row records the call's CPU instructions, memory bytes and ledger storage
+footprint (write entries and write bytes) from `env.cost_estimate()`. The tests
+print the measurements as a table, and the `resource-budgets` CI job runs
+`bash scripts/check_resource_budgets.sh` to put that table in the job log and the
+workflow step summary. CI fails when any metric grows by more than 5% beyond
+its committed snapshot.
 
-Explicit line, branch, region and function floors live in `coverage.toml`.
-Branch counters come from LLVM and can vary slightly with compiler versions;
-re-baseline all three crates in the same PR that bumps the toolchain. Raising a
-floor is always welcome. Lowering one must be justified in the PR description —
-normally by adding tests instead. `test-token`, `shared` and `common` are
-support/fixture crates and are intentionally not gated.
-The subscription suite also commits resource-budget snapshots for representative
-charge calls, including missing authorization and vault failures. CI allows at
-most a 5% increase in CPU instructions or memory bytes. To intentionally
-refresh the reviewed baselines, run:
+To intentionally refresh the reviewed baselines, run:
 
 ```bash
-UPDATE_RESOURCE_BUDGETS=1 cargo test -p payflow-subscription subscription_call_budgets_stay_within_committed_snapshots
+UPDATE_RESOURCE_BUDGETS=1 cargo test --all call_budgets
 ```
 
-Review `contracts/subscription/test_snapshots/budgets.csv` before committing a
-refreshed snapshot.
+Review every changed `contracts/*/test_snapshots/budgets.csv` in the diff before
+committing it.
 
 ### Event snapshots
 

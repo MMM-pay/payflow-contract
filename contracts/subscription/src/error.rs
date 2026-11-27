@@ -111,6 +111,51 @@ pub enum Error {
     /// and plan upgrades are refused until it is resumed; reads,
     /// cancellations, refunds and vault withdrawals are unaffected.
     ProtocolPaused = 2039,
+    /// A refund transfer did not deliver exactly the recorded refund amount,
+    /// so the token is unsafe for exact-amount accounting (for example a
+    /// fee-on-transfer token). The refund is rolled back.
+    UnexpectedTransferAmount = 2040,
+    /// `accept_admin` was called with no pending admin handover, or after the
+    /// proposal was already accepted (#238).
+    PendingAdminNotFound = 2041,
+    /// The address accepting the admin role is not the one the current admin
+    /// proposed in `propose_admin` (#238).
+    NotPendingAdmin = 2042,
+    /// The requested mandate ID has been tombstoned after deletion and cannot
+    /// be reused (#368).
+    MandateIdTombstoned = 2043,
+    /// The requested mandate ID is already assigned to an existing mandate (#368).
+    MandateAlreadyExists = 2044,
+    /// The requested mandate ID is invalid (mandate IDs start at 1) (#368).
+    InvalidMandateId = 2045,
+    /// An active or paused mandate cannot be deleted until it is cancelled or
+    /// completed (#368).
+    MandateStillActive = 2046,
+    /// A configured address is the contract itself or otherwise invalid for
+    /// this role (#282).
+    InvalidAddress = 2047,
+    /// `flag_failed_charge` was called inside the plan's frozen retry window
+    /// (#343). The charge may still succeed, so no failure is recorded until
+    /// the window closes.
+    RetryWindowActive = 2048,
+    /// A `discount_bps` of 10_000 or greater would make the charge amount zero
+    /// or negative, which is not a valid price (#37).
+    InvalidDiscount = 2049,
+    /// A mandate has entered the `PastDue` lifecycle state: it has missed a
+    /// charge and the subscriber's vault balance is too low to settle it (#34).
+    MandatePastDue = 2050,
+    /// `mark_past_due` was called on a mandate that is not currently due, or
+    /// whose vault balance is sufficient to cover the charge (#34).
+    NotPastDue = 2051,
+    /// A mandate was submitted for `report_usage` but it does not belong to
+    /// the calling merchant (#35).
+    UsageNotForMerchant = 2052,
+    /// `report_usage` was called with an amount that exceeds the mandate's
+    /// `max_amount` ceiling set at subscription time (#35).
+    UsageExceedsMaxAmount = 2053,
+    /// `report_usage` was called more than once in the same billing period for
+    /// this mandate, which is not allowed (#35).
+    UsageAlreadyReported = 2054,
 }
 
 impl From<Error> for ErrorCode {
