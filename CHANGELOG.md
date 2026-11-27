@@ -540,9 +540,30 @@ Redeployed to testnet; the ids are in [`deployments/testnet.env`](deployments/te
   authorization from both owners. The proposal includes the subscriber-index
   position; acceptance updates the subscriber lists in constant time and emits
   `MandateTransferred`. Merchant indexes and frozen mandate terms are unchanged.
+  Acceptance also emits the `MandateUpdated` snapshot event, consistent with
+  every other mandate state change.
 - Interface follow-up: `payflow-backend`, `payflow-frontend` and
   `payflow-docs` need to add the transfer workflow and consume
   `MandateTransferred`; track those downstream issues in the implementation PR.
+  Transfer-specific security properties (single-use proposals, un-migrated
+  vault reserves, refund recipient) are now recorded in `SECURITY.md`.
+- **#268: high-volume `due_mandates` paging tests.** Deterministic tests open
+  hundreds of simultaneously due mandates and assert exact membership across
+  full and partial pages, no duplicates or skips, exclusion of non-due
+  mandates, page-size capping, extreme/invalid pagination inputs, unsigned
+  reads and the per-page resource footprint.
+- **#269: input-size limits documented and regression-tested.** All
+  merchant-supplied `String` inputs are bounded at their entry point (plan name
+  64, description 280, terms URI 200, profile name 64, profile URL 256 bytes).
+  New tests cover the exact limit and the first invalid byte for the batch
+  (`create_plans`) and rename (`set_plan_name`) paths, and `SECURITY.md` now
+  lists the externally visible rejections and typed error codes.
+- **#257: per-contract coverage gate.** Line and branch/region coverage is now
+  measured and enforced independently for `plan-registry`, `subscription` and
+  `vault`, with explicit floors in `coverage.toml`, a local checker
+  (`scripts/check_coverage.py`) and per-crate HTML reports in CI. See
+  `CONTRIBUTING.md` for the local workflow and threshold policy.
+
 
 ### Security
 

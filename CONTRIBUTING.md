@@ -15,6 +15,13 @@ cargo test --all
 
 The Minimum Supported Rust Version (MSRV) for these contracts is **1.91.0**, pinned in `Cargo.toml` (`rust-version = "1.91.0"`) and verified in CI.
 
+For the coverage gate, install two more things once:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+```
+
 You will also want the Stellar CLI (27+) to build wasm and deploy:
 
 ```bash
@@ -29,11 +36,12 @@ A PR cannot merge unless all CI jobs pass:
 |---|---|
 | `fmt` | `cargo fmt --all -- --check` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
-| `test` | `cargo test --all` |
+| `test` | `cargo test --all` (plus `scripts/check_auth_tests.sh`) |
+| `coverage` | `python3 scripts/check_coverage.py` |
 | `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
-Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
+Run all of these locally before pushing. `RUSTFLAGS="-D warnings"` is set
 globally in CI, so any new warning will fail the build — fix warnings
 before pushing.
 

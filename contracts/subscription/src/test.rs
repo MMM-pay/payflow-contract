@@ -1244,6 +1244,175 @@ fn mandate_owner_transfer_rejects_invalid_proposals_and_positions() {
 }
 
 #[test]
+fn mandate_transfer_keeps_merchant_control_and_lets_the_new_owner_cancel() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let transferred = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+    let untouched = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &transferred, &new_subscriber, &0);
+    w.sub.accept_mandate_owner(&new_subscriber, &transferred);
+
+    // Future charges debit the new subscriber's vault; the merchant is paid
+    // and the old subscriber's balance is untouched.
+    let merchant_before = w.token_client.balance(&w.merchant);
+    w.sub.charge(&w.keeper, &transferred);
+    assert_eq!(w.vault.balance(&old_subscriber, &w.token), 100_000);
+    assert_eq!(w.vault.balance(&new_subscriber, &w.token), 100_000 - PRICE);
+    assert!(w.token_client.balance(&w.merchant) > merchant_before);
+
+    // Merchant-only operations keep working after the ownership change.
+    w.sub.refund(&w.merchant, &transferred, &1_000);
+    assert_eq!(w.sub.get_mandate(&transferred).refunded, 1_000);
+    w.sub.end_mandate(&w.merchant, &untouched);
+    assert_eq!(
+        w.sub.get_mandate(&untouched).status,
+        MandateStatus::Cancelled
+    );
+
+    // The old owner can no longer act; the new owner can cancel under the
+    // normal rules. `cancel` keeps the subscriber index entry by design.
+    assert_eq!(
+        w.sub.try_cancel(&old_subscriber, &transferred),
+        Err(Ok(Error::NotSubscriber))
+    );
+    w.sub.cancel(&new_subscriber, &transferred);
+    assert_eq!(
+        w.sub.get_mandate(&transferred).status,
+        MandateStatus::Cancelled
+    );
+    // `untouched` still belongs to the old subscriber; only one mandate moved.
+    assert_eq!(w.sub.subscriber_mandate_count(&old_subscriber), 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&new_subscriber), 1);
+    assert_eq!(
+        w.sub.merchant_mandates(&w.merchant, &0, &50),
+        soroban_sdk::vec![&w.env, transferred, untouched]
+    );
+}
+
+#[test]
+fn mandate_transfer_preserves_terms_history_and_event_payload() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &id);
+    let before = w.sub.get_mandate(&id);
+
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &id, &new_subscriber, &0);
+    w.sub.accept_mandate_owner(&new_subscriber, &id);
+
+    // Capture the event before the next read: the test host reports only the
+    // event log of the most recent top-level invocation.
+    let last = w.env.events().all().events().last().cloned().unwrap();
+    let ContractEventBody::V0(body) = &last.body;
+    let expected_name: soroban_sdk::xdr::StringM<32> = "mandate_transferred".try_into().unwrap();
+    assert_eq!(body.topics[0], ScVal::Symbol(ScSymbol(expected_name)));
+    assert_eq!(body.topics[1], ScVal::U64(id));
+    assert_eq!(Address::from_val(&w.env, &body.topics[2]), old_subscriber);
+    // `old_subscriber` is a topic; `new_subscriber` is in the event data.
+    assert_eq!(
+        event_field_address(&w.env, "mandate_transferred", "new_subscriber"),
+        Some(new_subscriber.clone())
+    );
+
+    // Only the subscriber field may change: not the frozen price, schedule,
+    // caps, fee split, charge history or lifecycle state.
+    let mut expected = before.clone();
+    expected.subscriber = new_subscriber.clone();
+    assert_eq!(w.sub.get_mandate(&id), expected);
+}
+
+#[test]
+fn mandate_transfer_is_single_use_and_invalid_states_leave_state_intact() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let first_candidate = w.subscriber(100_000);
+    let final_owner = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+    let before = w.sub.get_mandate(&id);
+
+    assert_eq!(
+        w.sub
+            .try_propose_mandate_owner(&old_subscriber, &id, &old_subscriber, &0),
+        Err(Ok(Error::SameSubscriber))
+    );
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &id, &first_candidate, &0);
+    // A fresh proposal supersedes the old one; the stale candidate cannot accept.
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &id, &final_owner, &0);
+    assert_eq!(
+        w.sub.try_accept_mandate_owner(&first_candidate, &id),
+        Err(Ok(Error::NotProposedOwner))
+    );
+    w.sub.accept_mandate_owner(&final_owner, &id);
+    assert_eq!(
+        w.sub.try_accept_mandate_owner(&final_owner, &id),
+        Err(Ok(Error::NoPendingTransfer))
+    );
+
+    let mut expected = before.clone();
+    expected.subscriber = final_owner.clone();
+    assert_eq!(w.sub.get_mandate(&id), expected);
+    assert_eq!(w.sub.subscriber_mandate_count(&old_subscriber), 0);
+    assert_eq!(w.sub.subscriber_mandate_count(&final_owner), 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&first_candidate), 0);
+
+    // Completed mandates cannot be proposed away, and stay untouched.
+    let capped = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &1, &0, &None::<Address>);
+    w.sub.charge(&w.keeper, &capped);
+    assert_eq!(
+        w.sub
+            .try_propose_mandate_owner(&old_subscriber, &capped, &final_owner, &0),
+        Err(Ok(Error::MandateNotActive))
+    );
+    assert_eq!(w.sub.get_mandate(&capped).status, MandateStatus::Completed);
+    assert_eq!(w.sub.get_mandate(&capped).subscriber, old_subscriber);
+}
+
+#[test]
+fn pending_transfer_on_a_cancelled_mandate_cannot_be_accepted() {
+    let w = world();
+    let plan_id = w.plan();
+    let old_subscriber = w.subscriber(100_000);
+    let new_subscriber = w.subscriber(100_000);
+    let id = w
+        .sub
+        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+
+    w.sub
+        .propose_mandate_owner(&old_subscriber, &id, &new_subscriber, &0);
+    w.sub.cancel(&old_subscriber, &id);
+    assert_eq!(
+        w.sub.try_accept_mandate_owner(&new_subscriber, &id),
+        Err(Ok(Error::MandateNotActive))
+    );
+
+    let mandate = w.sub.get_mandate(&id);
+    assert_eq!(mandate.subscriber, old_subscriber);
+    assert_eq!(mandate.status, MandateStatus::Cancelled);
+    assert_eq!(w.sub.subscriber_mandate_count(&old_subscriber), 1);
+    assert_eq!(w.sub.subscriber_mandate_count(&new_subscriber), 0);
+}
+
+#[test]
 fn pause_suspends_billing_and_resume_restores_it() {
     let w = world();
     let plan_id = w.plan();
@@ -4211,6 +4380,25 @@ fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
     assert_eq!(snap7, w.sub.get_mandate(&id3));
     assert_eq!(snap7.charges_made, 1);
     assert_eq!(snap7.status, MandateStatus::Completed);
+
+    // 11. Ownership transfer (#68) changes the subscriber field, so the
+    // snapshot contract covers it as well.
+    let second_owner = Address::generate(&w.env);
+    let id4 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let position = u32::try_from(
+        w.sub
+            .subscriber_mandates(&user, &0, &50)
+            .iter()
+            .position(|value| value == id4)
+            .unwrap(),
+    )
+    .unwrap();
+    w.sub
+        .propose_mandate_owner(&user, &id4, &second_owner, &position);
+    w.sub.accept_mandate_owner(&second_owner, &id4);
+    let snap8 = find_latest_snapshot(&w.env, id4).expect("MandateUpdated emitted on transfer");
+    assert_eq!(snap8, w.sub.get_mandate(&id4));
+    assert_eq!(snap8.subscriber, second_owner);
 }
 
 #[test]

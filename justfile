@@ -16,6 +16,9 @@ test:
     cargo test --all
     ./scripts/check_auth_tests.sh
 
+coverage:
+    python3 scripts/check_coverage.py
+
 build:
     stellar contract build
 

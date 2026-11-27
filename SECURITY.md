@@ -164,6 +164,31 @@ Regression tests: `charge_reports_schedule_overflow_when_next_due_date_exceeds_u
 `charge_succeeds_at_the_last_representable_due_date` and
 `huge_period_plan_overflows_on_charge_not_on_subscribe`.
 
+### Merchant-supplied strings are length-bounded (#269)
+
+The plan registry rejects oversized merchant strings at every entry point that
+accepts them: `create_plan`, `create_plans` (each `PlanParams`), `set_plan_name`
+and `set_profile`. Limits count **bytes**, not characters, so a multibyte
+character consumes several bytes; a value whose byte length is exactly at the
+limit is accepted and the first byte beyond it is rejected.
+
+| Field | Limit (bytes) | Typed error when too long |
+| --- | ---: | --- |
+| plan name (`create_plan`, `create_plans`) | 64 | `NameTooLong` (1007) |
+| plan name (`set_plan_name`) | 64 | `PlanNameTooLong` (1016) |
+| plan description (`create_plan`, `create_plans`) | 280 | `DescriptionTooLong` (1015) |
+| plan terms URI (`create_plan`, `create_plans`) | 200 | `UriTooLong` (1017) |
+| merchant profile name (`set_profile`) | 64 | `ProfileNameTooLong` (1009) |
+| merchant profile URL (`set_profile`) | 256 | `ProfileUrlTooLong` (1010) |
+
+Validation happens before any write or event, so an oversized value leaves
+storage and event history untouched; in `create_plans` the whole batch fails.
+This is an externally visible behaviour change: clients that previously stored
+longer display names, descriptions, links or profile URLs must shorten them
+before using those calls. There is no free-form cancellation "reason" or
+"reference" string in the public API: `reason` is a closed `u32` code set
+(`InvalidCancelReason`, 2028) and `referrer` is an `Address`.
+
 ### Vault bounds deposit/withdraw cycling (#314)
 
 `vault:deposit`, `deposit_for`, `withdraw`, `withdraw_to` and `withdraw_all` now share a
