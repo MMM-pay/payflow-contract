@@ -38,7 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
       - name: Check auth test coverage
-        run: bash ./scripts/check_auth_tests.sh
+        run: ./scripts/check_auth_tests.sh
 
   resource-budgets:
     name: resource-budgets
